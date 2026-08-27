@@ -51,15 +51,19 @@ build_one() {
     [[ -f LICENSE ]] && cp LICENSE "${out_dir}/LICENSE"
 
     # 打包 | Package (使用子 shell 避免 cd 污染当前目录)
-    local archive
+    # archive 名需在子 shell 外确定：local 声明未赋值时 set -u 下引用会报 unbound variable
     local dirname="${APP_NAME}-${VERSION}-${os}-${arch}"
+    local archive
+    if [[ "$os" == "windows" ]]; then
+        archive="${dirname}.zip"
+    else
+        archive="${dirname}.tar.gz"
+    fi
     (
         cd "$OUTPUT_DIR"
         if [[ "$os" == "windows" ]]; then
-            archive="${dirname}.zip"
             zip -qr "$archive" "$dirname"
         else
-            archive="${dirname}.tar.gz"
             tar -czf "$archive" "$dirname"
         fi
     )
