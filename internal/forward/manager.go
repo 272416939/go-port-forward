@@ -10,6 +10,7 @@ import (
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
+	"go-port-forward/internal/raksniff"
 	"go-port-forward/internal/storage"
 	"go-port-forward/pkg/pool"
 
@@ -40,6 +41,7 @@ type Manager struct {
 	statuses        map[string]models.RuleStatus
 	statusChangedAt map[string]time.Time
 	cfg             config.ForwardConfig
+	svc             *forwardServices // ACL/嗅探/玩家/日志 旁路服务集合
 	opsMu           sync.Mutex
 	mu              sync.RWMutex
 }
@@ -69,6 +71,11 @@ func NewManager(store storage.Store, cfg config.ForwardConfig) (*Manager, error)
 		statusChangedAt: make(map[string]time.Time),
 	}
 
+	// 旁路服务：访问控制 / 玩家嗅探 / 连接日志（任何一部分失败都不阻断启动）
+	if err := m.initServices(); err != nil {
+		return nil, err
+	}
+
 	// Start all enabled rules persisted from a previous run.
 	rules, err := store.ListRules()
 	if err != nil {
@@ -88,6 +95,141 @@ func NewManager(store storage.Store, cfg config.ForwardConfig) (*Manager, error)
 		}
 	}
 	return m, nil
+}
+
+// initServices loads ACL / player bans from storage and builds the shared
+// bypass services handed to every forwarder.
+func (m *Manager) initServices() error {
+	maxLog := m.cfg.ConnLogMaxEntries
+	if maxLog <= 0 {
+		maxLog = 2000
+	}
+
+	entries, err := m.store.ListACLEntries()
+	if err != nil {
+		return fmt.Errorf("加载访问控制名单失败 | failed to load ACL: %w", err)
+	}
+	guard := &ACLGuard{}
+	guard.Reload(entries)
+
+	bans, err := m.store.ListPlayerBans()
+	if err != nil {
+		return fmt.Errorf("加载玩家封禁名单失败 | failed to load player bans: %w", err)
+	}
+	banGuard := &BanGuard{}
+	banGuard.Reload(bans)
+
+	svc := &forwardServices{
+		guard:   guard,
+		bans:    banGuard,
+		players: newPlayerRegistry(),
+		logs:    newConnLogger(m.store, maxLog),
+	}
+	if m.cfg.BedrockSniff {
+		svc.sniff = raksniff.NewController()
+	}
+	m.svc = svc
+	return nil
+}
+
+// --- ACL / bans / logs / players 公共接口（供 Web 层调用）---
+
+// ListACLEntries returns every IP access-control entry.
+func (m *Manager) ListACLEntries() ([]*models.ACLEntry, error) {
+	return m.store.ListACLEntries()
+}
+
+// AddACLEntry validates, persists and applies an IP access-control entry.
+func (m *Manager) AddACLEntry(req *models.CreateACLRequest) (*models.ACLEntry, error) {
+	if req == nil {
+		return nil, fmt.Errorf("%w: 请求不能为空 | request is required", ErrInvalidRule)
+	}
+	entry, err := models.NormalizeAndValidateACL(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRule, err)
+	}
+	if entry.RuleID != "" {
+		m.mu.RLock()
+		_, ok := m.rules[entry.RuleID]
+		m.mu.RUnlock()
+		if !ok {
+			return nil, fmt.Errorf("%w: 规则不存在 %s | rule not found: %s", ErrInvalidRule, entry.RuleID, entry.RuleID)
+		}
+	}
+	entry.ID = uuid.NewString()
+	entry.CreatedAt = time.Now()
+	if err := m.store.SaveACLEntry(entry); err != nil {
+		return nil, err
+	}
+	m.reloadACL()
+	return entry, nil
+}
+
+// DeleteACLEntry removes an entry and re-applies the list live.
+func (m *Manager) DeleteACLEntry(id string) error {
+	if err := m.store.DeleteACLEntry(id); err != nil {
+		return err
+	}
+	m.reloadACL()
+	return nil
+}
+
+// ListPlayerBans returns every banned player entry.
+func (m *Manager) ListPlayerBans() ([]*models.PlayerBan, error) {
+	return m.store.ListPlayerBans()
+}
+
+// AddPlayerBan validates, persists and applies a player ban.
+func (m *Manager) AddPlayerBan(req *models.CreatePlayerBanRequest) (*models.PlayerBan, error) {
+	if req == nil {
+		return nil, fmt.Errorf("%w: 请求不能为空 | request is required", ErrInvalidRule)
+	}
+	ban, err := models.NormalizeAndValidatePlayerBan(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRule, err)
+	}
+	ban.ID = uuid.NewString()
+	ban.CreatedAt = time.Now()
+	if err := m.store.SavePlayerBan(ban); err != nil {
+		return nil, err
+	}
+	m.reloadBans()
+	return ban, nil
+}
+
+// DeletePlayerBan removes a player ban and re-applies the list live.
+func (m *Manager) DeletePlayerBan(id string) error {
+	if err := m.store.DeletePlayerBan(id); err != nil {
+		return err
+	}
+	m.reloadBans()
+	return nil
+}
+
+// ConnLogs returns up to limit most recent connection events.
+func (m *Manager) ConnLogs(limit int) ([]*models.ConnLogEntry, error) {
+	return m.store.ListConnLogs(limit)
+}
+
+// OnlinePlayers snapshots the currently identified Bedrock sessions.
+func (m *Manager) OnlinePlayers() []models.OnlinePlayer {
+	return m.svc.players.snapshot()
+}
+
+func (m *Manager) reloadACL() {
+	if entries, err := m.store.ListACLEntries(); err == nil {
+		m.svc.guard.Reload(entries)
+	} else {
+		logger.S.Warnw("ACL reload failed", "err", err)
+	}
+}
+
+func (m *Manager) reloadBans() {
+	if bans, err := m.store.ListPlayerBans(); err == nil {
+		m.svc.bans.Reload(bans)
+	} else {
+		logger.S.Warnw("player ban reload failed", "err", err)
+	}
 }
 
 // ValidateCreateRequest normalizes and validates a create request without persisting it.
@@ -580,6 +722,7 @@ func (m *Manager) startForwarders(r *models.ForwardRule) error {
 	e := &entry{}
 	if r.Protocol == models.ProtocolTCP || r.Protocol == models.ProtocolBoth {
 		t := newTCPForwarder(r, m.cfg.DialTimeout, m.cfg.BufferSize)
+		t.svc = m.svc
 		if err := t.Start(); err != nil {
 			return err
 		}
@@ -587,6 +730,7 @@ func (m *Manager) startForwarders(r *models.ForwardRule) error {
 	}
 	if r.Protocol == models.ProtocolUDP || r.Protocol == models.ProtocolBoth {
 		u := newUDPForwarder(r, m.cfg.UDPTimeout)
+		u.svc = m.svc
 		if err := u.Start(); err != nil {
 			if e.tcp != nil {
 				e.tcp.Stop()

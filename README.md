@@ -56,6 +56,8 @@ A high-performance cross-platform TCP/UDP port forwarder with a built-in Web UI.
   YAML configuration — auto-generated default config on first run
 - **真实 IP 透传（PROXY Protocol v2）** — 向目标服务器注入携带客户端真实 IP 的 PROXY v2 头（TCP 流首部 / UDP 会话首包）
   Real IP passthrough (PROXY Protocol v2) — prepends a PROXY v2 header carrying the real client IP toward the target (TCP stream prefix / UDP session first datagram)
+- **访问控制与玩家识别** — 按 IP/CIDR 黑白名单、按玩家名/XUID 封禁（命中即踢）、连接日志、在线玩家面板（基岩版登录握手被动识别，实验性）
+  Access control & player identity — IP/CIDR black/whitelist, player bans by gamertag/XUID (kick on match), connection logs and an online-players panel (passive Bedrock handshake sniffing, experimental)
 
 ## 🎯 痛点分析 | Pain Points
 
@@ -370,6 +372,37 @@ With **Real IP Passthrough** enabled in the add/edit rule dialog, the forwarder 
 - UDP 无连接，会话按“客户端地址”区分并带超时（默认 30s 空闲后重建，头随新会话重新发送）；理论上首包并发存在极小概率的乱序竞态，与同类实现（docker-proxy 等）行为一致。
   UDP is connectionless: sessions are keyed by client address with a timeout (default 30s idle; header is re-sent with a new session). A theoretical first-packet reordering race exists, consistent with similar implementations (docker-proxy, etc.).
 
+## 🛡️ 访问控制与玩家识别 | Access Control & Player Identity
+
+侧边栏「访问控制」提供三块面板，所有变更实时生效（自动重载转发器内的匹配快照）：
+
+The **Access Control** sidebar panel offers three tabs; every change takes effect immediately (compiled match snapshots are reloaded into live forwarders automatically):
+
+| 面板 Panel | 能力 Capability |
+|-----------|----------------|
+| IP 黑白名单 | 添加单 IP 或 CIDR（IPv4/IPv6）的“拒绝/放行”条目，可作用于全部规则或单条规则。判定顺序：命中任一 deny → 拒绝；作用域内存在 allow 且未命中 → 隐式拒绝；否则放行。Add per-IP/CIDR deny/allow entries scoped to all or one rule. A hit on any Deny rejects; if scoped Allow entries exist and none match, access is implicitly denied. |
+| 玩家封禁 | 按玩家名（Gamertag）或 XUID 封禁基岩版玩家，嗅探到登录握手命中的瞬间即掐断会话（换 IP 也有效）。Ban Bedrock players by gamertag or XUID; matching sessions are cut the moment the login handshake is observed (effective even if the player changes IP). |
+| 连接日志 | 记录加入/离开/拒绝/踢出事件（时间、协议、规则、来源、玩家、流量），保留条数由 `forward.connlog_max_entries` 控制（默认 2000），支持一键“封此 IP / 封此玩家”。Connection events with one-click ban actions. |
+
+侧边栏「在线玩家」展示当前已识别的玩家会话（玩家名 / XUID / 来源 / 规则 / 在线时长 / 实时流量）。
+
+The **Online Players** panel lists currently identified sessions (player, XUID, source, rule, uptime, live traffic).
+
+玩家识别为**被动旁路嗅探**：仅在客户端登录握手阶段解析 RakNet 帧 → 重组分片 → 解压 → 从微软签发的 JWT 链提取 Gamertag/XUID（该阶段流量未加密）；识别成功后该会话剩余流量原样透传。识别失败（非基岩流量或协议变更）自动降级为只记录 IP，不影响转发。可在 `config.yaml` 用 `forward.bedrock_sniff: false` 关闭。
+
+Player identification is a **passive bypass sniffer**: it parses RakNet frames from the client login handshake only (which travels unencrypted), then leaves the rest of the session untouched. On any failure it degrades to IP-only logging without affecting forwarding. Disable with `forward.bedrock_sniff: false`.
+
+## 🔍 真实 IP 方案调研结论 | Why Relay-side Control (Research Notes)
+
+围绕“后端零改动拿到真实玩家 IP”做过系统调研，结论存档如下，避免重复踩坑：
+
+- **透明代理（TPROXY / IP_TRANSPARENT 源地址伪装）**：受网络拓扑硬约束——后端回包必须原路经过转发机才能被改写回服务器地址，否则客户端直接丢弃。同机 / 可控内网 / WireGuard 隧道拓扑可行；跨公网两台独立 VPS（常见中转架构）物理上不可行，且伪装源地址还可能被运营商 uRPF 丢弃。
+  Transparent proxying requires the backend's replies to route back through the forwarder. Feasible on the same host, a controlled LAN, or over a WireGuard tunnel; physically impossible across two unrelated public VPSes (and spoofed sources may be dropped by uRPF anyway).
+- **基岩版（BDS）解析端生态**：BDS 原生不支持 PROXY Protocol；目前没有可用的主流解析插件（基岩主流代理 WaterdogPE 的真实 IP 下传仍是 open issue [#212](https://github.com/WaterdogPE/WaterdogPE/issues/212)）。成熟方案（frp / SakuraFrp / HAProxyDetector 等）均属 Java 版生态。
+  Bedrock (BDS) has no native PROXY Protocol support and no mature parsing plugin exists today; the mature solutions all belong to the Java Edition ecosystem.
+- 因此本项目把真实 IP 的价值放在**中转机侧变现**（本节访问控制/玩家识别/连接日志），同时保留 PROXY v2 注入开关，供未来出现解析端、或后端本身支持该协议（Java 版/面板类）时直接使用。
+  Hence this project realizes the value of real IPs relay-side (this section), while keeping the PROXY v2 injection toggle for future parsing-capable backends.
+
 ## 🔌 REST API
 
 | 方法 Method | 路径 Path | 描述 Description |
@@ -381,6 +414,14 @@ With **Real IP Passthrough** enabled in the add/edit rule dialog, the forwarder 
 | `DELETE` | `/api/rules/{id}`         | 删除规则 Delete a rule |
 | `PUT`    | `/api/rules/{id}/toggle`  | 启用/禁用规则 Enable/disable a rule |
 | `GET`    | `/api/dashboard`          | 获取规则列表与聚合统计 Get rule list & aggregated stats |
+| `GET`    | `/api/acl`                | 列出访问控制条目 List IP access-control entries |
+| `POST`   | `/api/acl`                | 添加 IP 黑白名单条目 Add an IP allow/deny entry |
+| `DELETE` | `/api/acl/{id}`           | 删除访问控制条目 Delete an access-control entry |
+| `GET`    | `/api/bans`               | 列出玩家封禁 List banned players |
+| `POST`   | `/api/bans`               | 封禁玩家（命中即踢）Ban a player (kick on match) |
+| `DELETE` | `/api/bans/{id}`          | 解除玩家封禁 Remove a player ban |
+| `GET`    | `/api/logs`               | 查询连接日志 Query connection logs |
+| `GET`    | `/api/players`            | 在线玩家（已识别会话）Online identified players |
 | `GET`    | `/api/stats`              | 获取全局统计 Get global statistics |
 | `GET`    | `/api/diagnostics`        | 获取运行诊断快照 Get runtime diagnostics snapshot |
 | `GET`    | `/api/wsl/capability`     | 获取 WSL2 能力探测结果 Get WSL2 capability probe result |

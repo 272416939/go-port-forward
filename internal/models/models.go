@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -211,6 +212,162 @@ type WSLImportRequest struct {
 	Distro     string    `json:"distro"`
 	TargetAddr string    `json:"target_addr"` // WSL2 IP to forward to
 	Ports      []WSLPort `json:"ports"`
+}
+
+// --- Access control (ACL) & player identity ---
+
+// ACL entry actions.
+const (
+	ACLActionAllow = "allow"
+	ACLActionDeny  = "deny"
+)
+
+// PlayerBan match types.
+const (
+	PlayerBanTypeGamertag = "gamertag"
+	PlayerBanTypeXUID     = "xuid"
+)
+
+// ConnEvent classifies a connection log row.
+type ConnEvent string
+
+const (
+	ConnEventJoin   ConnEvent = "join"
+	ConnEventLeave  ConnEvent = "leave"
+	ConnEventDenied ConnEvent = "denied"
+	ConnEventKick   ConnEvent = "kick" // session cut because the player is banned
+)
+
+// ACLEntry is one IP-based access control rule. CIDR accepts a bare IP or a
+// CIDR block (IPv4/IPv6); it is normalized on save. Empty RuleID means the
+// entry applies to every forwarding rule; otherwise only to that rule.
+type ACLEntry struct {
+	ID        string    `json:"id"`
+	CIDR      string    `json:"cidr"`
+	Action    string    `json:"action"` // allow | deny
+	RuleID    string    `json:"rule_id,omitempty"`
+	Comment   string    `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PlayerBan blocks a Bedrock player at the relay layer by gamertag or XUID;
+// the matching session is cut as soon as the login handshake is observed.
+type PlayerBan struct {
+	ID        string    `json:"id"`
+	Type      string    `json:"type"` // gamertag | xuid
+	Value     string    `json:"value"`
+	Comment   string    `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ConnLogEntry records one connection/session event observed by a forwarder.
+// BytesIn/BytesOut are filled when the session ends (leave/kick).
+type ConnLogEntry struct {
+	ID       string    `json:"id"`
+	Time     time.Time `json:"time"`
+	Protocol Protocol  `json:"protocol"`
+	RuleID   string    `json:"rule_id,omitempty"`
+	RuleName string    `json:"rule_name,omitempty"`
+	SrcIP    string    `json:"src_ip"`
+	SrcPort  int       `json:"src_port"`
+	Player   string    `json:"player,omitempty"`
+	XUID     string    `json:"xuid,omitempty"`
+	Event    ConnEvent `json:"event"`
+	BytesIn  int64     `json:"bytes_in"`
+	BytesOut int64     `json:"bytes_out"`
+}
+
+// OnlinePlayer is the live view of an identified UDP client session.
+type OnlinePlayer struct {
+	SessionKey string    `json:"session_key"` // unique per rule+client tuple
+	RuleID     string    `json:"rule_id"`
+	RuleName   string    `json:"rule_name"`
+	Player     string    `json:"player,omitempty"`
+	XUID       string    `json:"xuid,omitempty"`
+	SrcIP      string    `json:"src_ip"`
+	SrcPort    int       `json:"src_port"`
+	Since      time.Time `json:"since"`
+	BytesIn    int64     `json:"bytes_in"`
+	BytesOut   int64     `json:"bytes_out"`
+}
+
+// CreateACLRequest is the API request for adding an IP access-control entry.
+type CreateACLRequest struct {
+	CIDR    string `json:"cidr"`
+	Action  string `json:"action"`
+	RuleID  string `json:"rule_id"`
+	Comment string `json:"comment"`
+}
+
+// CreatePlayerBanRequest is the API request for banning a Bedrock player.
+type CreatePlayerBanRequest struct {
+	Type    string `json:"type"` // gamertag | xuid
+	Value   string `json:"value"`
+	Comment string `json:"comment"`
+}
+
+// NormalizeAndValidateACL normalizes a create request in place and validates it.
+func NormalizeAndValidateACL(req *CreateACLRequest) (*ACLEntry, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请求不能为空 | request is required")
+	}
+	cidr := strings.TrimSpace(req.CIDR)
+	if cidr == "" {
+		return nil, fmt.Errorf("IP 或 CIDR 不能为空 | cidr is required")
+	}
+	if !strings.Contains(cidr, "/") {
+		// 裸 IP 自动补全长度的前缀 | append full-length prefix for bare IPs
+		ip := net.ParseIP(cidr)
+		if ip == nil {
+			return nil, fmt.Errorf("无效的 IP 或 CIDR： %s | invalid IP or CIDR: %s", req.CIDR, cidr)
+		}
+		if ipv4 := ip.To4(); ipv4 != nil {
+			cidr = fmt.Sprintf("%s/32", ipv4.String())
+		} else {
+			cidr = fmt.Sprintf("%s/128", ip.String())
+		}
+	}
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return nil, fmt.Errorf("无效的 IP 或 CIDR： %s | invalid IP or CIDR: %s", req.CIDR, cidr)
+	}
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action != ACLActionAllow && action != ACLActionDeny {
+		return nil, fmt.Errorf("动作必须为 allow 或 deny | action must be allow or deny")
+	}
+	return &ACLEntry{
+		CIDR:    cidr,
+		Action:  action,
+		RuleID:  strings.TrimSpace(req.RuleID),
+		Comment: strings.TrimSpace(req.Comment),
+	}, nil
+}
+
+// NormalizeAndValidatePlayerBan normalizes a ban request in place and validates it.
+func NormalizeAndValidatePlayerBan(req *CreatePlayerBanRequest) (*PlayerBan, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请求不能为空 | request is required")
+	}
+	banType := strings.ToLower(strings.TrimSpace(req.Type))
+	if banType != PlayerBanTypeGamertag && banType != PlayerBanTypeXUID {
+		return nil, fmt.Errorf("类型必须为 gamertag 或 xuid | type must be gamertag or xuid")
+	}
+	value := strings.TrimSpace(req.Value)
+	if value == "" {
+		return nil, fmt.Errorf("封禁值不能为空 | value is required")
+	}
+	if len(value) > 128 {
+		return nil, fmt.Errorf("封禁值过长 | value too long")
+	}
+	return &PlayerBan{
+		Type:    banType,
+		Value:   value,
+		Comment: strings.TrimSpace(req.Comment),
+	}, nil
+}
+
+// OnlinePlayersResponse wraps GET /api/players data.
+type OnlinePlayersResponse struct {
+	Players []OnlinePlayer `json:"players"`
 }
 
 // APIResponse is a generic JSON API response wrapper

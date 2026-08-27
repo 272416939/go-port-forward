@@ -263,6 +263,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnostics", h.diagnostics)
 	mux.HandleFunc("GET /api/stats", h.globalStats)
 
+	// 访问控制 / 玩家封禁 / 连接日志 / 在线玩家
+	mux.HandleFunc("GET /api/acl", h.listACL)
+	mux.HandleFunc("POST /api/acl", h.createACL)
+	mux.HandleFunc("DELETE /api/acl/{id}", h.deleteACL)
+	mux.HandleFunc("GET /api/bans", h.listPlayerBans)
+	mux.HandleFunc("POST /api/bans", h.createPlayerBan)
+	mux.HandleFunc("DELETE /api/bans/{id}", h.deletePlayerBan)
+	mux.HandleFunc("GET /api/logs", h.listConnLogs)
+	mux.HandleFunc("GET /api/players", h.listOnlinePlayers)
+
 	// WSL
 	mux.HandleFunc("GET /api/wsl/capability", h.wslCapability)
 	mux.HandleFunc("GET /api/wsl/distros", h.wslListDistros)

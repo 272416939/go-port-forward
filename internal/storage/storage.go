@@ -15,12 +15,28 @@ var rulesBucket = []byte("rules")
 // ErrRuleNotFound indicates the requested rule does not exist in storage.
 var ErrRuleNotFound = errors.New("rule not found")
 
-// Store provides persistent storage for forwarding rules.
+// Store provides persistent storage for forwarding rules, access control and logs.
 type Store interface {
 	ListRules() ([]*models.ForwardRule, error)
 	GetRule(id string) (*models.ForwardRule, error)
 	SaveRule(rule *models.ForwardRule) error
 	DeleteRule(id string) error
+
+	// Access control entries (IP blacklist/whitelist)
+	ListACLEntries() ([]*models.ACLEntry, error)
+	SaveACLEntry(entry *models.ACLEntry) error
+	DeleteACLEntry(id string) error
+
+	// Banned Bedrock players (gamertag/XUID)
+	ListPlayerBans() ([]*models.PlayerBan, error)
+	SavePlayerBan(ban *models.PlayerBan) error
+	DeletePlayerBan(id string) error
+
+	// Connection/session event log
+	AppendConnLog(entry *models.ConnLogEntry) error
+	ListConnLogs(limit int) ([]*models.ConnLogEntry, error)
+	TrimConnLogs(maxEntries int) (int, error)
+
 	Close() error
 }
 
@@ -34,10 +50,14 @@ func Open(path string) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
 	}
-	// Ensure bucket exists
+	// Ensure buckets exist
 	if err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(rulesBucket)
-		return err
+		for _, b := range [][]byte{rulesBucket, aclBucket, playerBansBucket, connLogsBucket} {
+			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		_ = db.Close()
 		return nil, err

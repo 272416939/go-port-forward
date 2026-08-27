@@ -25,6 +25,7 @@ type TCPForwarder struct {
 	rule     *models.ForwardRule
 	cancel   context.CancelFunc
 	conns    map[net.Conn]struct{}
+	svc      *forwardServices // 旁路服务（ACL/日志），测试下可为 nil
 
 	wg sync.WaitGroup
 
@@ -122,6 +123,25 @@ func (f *TCPForwarder) acceptLoop(ctx context.Context) {
 func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *models.ForwardRule) {
 	defer f.wg.Done()
 	defer src.Close()
+
+	// 访问控制：拒绝的连接直接关闭
+	if remote, ok := src.RemoteAddr().(*net.TCPAddr); ok {
+		if !f.svc.allowed(rule.ID, remote.IP) {
+			logger.S.Warnw("TCP source denied by ACL", "rule", rule.Name, "src", remote.String())
+			if f.svc != nil {
+				f.svc.logEvent(models.ConnLogEntry{
+					Protocol: models.ProtocolTCP,
+					RuleID:   rule.ID,
+					RuleName: rule.Name,
+					SrcIP:    remote.IP.String(),
+					SrcPort:  remote.Port,
+					Event:    models.ConnEventDenied,
+				})
+			}
+			return
+		}
+	}
+
 	f.trackConn(src)
 	defer f.untrackConn(src)
 	f.activeConns.Add(1)
