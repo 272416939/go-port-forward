@@ -39,16 +39,17 @@ type ForwardRule struct {
 	Comment    string   `json:"comment"`
 
 	// Runtime stats — not persisted
-	Status      RuleStatus `json:"status"`
-	ErrorMsg    string     `json:"error_msg,omitempty"` // reason the forwarder failed to start
-	ListenPort  int        `json:"listen_port"`
-	TargetPort  int        `json:"target_port"`
-	BytesIn     int64      `json:"bytes_in"`
-	BytesOut    int64      `json:"bytes_out"`
-	ActiveConns int64      `json:"active_conns"`
-	TotalConns  int64      `json:"total_conns"`
-	Enabled     bool       `json:"enabled"`
-	AddFirewall bool       `json:"add_firewall"` // auto-add firewall rule on creation
+	Status        RuleStatus `json:"status"`
+	ErrorMsg      string     `json:"error_msg,omitempty"` // reason the forwarder failed to start
+	ListenPort    int        `json:"listen_port"`
+	TargetPort    int        `json:"target_port"`
+	BytesIn       int64      `json:"bytes_in"`
+	BytesOut      int64      `json:"bytes_out"`
+	ActiveConns   int64      `json:"active_conns"`
+	TotalConns    int64      `json:"total_conns"`
+	Enabled       bool       `json:"enabled"`
+	AddFirewall   bool       `json:"add_firewall"`   // auto-add firewall rule on creation
+	ProxyProtocol bool       `json:"proxy_protocol"` // prepend PROXY Protocol v2 header with real client IP toward target
 }
 
 // ListenKey returns a unique key for the listen address+port+protocol combination
@@ -179,28 +180,30 @@ type WSLCapability = wsl.Capability
 
 // CreateRuleRequest is the API request for creating a new rule
 type CreateRuleRequest struct {
-	Name        string   `json:"name"`
-	ListenAddr  string   `json:"listen_addr"`
-	Protocol    Protocol `json:"protocol"`
-	TargetAddr  string   `json:"target_addr"`
-	Comment     string   `json:"comment"`
-	ListenPort  int      `json:"listen_port"`
-	TargetPort  int      `json:"target_port"`
-	AddFirewall bool     `json:"add_firewall"`
-	Enabled     bool     `json:"enabled"`
+	Name          string   `json:"name"`
+	ListenAddr    string   `json:"listen_addr"`
+	Protocol      Protocol `json:"protocol"`
+	TargetAddr    string   `json:"target_addr"`
+	Comment       string   `json:"comment"`
+	ListenPort    int      `json:"listen_port"`
+	TargetPort    int      `json:"target_port"`
+	AddFirewall   bool     `json:"add_firewall"`
+	ProxyProtocol bool     `json:"proxy_protocol"`
+	Enabled       bool     `json:"enabled"`
 }
 
 // UpdateRuleRequest is the API request for updating a rule
 type UpdateRuleRequest struct {
-	Name        *string   `json:"name"`
-	ListenAddr  *string   `json:"listen_addr"`
-	ListenPort  *int      `json:"listen_port"`
-	Protocol    *Protocol `json:"protocol"`
-	TargetAddr  *string   `json:"target_addr"`
-	TargetPort  *int      `json:"target_port"`
-	AddFirewall *bool     `json:"add_firewall"`
-	Comment     *string   `json:"comment"`
-	Enabled     *bool     `json:"enabled"`
+	Name          *string   `json:"name"`
+	ListenAddr    *string   `json:"listen_addr"`
+	ListenPort    *int      `json:"listen_port"`
+	Protocol      *Protocol `json:"protocol"`
+	TargetAddr    *string   `json:"target_addr"`
+	TargetPort    *int      `json:"target_port"`
+	AddFirewall   *bool     `json:"add_firewall"`
+	ProxyProtocol *bool     `json:"proxy_protocol"`
+	Comment       *string   `json:"comment"`
+	Enabled       *bool     `json:"enabled"`
 }
 
 // WSLImportRequest is the API request for importing WSL2 ports

@@ -12,6 +12,7 @@ import (
 	"go-port-forward/internal/models"
 	"go-port-forward/pkg/pool"
 
+	"github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 )
 
@@ -44,19 +45,20 @@ type udpSession struct {
 
 // UDPForwarder listens on a local UDP port and forwards datagrams to a target.
 type UDPForwarder struct {
-	rule       *models.ForwardRule
-	conn       *net.UDPConn
-	targetAddr *net.UDPAddr
-	sessions   map[udpAddrKey]*udpSession
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
-	timeout    time.Duration
-	bytesIn    atomic.Int64
-	bytesOut   atomic.Int64
-	active     atomic.Int64
-	totalConns atomic.Int64
-	stopOnce   sync.Once
-	mu         sync.Mutex
+	rule        *models.ForwardRule
+	conn        *net.UDPConn
+	targetAddr  *net.UDPAddr
+	sessions    map[udpAddrKey]*udpSession
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+	timeout     time.Duration
+	proxyProto  bool
+	bytesIn     atomic.Int64
+	bytesOut    atomic.Int64
+	active      atomic.Int64
+	totalConns  atomic.Int64
+	stopOnce    sync.Once
+	mu          sync.Mutex
 }
 
 func newUDPForwarder(rule *models.ForwardRule, timeoutSec int) *UDPForwarder {
@@ -64,10 +66,11 @@ func newUDPForwarder(rule *models.ForwardRule, timeoutSec int) *UDPForwarder {
 		timeoutSec = 30
 	}
 	return &UDPForwarder{
-		rule:     rule,
-		timeout:  time.Duration(timeoutSec) * time.Second,
-		sessions: make(map[udpAddrKey]*udpSession),
-		stopCh:   make(chan struct{}),
+		rule:       rule,
+		timeout:    time.Duration(timeoutSec) * time.Second,
+		proxyProto: rule.ProxyProtocol,
+		sessions:   make(map[udpAddrKey]*udpSession),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -94,7 +97,8 @@ func (f *UDPForwarder) Start() error {
 	go f.cleanupLoop()
 
 	logger.S.Infow("UDP forwarder started", "rule", f.rule.Name, "listen", listenAddr,
-		"target", fmt.Sprintf("%s:%d", f.rule.TargetAddr, f.rule.TargetPort))
+		"target", fmt.Sprintf("%s:%d", f.rule.TargetAddr, f.rule.TargetPort),
+		"proxy_protocol", f.proxyProto)
 	return nil
 }
 
@@ -153,12 +157,25 @@ func (f *UDPForwarder) forward(srcAddr *net.UDPAddr, data []byte) {
 	if f.isStopping() {
 		return
 	}
-	sess := f.getOrCreateSession(srcAddr)
+	sess, created := f.getOrCreateSession(srcAddr)
 	if sess == nil {
 		return
 	}
 
-	n, _ := sess.upstream.Write(data)
+	// PROXY Protocol v2：仅在每个客户端会话的首个数据报前附加头，
+	// 后续数据报原样透传（与后端的 PROXY 解析端按会话缓存语义配合）。
+	payload := data
+	if created && f.proxyProto {
+		hdr := proxyproto.HeaderProxyFromAddrs(0, srcAddr, f.targetAddr)
+		withHeader, err := hdr.FormatUDPDatagram(data)
+		if err != nil {
+			logger.L.Warn("PROXY v2 header format failed", zap.String("rule", f.rule.Name), zap.Error(err))
+		} else {
+			payload = withHeader
+		}
+	}
+
+	n, _ := sess.upstream.Write(payload)
 	f.bytesIn.Add(int64(n))
 }
 
@@ -204,7 +221,10 @@ func (f *UDPForwarder) Stats() (bytesIn, bytesOut, active, total int64) {
 	return f.bytesIn.Load(), f.bytesOut.Load(), f.active.Load(), f.totalConns.Load()
 }
 
-func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) *udpSession {
+// getOrCreateSession returns the upstream session for srcAddr, creating it on
+// first sight. created reports whether the returned session was just created
+// by this call (used to emit the PROXY header exactly once per session).
+func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSession, created bool) {
 	key := makeUDPAddrKey(srcAddr) // 零分配 | zero allocation
 	now := time.Now()
 
@@ -212,17 +232,17 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) *udpSession {
 	if sess, ok := f.sessions[key]; ok {
 		sess.lastSeen = now
 		f.mu.Unlock()
-		return sess
+		return sess, false
 	}
 	f.mu.Unlock()
 	if f.isStopping() {
-		return nil
+		return nil, false
 	}
 
 	up, err := net.DialUDP("udp", nil, f.targetAddr)
 	if err != nil {
 		logger.L.Warn("UDP dial failed", zap.String("target", f.targetAddr.String()), zap.Error(err))
-		return nil
+		return nil, false
 	}
 
 	f.mu.Lock()
@@ -230,21 +250,21 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) *udpSession {
 		sess.lastSeen = now
 		f.mu.Unlock()
 		_ = up.Close()
-		return sess
+		return sess, false
 	}
 	if f.isStopping() {
 		f.mu.Unlock()
 		_ = up.Close()
-		return nil
+		return nil, false
 	}
-	sess := &udpSession{upstream: up, lastSeen: now}
+	sess = &udpSession{upstream: up, lastSeen: now}
 	f.sessions[key] = sess
 	f.active.Add(1)
 	f.totalConns.Add(1)
 	f.wg.Add(1)
 	go f.relayBack(cloneUDPAddr(srcAddr), sess)
 	f.mu.Unlock()
-	return sess
+	return sess, true
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

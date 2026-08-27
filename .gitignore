@@ -432,3 +432,6 @@ cython_debug/
 out
 gen
 /data/
+
+# ZCode 项目本地 Skill（不发布）| ZCode local project skill (not published)
+.zcode/

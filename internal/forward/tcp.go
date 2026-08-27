@@ -15,6 +15,7 @@ import (
 	"go-port-forward/pkg/pool"
 	"go-port-forward/pkg/retry"
 
+	"github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 )
 
@@ -69,7 +70,8 @@ func (f *TCPForwarder) Start() error {
 	f.wg.Add(1)
 	go f.acceptLoop(ctx)
 	logger.S.Infow("TCP forwarder started", "rule", f.rule.Name, "listen", listenAddr,
-		"target", fmt.Sprintf("%s:%d", f.rule.TargetAddr, f.rule.TargetPort))
+		"target", fmt.Sprintf("%s:%d", f.rule.TargetAddr, f.rule.TargetPort),
+		"proxy_protocol", f.rule.ProxyProtocol)
 	return nil
 }
 
@@ -147,6 +149,16 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 	defer dst.Close()
 	f.trackConn(dst)
 	defer f.untrackConn(dst)
+
+	// PROXY Protocol v2：向目标侧注入携带客户端真实地址的头，仅此一次，
+	// 之后的数据原样透传（后端解析端按流读取头并还原真实源地址）。
+	if rule.ProxyProtocol {
+		hdr := proxyproto.HeaderProxyFromAddrs(0, src.RemoteAddr(), dst.RemoteAddr())
+		if _, err := hdr.WriteTo(dst); err != nil {
+			logger.L.Warn("PROXY v2 header write failed", zap.String("target", target), zap.Error(err))
+			return
+		}
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)

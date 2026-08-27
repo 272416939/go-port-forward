@@ -289,6 +289,12 @@
               <label class="form-check-label" for="chkFw" x-text="t('自动添加防火墙规则','Auto-add Firewall Rule')"></label>
             </div>
           </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" x-model="form.proxy_protocol" id="chkProxyProto"/>
+              <label class="form-check-label" for="chkProxyProto" :title="t('向目标服务器注入 PROXY Protocol v2 头以透传客户端真实 IP，需后端支持该协议，否则会把头当作应用数据','Prepends a PROXY Protocol v2 header carrying the real client IP toward the target. The backend must support it, otherwise the header is treated as payload')" x-text="t('启用真实IP透传','Real IP Passthrough (PROXY v2)')"></label>
+            </div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
@@ -875,6 +881,7 @@ function portForwardApp() {
 	        comment:'',
 	        enabled:true,
 	        add_firewall:false,
+	        proxy_protocol:false,
 	      }
 	    },
 
@@ -890,6 +897,7 @@ function portForwardApp() {
 	        comment: rule.comment || '',
 	        enabled: rule.enabled ?? true,
 	        add_firewall: rule.add_firewall ?? false,
+	        proxy_protocol: rule.proxy_protocol ?? false,
 	      }
 	    },
 
@@ -904,6 +912,7 @@ function portForwardApp() {
 	        comment: this.form.comment || '',
 	        enabled: !!this.form.enabled,
 	        add_firewall: !!this.form.add_firewall,
+	        proxy_protocol: !!this.form.proxy_protocol,
 	      }
 	    },
 

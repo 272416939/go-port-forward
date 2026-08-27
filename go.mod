@@ -12,6 +12,7 @@ require (
 	github.com/json-iterator/go v1.1.12
 	github.com/kardianos/service v1.2.4
 	github.com/panjf2000/ants/v2 v2.12.0
+	github.com/pires/go-proxyproto v0.15.0
 	github.com/shamaton/msgpack/v3 v3.1.0
 	github.com/spf13/afero v1.15.0
 	github.com/spf13/viper v1.21.0
@@ -46,7 +47,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.25.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

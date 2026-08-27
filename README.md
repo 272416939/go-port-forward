@@ -54,6 +54,8 @@ A high-performance cross-platform TCP/UDP port forwarder with a built-in Web UI.
   Automatic GC management — memory-threshold-triggered + scheduled GC with multiple strategies
 - **YAML 配置** — 首次运行自动生成默认配置文件
   YAML configuration — auto-generated default config on first run
+- **真实 IP 透传（PROXY Protocol v2）** — 向目标服务器注入携带客户端真实 IP 的 PROXY v2 头（TCP 流首部 / UDP 会话首包）
+  Real IP passthrough (PROXY Protocol v2) — prepends a PROXY v2 header carrying the real client IP toward the target (TCP stream prefix / UDP session first datagram)
 
 ## 🎯 痛点分析 | Pain Points
 
@@ -347,6 +349,26 @@ The actual response varies with runtime state. Below is a simplified example:
   You want to quickly identify whether the bottleneck is in connections, traffic, or error hotspots
 - 需要导出一份运行快照给同事、测试或 issue 附件
   You need to export a runtime snapshot for colleagues, QA, or issue attachments
+
+## 🌐 真实 IP 透传 | Real IP Passthrough (PROXY Protocol v2)
+
+在“添加/编辑规则”对话框开启 **启用真实IP透传** 后，转发器会按 [PROXY Protocol v2](https://www.haproxy.org/download/3.4/doc/proxy-protocol.txt) 规范，把客户端真实地址编码进发往目标服务器的数据中：
+
+With **Real IP Passthrough** enabled in the add/edit rule dialog, the forwarder encodes the client's real address into the data sent to the target server per the [PROXY Protocol v2](https://www.haproxy.org/download/3.4/doc/proxy-protocol.txt) spec:
+
+| 协议 Protocol | 注入方式 Injection |
+|--------------|-------------------|
+| TCP | 建立到目标的连接后，先写入一次 PROXY v2 头，再开始双向数据转发 Written once to the target connection before relaying |
+| UDP | 每个客户端会话的**首个数据报**与头合并为单个数据报发送，后续数据报原样透传 Header + payload sent as a single datagram on the first packet of each client session; subsequent datagrams pass through untouched |
+
+### 注意事项 | Notes
+
+- **目标服务器必须支持 PROXY Protocol v2**，否则会把头当作应用数据导致连接失败。例如 Minecraft 基岩版（BDS）需安装支持 PROXY Protocol 的插件（如 LL3 生态相关插件）后才可开启。
+  **The target server must support PROXY Protocol v2**, otherwise it treats the header as application data and the connection fails. For example, Minecraft BDS requires a PROXY-Protocol-aware plugin before enabling this.
+- 开关变更保存后会自动重启该规则的转发器生效。
+  Saving the toggle automatically restarts the rule's forwarders to take effect.
+- UDP 无连接，会话按“客户端地址”区分并带超时（默认 30s 空闲后重建，头随新会话重新发送）；理论上首包并发存在极小概率的乱序竞态，与同类实现（docker-proxy 等）行为一致。
+  UDP is connectionless: sessions are keyed by client address with a timeout (default 30s idle; header is re-sent with a new session). A theoretical first-packet reordering race exists, consistent with similar implementations (docker-proxy, etc.).
 
 ## 🔌 REST API
 

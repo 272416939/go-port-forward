@@ -114,18 +114,19 @@ func (m *Manager) AddRule(req *models.CreateRuleRequest) (*models.ForwardRule, e
 		return nil, err
 	}
 	r := &models.ForwardRule{
-		ID:          uuid.NewString(),
-		Name:        normalized.Name,
-		ListenAddr:  normalized.ListenAddr,
-		ListenPort:  normalized.ListenPort,
-		Protocol:    normalized.Protocol,
-		TargetAddr:  normalized.TargetAddr,
-		TargetPort:  normalized.TargetPort,
-		AddFirewall: normalized.AddFirewall,
-		Comment:     normalized.Comment,
-		Enabled:     normalized.Enabled,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:            uuid.NewString(),
+		Name:          normalized.Name,
+		ListenAddr:    normalized.ListenAddr,
+		ListenPort:    normalized.ListenPort,
+		Protocol:      normalized.Protocol,
+		TargetAddr:    normalized.TargetAddr,
+		TargetPort:    normalized.TargetPort,
+		AddFirewall:   normalized.AddFirewall,
+		ProxyProtocol: normalized.ProxyProtocol,
+		Comment:       normalized.Comment,
+		Enabled:       normalized.Enabled,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 	if err := m.store.SaveRule(r); err != nil {
 		return nil, err
@@ -769,6 +770,9 @@ func applyUpdate(r *models.ForwardRule, req *models.UpdateRuleRequest) {
 	if req.AddFirewall != nil {
 		r.AddFirewall = *req.AddFirewall
 	}
+	if req.ProxyProtocol != nil {
+		r.ProxyProtocol = *req.ProxyProtocol
+	}
 	if req.Comment != nil {
 		r.Comment = *req.Comment
 	}
@@ -786,5 +790,6 @@ func requiresForwarderRestart(before, after *models.ForwardRule) bool {
 		before.ListenPort != after.ListenPort ||
 		models.NormalizeProtocol(before.Protocol) != models.NormalizeProtocol(after.Protocol) ||
 		before.TargetAddr != after.TargetAddr ||
-		before.TargetPort != after.TargetPort
+		before.TargetPort != after.TargetPort ||
+		before.ProxyProtocol != after.ProxyProtocol
 }
