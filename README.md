@@ -205,9 +205,9 @@ git push origin v1.0.0-beta.1
 ./go-port-forward -config /path/to/config.yaml
 ```
 
-启动后访问 `http://127.0.0.1:8080` 打开 Web 管理界面。
+启动后访问 `http://127.0.0.1:8989` 打开 Web 管理界面。
 
-After startup, visit `http://127.0.0.1:8080` to open the Web management UI.
+After startup, visit `http://127.0.0.1:8989` to open the Web management UI.
 
 ### 系统服务 | System Service
 
@@ -231,7 +231,7 @@ A default `config.yaml` is auto-generated in the same directory as the executabl
 ```yaml
 web:
   host: 127.0.0.1          # Web UI 监听地址 | Listen address
-  port: 8080                # Web UI 端口 | Port
+  port: 8989                # Web UI 端口 | Port
   # username: admin         # Basic Auth 用户名 (留空禁用) | Username (leave empty to disable)
   # password: secret        # Basic Auth 密码 | Password
 

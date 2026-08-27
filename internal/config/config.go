@@ -111,7 +111,7 @@ func Get() *AppConfig { return global }
 func setDefaults(v *viper.Viper) {
 	dir := appDataDir()
 	v.SetDefault("web.host", "127.0.0.1")
-	v.SetDefault("web.port", 8080)
+	v.SetDefault("web.port", 8989)
 	v.SetDefault("storage.path", filepath.Join(dir, "data", "rules.db"))
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.path", filepath.Join(dir, "logs", "app.log"))
