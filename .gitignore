@@ -435,3 +435,6 @@ gen
 
 # ZCode 项目本地 Skill（不发布）| ZCode local project skill (not published)
 .zcode/
+
+# 本地集成测试（不发布）| Local-only integration tests (not published)
+test/
