@@ -43,7 +43,7 @@
         <button id="btnDisconnect" class="btn" type="button" hidden>断开</button>
         <button id="btnQuit" class="btn btn-quiet" type="button">退出程序</button>
       </div>
-      <p class="hint">断开只停止隧道，退出程序会同时清理路由与防火墙规则。</p>
+      <p class="hint">关闭窗口会收进右下角托盘继续运行；退出程序才会清理路由与防火墙规则。</p>
     </section>
 
     <section class="card">
@@ -51,13 +51,39 @@
       <dl class="stats">
         <div><dt>虚拟网卡</dt><dd id="tunIP">—</dd></div>
         <div><dt>已连接时长</dt><dd id="uptime">—</dd></div>
-        <div><dt>入站包（玩家 → 后端）</dt><dd id="pktIn">0</dd></div>
-        <div><dt>回程包（后端 → 玩家）</dt><dd id="pktOut">0</dd></div>
+        <div>
+          <dt>上行（玩家 → 后端）</dt>
+          <dd id="bytesUp">0 B</dd>
+          <dd class="rate" id="rateUp">↑ 0 B/s</dd>
+        </div>
+        <div>
+          <dt>下行（后端 → 玩家）</dt>
+          <dd id="bytesDown">0 B</dd>
+          <dd class="rate" id="rateDown">↓ 0 B/s</dd>
+        </div>
       </dl>
-      <h3 class="sub-head">回程路由 <span class="count" id="routeCount">0</span></h3>
-      <ul class="routes" id="routes"><li class="empty">暂无活跃玩家</li></ul>
+      <p class="hint" id="pktLine">数据包 ↑0 / ↓0</p>
     </section>
   </main>
+
+  <section class="card card-wide">
+    <h2>活跃玩家流量 <span class="count" id="routeCount">0</span></h2>
+    <div class="table-wrap">
+      <table class="routes">
+        <thead>
+          <tr>
+            <th>来源 IP</th>
+            <th class="num">↑ 上行</th>
+            <th class="num">↓ 下行</th>
+            <th class="num">速率</th>
+          </tr>
+        </thead>
+        <tbody id="routeRows">
+          <tr class="empty"><td colspan="4">暂无活跃玩家</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="card card-wide">
     <h2>运行日志</h2>

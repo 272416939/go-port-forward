@@ -66,14 +66,18 @@ func main() {
 		}
 	}
 
-	// 界面上的「退出程序」按钮：关掉窗口，让消息循环退出。
+	// 托盘菜单「退出程序」与界面上的退出按钮走同一条路径。
 	go func() {
 		<-quit
-		terminateWindow()
+		quitApp()
 	}()
 
-	// 阻塞直到窗口关闭；随后清理 /32 路由与防火墙规则。
-	if err := runWindow(url); err != nil {
+	// 阻塞直到程序退出（关窗只是收进托盘）；随后清理路由与防火墙规则。
+	err = runWindow(url, trayActions{
+		Disconnect: eng.Stop,
+		Quit:       quitApp,
+	})
+	if err != nil {
 		alert("界面异常", err.Error())
 	}
 	eng.Stop()

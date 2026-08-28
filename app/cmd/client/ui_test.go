@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // startUI 必须能真正提供页面与接口，并且写操作要拒绝错误的 token——
@@ -53,6 +54,10 @@ func TestUIServerServesAndGuards(t *testing.T) {
 		}
 		if snap.TunIP != tunClientIP {
 			t.Errorf("tun_ip = %q, 期望 %q", snap.TunIP, tunClientIP)
+		}
+		// 未连接时 routes 必须是 []，不能是 null——前端直接 for..of 遍历。
+		if snap.Routes == nil {
+			t.Error("routes = null，期望空数组")
 		}
 	})
 
@@ -124,5 +129,82 @@ func TestRouteEligibility(t *testing.T) {
 		if !m.eligible(ip) {
 			t.Errorf("eligible(%q) = false, 期望允许（公网单播）", ip)
 		}
+	}
+}
+
+// ipv4 造一个源/目的可控的 IPv4 包，总长度 total 字节。
+func ipv4(src, dst [4]byte, total int) []byte {
+	p := make([]byte, total)
+	p[0] = 0x45
+	copy(p[12:16], src[:])
+	copy(p[16:20], dst[:])
+	return p
+}
+
+// 字节必须按方向归到正确的 IP 上：入站看源地址，回程看目的地址。方向搞反
+// 会让两列数字互换，而界面上看起来一切正常。
+func TestPerIPByteAttribution(t *testing.T) {
+	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+
+	// 预置两条状态，避免 ensure() 真的去跑 route.exe 改动系统路由表。
+	alice, bob := "111.29.236.135", "8.8.8.8"
+	m.states[alice] = &routeState{lastSeen: time.Now()}
+	m.states[bob] = &routeState{lastSeen: time.Now()}
+
+	aliceIP := [4]byte{111, 29, 236, 135}
+	bobIP := [4]byte{8, 8, 8, 8}
+	tunIP := [4]byte{10, 66, 0, 2}
+
+	// 玩家 alice 的入站包：源 = alice，计入 alice 的 down。
+	m.countInbound(ipv4(aliceIP, tunIP, 100))
+	m.countInbound(ipv4(aliceIP, tunIP, 200))
+	// 后端发给 alice 的回程包：目的 = alice，计入 alice 的 up。
+	m.countOutbound(ipv4(tunIP, aliceIP, 50))
+	// bob 只有入站。
+	m.countInbound(ipv4(bobIP, tunIP, 70))
+
+	got := m.view()
+	if len(got) != 2 {
+		t.Fatalf("view() 返回 %d 条, 期望 2", len(got))
+	}
+	// view() 必须按 IP 排序，否则 1Hz 刷新时表格行会乱跳。
+	if got[0].IP != "111.29.236.135" || got[1].IP != "8.8.8.8" {
+		t.Errorf("排序错误：%s, %s", got[0].IP, got[1].IP)
+	}
+
+	byIP := map[string]RouteEntry{got[0].IP: got[0], got[1].IP: got[1]}
+	if e := byIP[alice]; e.BytesDown != 300 || e.BytesUp != 50 {
+		t.Errorf("%s: down=%d up=%d, 期望 down=300 up=50", alice, e.BytesDown, e.BytesUp)
+	}
+	if e := byIP[bob]; e.BytesDown != 70 || e.BytesUp != 0 {
+		t.Errorf("%s: down=%d up=%d, 期望 down=70 up=0", bob, e.BytesDown, e.BytesUp)
+	}
+}
+
+// countOutbound 绝不能安装路由：它在 TUN 读循环里逐包调用，而安装要起
+// route.exe 子进程（几十毫秒），会拖垮吞吐。
+func TestCountOutboundNeverInstallsRoute(t *testing.T) {
+	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+	m.countOutbound(ipv4([4]byte{10, 66, 0, 2}, [4]byte{8, 8, 8, 8}, 100))
+	if len(m.states) != 0 {
+		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", len(m.states))
+	}
+}
+
+// 非 IPv4 或过短的包不能让计数逻辑 panic（隧道里出现畸形包不该拖垮客户端）。
+func TestCountIgnoresMalformedPackets(t *testing.T) {
+	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+	for _, pkt := range [][]byte{
+		nil,
+		{},
+		{0x45},
+		make([]byte, 19),               // 短于 IPv4 头
+		append([]byte{0x60}, make([]byte, 39)...), // IPv6
+	} {
+		m.countInbound(pkt)
+		m.countOutbound(pkt)
+	}
+	if len(m.states) != 0 {
+		t.Errorf("畸形包产生了 %d 条状态，期望 0", len(m.states))
 	}
 }

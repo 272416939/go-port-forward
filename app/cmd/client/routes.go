@@ -22,6 +22,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pfapp/internal/syssetup"
@@ -38,9 +39,23 @@ const (
 )
 
 // routeState 是一条回程路由的本地视图。
+//
+// 字节方向以玩家为参照：up = 玩家 → 后端，down = 后端 → 玩家。这与主模块
+// internal/forward 的 bytes_in/bytes_out 恰好相反——那边站在中转机视角，
+// bytes_in 是"客户端流向目标"。客户端在链路另一端，沿用 in/out 会读反，
+// 所以这里改用 up/down。
 type routeState struct {
-	lastSeen time.Time // 最近一次收到该 IP 的入站包，或被服务端确认活跃
-	removing bool      // 已入删除队列
+	lastSeen  time.Time    // 最近一次收到该 IP 的入站包，或被服务端确认活跃
+	removing  bool         // 已入删除队列
+	bytesUp   atomic.Int64 // 玩家 → 后端
+	bytesDown atomic.Int64 // 后端 → 玩家
+}
+
+// RouteEntry 是单个来源 IP 的流量视图（供 UI 展示）。
+type RouteEntry struct {
+	IP        string `json:"ip"`
+	BytesUp   int64  `json:"bytes_up"`
+	BytesDown int64  `json:"bytes_down"`
 }
 
 // routeManager 维护全部 /32 回程路由。
@@ -65,15 +80,19 @@ func newRouteManager(relayIP string, logf func(string, ...any)) *routeManager {
 	return m
 }
 
-// list 返回当前已安装的回程路由（供 UI 展示），按 IP 排序保证顺序稳定。
-func (m *routeManager) list() []string {
+// view 返回当前所有回程路由及其流量，按 IP 排序保证 1Hz 刷新时行不跳动。
+func (m *routeManager) view() []RouteEntry {
 	m.mu.Lock()
-	out := make([]string, 0, len(m.states))
-	for ip := range m.states {
-		out = append(out, ip)
+	out := make([]RouteEntry, 0, len(m.states))
+	for ip, st := range m.states {
+		out = append(out, RouteEntry{
+			IP:        ip,
+			BytesUp:   st.bytesUp.Load(),
+			BytesDown: st.bytesDown.Load(),
+		})
 	}
 	m.mu.Unlock()
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
 }
 
@@ -92,19 +111,41 @@ func (m *routeManager) eligible(ip string) bool {
 		!v4.IsLinkLocalUnicast() && !v4.IsUnspecified() && v4[0] != 255
 }
 
-// touchPacket 从入站 IPv4 包头取源地址，确保其回程路由就位。
-// 必须在写入 TUN 之前调用（见文件头约束 1）。
-func (m *routeManager) touchPacket(pkt []byte) {
+// countInbound 记录一个玩家入站包（后端 → 玩家方向的回程路由由源 IP 决定），
+// 并确保该 IP 的回程路由就位。必须在写入 TUN 之前调用（见文件头约束 1）。
+func (m *routeManager) countInbound(pkt []byte) {
 	if len(pkt) < 20 || pkt[0]>>4 != 4 {
 		return
 	}
-	m.ensure(net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15]).String())
+	ip := net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15]).String()
+	if st := m.ensure(ip); st != nil {
+		st.bytesDown.Add(int64(len(pkt)))
+	}
 }
 
-// ensure 刷新活跃时间；路由不存在时同步安装。
-func (m *routeManager) ensure(ip string) {
-	if !m.eligible(ip) {
+// countOutbound 记录一个后端发往玩家的回程包，按目的 IP 归属。
+//
+// 与 countInbound 不同，这里绝不安装路由：本函数在 TUN 读循环里对每个包调用，
+// 而安装要起 route.exe 子进程（几十毫秒），放在这条高频路径上会拖垮吞吐。
+// 回程包能走到 TUN，说明路由已经由入站方向装好了。
+func (m *routeManager) countOutbound(pkt []byte) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
 		return
+	}
+	ip := net.IPv4(pkt[16], pkt[17], pkt[18], pkt[19]).String()
+	m.mu.Lock()
+	st := m.states[ip]
+	m.mu.Unlock()
+	if st != nil {
+		st.bytesUp.Add(int64(len(pkt)))
+	}
+}
+
+// ensure 刷新活跃时间；路由不存在时同步安装。返回该 IP 的状态条目
+//（地址不合格或安装失败时返回 nil）。
+func (m *routeManager) ensure(ip string) *routeState {
+	if !m.eligible(ip) {
+		return nil
 	}
 	now := time.Now()
 
@@ -113,14 +154,15 @@ func (m *routeManager) ensure(ip string) {
 		st.lastSeen = now
 		st.removing = false // 又活跃了，取消可能已入队的删除
 		m.mu.Unlock()
-		return
+		return st
 	}
 	if len(m.states) >= maxReturnRoutes {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	// 先登记再解锁：route.exe 期间不持锁，同 IP 的后续包直接走上面的快路径。
-	m.states[ip] = &routeState{lastSeen: now}
+	st := &routeState{lastSeen: now}
+	m.states[ip] = st
 	m.mu.Unlock()
 
 	if err := syssetup.AddRoute(ip, tunServerIP); err != nil {
@@ -128,9 +170,10 @@ func (m *routeManager) ensure(ip string) {
 		delete(m.states, ip) // 安装失败，下一个包会重试
 		m.mu.Unlock()
 		m.logf("[!] 回程路由添加失败：%s", ip)
-		return
+		return nil
 	}
 	m.logf("[+] 回程路由已添加：%s", ip)
+	return st
 }
 
 // sync 处理服务端推送的活跃会话 IP 全量列表：确认这些 IP 活跃（顺带补齐
@@ -143,7 +186,7 @@ func (m *routeManager) sync(ips []string) {
 		}
 	}
 	for ip := range pushed {
-		m.ensure(ip)
+		_ = m.ensure(ip)
 	}
 
 	now := time.Now()

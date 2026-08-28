@@ -46,6 +46,8 @@ type Engine struct {
 
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（后端回包方向）
 	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
+	bytesUp         atomic.Int64 // 玩家 → 后端 累计字节
+	bytesDown       atomic.Int64 // 后端 → 玩家 累计字节
 	lastWriteErr    atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
 }
 
@@ -59,17 +61,21 @@ func NewEngine() *Engine {
 }
 
 // Snapshot 是 UI 轮询拿到的完整状态。
+//
+// 流量方向以玩家为参照：up = 玩家 → 后端，down = 后端 → 玩家。
 type Snapshot struct {
-	State     State    `json:"state"`
-	Addr      string   `json:"addr"`
-	LastError string   `json:"last_error"`
-	Elevated  bool     `json:"elevated"`
-	TunIP     string   `json:"tun_ip"`
-	UptimeSec int64    `json:"uptime_sec"`
-	PktOut    int64    `json:"pkt_out"`
-	PktIn     int64    `json:"pkt_in"`
-	Routes    []string `json:"routes"`
-	Logs      []string `json:"logs"`
+	State     State        `json:"state"`
+	Addr      string       `json:"addr"`
+	LastError string       `json:"last_error"`
+	Elevated  bool         `json:"elevated"`
+	TunIP     string       `json:"tun_ip"`
+	UptimeSec int64        `json:"uptime_sec"`
+	PktUp     int64        `json:"pkt_up"`
+	PktDown   int64        `json:"pkt_down"`
+	BytesUp   int64        `json:"bytes_up"`
+	BytesDown int64        `json:"bytes_down"`
+	Routes    []RouteEntry `json:"routes"`
+	Logs      []string     `json:"logs"`
 }
 
 func (e *Engine) Snapshot() Snapshot {
@@ -80,8 +86,10 @@ func (e *Engine) Snapshot() Snapshot {
 		LastError: e.lastErr,
 		Elevated:  syssetup.IsElevated(),
 		TunIP:     tunClientIP,
-		PktOut:    e.statTunToTunnel.Load(),
-		PktIn:     e.statTunnelToTun.Load(),
+		PktUp:     e.statTunToTunnel.Load(),
+		PktDown:   e.statTunnelToTun.Load(),
+		BytesUp:   e.bytesUp.Load(),
+		BytesDown: e.bytesDown.Load(),
 	}
 	if e.state == StateConnected && !e.since.IsZero() {
 		s.UptimeSec = int64(time.Since(e.since).Seconds())
@@ -89,7 +97,10 @@ func (e *Engine) Snapshot() Snapshot {
 	e.mu.Unlock()
 
 	if rm := e.routes.Load(); rm != nil {
-		s.Routes = rm.list()
+		s.Routes = rm.view()
+	}
+	if s.Routes == nil {
+		s.Routes = []RouteEntry{}
 	}
 	s.Logs = e.logs.all()
 	return s
@@ -134,6 +145,8 @@ func (e *Engine) Start(addr string) error {
 	saveLastAddr(addr)
 	e.statTunToTunnel.Store(0)
 	e.statTunnelToTun.Store(0)
+	e.bytesUp.Store(0)
+	e.bytesDown.Store(0)
 
 	go func() {
 		defer close(done)

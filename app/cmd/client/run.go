@@ -86,6 +86,8 @@ func (e *Engine) run(ctx context.Context, addr string) {
 			pkt := make([]byte, n)
 			copy(pkt, buf[:n])
 			e.statTunToTunnel.Add(1)
+			e.bytesUp.Add(int64(n))
+			rm.countOutbound(pkt)
 			if _, werr := udp.Write(sess.SealData(pkt)); werr != nil {
 				return
 			}
@@ -196,9 +198,10 @@ func (e *Engine) pump(ctx context.Context, udp *net.UDPConn, dev *tunnet.Device,
 		case n > 0 && buf[0] == tunnel.TypeData:
 			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
 				e.statTunnelToTun.Add(1)
+				e.bytesDown.Add(int64(len(plain)))
 				// 必须先装回程路由再写 TUN：后端回包可能在微秒内产生，
 				// 路由晚一步，回包就从物理网卡漏出去了。
-				rm.touchPacket(plain)
+				rm.countInbound(plain)
 				if werr := dev.WritePacket(plain); werr != nil {
 					e.logWriteErr(werr)
 				}

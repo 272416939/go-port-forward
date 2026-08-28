@@ -10,8 +10,9 @@ const ui = {
   addr: el('addr'), connect: el('btnConnect'), disconnect: el('btnDisconnect'),
   quit: el('btnQuit'),
   tunIP: el('tunIP'), uptime: el('uptime'),
-  pktIn: el('pktIn'), pktOut: el('pktOut'),
-  routes: el('routes'), routeCount: el('routeCount'), logs: el('logs'),
+  bytesUp: el('bytesUp'), bytesDown: el('bytesDown'),
+  rateUp: el('rateUp'), rateDown: el('rateDown'), pktLine: el('pktLine'),
+  routeRows: el('routeRows'), routeCount: el('routeCount'), logs: el('logs'),
 };
 
 const STATE_TEXT = {
@@ -39,6 +40,19 @@ function showError(msg) {
   ui.errBox.hidden = !msg;
 }
 
+// fmtBytes 与主项目 Web 面板保持一致：1024 进制、KB/MB 标签、一位小数。
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(1) + ' ' + u[i];
+}
+
+function fmtRate(bytesPerSec) {
+  return fmtBytes(Math.max(0, Math.round(bytesPerSec))) + '/s';
+}
+
 function formatUptime(sec) {
   if (!sec) return '—';
   const h = Math.floor(sec / 3600);
@@ -48,17 +62,61 @@ function formatUptime(sec) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
-function renderRoutes(list) {
-  const routes = list || [];
-  ui.routeCount.textContent = routes.length;
-  if (routes.length === 0) {
-    ui.routes.innerHTML = '<li class="empty">暂无活跃玩家</li>';
+// 速率靠前后两次轮询做差分算出，后端不存历史。
+// prev 记录上一次的字节数与时间戳；连接重置（字节数变小）时归零而不是显示负值。
+let prev = null;
+
+function computeRates(s) {
+  const now = performance.now();
+  const perIP = new Map();
+  let up = 0, down = 0;
+
+  if (prev) {
+    const dt = (now - prev.at) / 1000;
+    if (dt > 0.2) {
+      const delta = (cur, old) => (cur >= old ? (cur - old) / dt : 0);
+      up = delta(s.bytes_up, prev.up);
+      down = delta(s.bytes_down, prev.down);
+      for (const r of s.routes || []) {
+        const o = prev.perIP.get(r.ip);
+        if (o) perIP.set(r.ip, delta(r.bytes_up, o.up) + delta(r.bytes_down, o.down));
+      }
+    } else {
+      // 间隔过短，沿用上一次的结果，避免除以极小数导致数字乱跳。
+      return prev.rates;
+    }
+  }
+
+  const rates = { up, down, perIP };
+  prev = {
+    at: now, up: s.bytes_up, down: s.bytes_down, rates,
+    perIP: new Map((s.routes || []).map((r) => [r.ip, { up: r.bytes_up, down: r.bytes_down }])),
+  };
+  return rates;
+}
+
+function renderRoutes(routes, rates) {
+  const list = routes || [];
+  ui.routeCount.textContent = list.length;
+  if (list.length === 0) {
+    ui.routeRows.innerHTML = '<tr class="empty"><td colspan="4">暂无活跃玩家</td></tr>';
     return;
   }
-  ui.routes.replaceChildren(...routes.map((ip) => {
-    const li = document.createElement('li');
-    li.textContent = ip;
-    return li;
+  ui.routeRows.replaceChildren(...list.map((r) => {
+    const tr = document.createElement('tr');
+    const cells = [
+      { text: r.ip, cls: 'ip' },
+      { text: fmtBytes(r.bytes_up), cls: 'num' },
+      { text: fmtBytes(r.bytes_down), cls: 'num' },
+      { text: fmtRate(rates.perIP.get(r.ip) || 0), cls: 'num muted' },
+    ];
+    for (const c of cells) {
+      const td = document.createElement('td');
+      td.className = c.cls;
+      td.textContent = c.text;
+      tr.appendChild(td);
+    }
+    return tr;
   }));
 }
 
@@ -78,9 +136,14 @@ function render(s) {
 
   ui.tunIP.textContent = s.state === 'connected' ? s.tun_ip : '—';
   ui.uptime.textContent = formatUptime(s.uptime_sec);
-  ui.pktIn.textContent = (s.pkt_in || 0).toLocaleString();
-  ui.pktOut.textContent = (s.pkt_out || 0).toLocaleString();
-  renderRoutes(s.routes);
+
+  const rates = computeRates(s);
+  ui.bytesUp.textContent = fmtBytes(s.bytes_up);
+  ui.bytesDown.textContent = fmtBytes(s.bytes_down);
+  ui.rateUp.textContent = '↑ ' + fmtRate(rates.up);
+  ui.rateDown.textContent = '↓ ' + fmtRate(rates.down);
+  ui.pktLine.textContent = `数据包 ↑${(s.pkt_up || 0).toLocaleString()} / ↓${(s.pkt_down || 0).toLocaleString()}`;
+  renderRoutes(s.routes, rates);
 
   // 连接中不显示上一次的失败原因，避免误读为当前状态。
   showError(s.state === 'error' ? s.last_error : '');
