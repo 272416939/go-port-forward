@@ -97,9 +97,9 @@ async function poll() {
   try {
     render(await api('/api/status'));
   } catch (err) {
-    ui.stateText.textContent = '界面已断开';
+    ui.stateText.textContent = '后台已停止';
     ui.pill.dataset.state = 'error';
-    showError(`无法连接到本地服务：${err.message}。请重新启动程序。`);
+    showError(`无法连接到后台服务：${err.message}。请关闭窗口后重新启动程序。`);
   }
 }
 
@@ -136,15 +136,13 @@ ui.disconnect.addEventListener('click', async () => {
 ui.quit.addEventListener('click', async () => {
   if (!confirm('退出程序将断开隧道并清理路由，确定吗？')) return;
   stopped = true;
+  ui.pill.dataset.state = 'idle';
+  ui.stateText.textContent = '正在退出…';
   try {
     await api('/api/quit', { method: 'POST' });
   } catch (_) {
     // 进程可能在响应写回前就退出了，这不是错误。
   }
-  document.body.classList.add('is-closed');
-  ui.pill.dataset.state = 'idle';
-  ui.stateText.textContent = '程序已退出';
-  showError('程序已退出，可以关闭此页面。');
 });
 
 poll();

@@ -1,10 +1,10 @@
 //go:build windows
 
-// pf-client —— Port Forward 隧道客户端（Windows，图形界面）。
+// pf-client —— Port Forward 隧道客户端（Windows 桌面应用）。
 //
-// 界面用本机浏览器承载：程序在 127.0.0.1 的随机端口起一个带一次性 token
-// 的本地服务，然后打开默认浏览器。这样不必引入 GUI 工具链或 WebView2 运行时，
-// 单个 exe（加 wintun.dll）即可分发。
+// 界面是一个原生窗口，由系统自带的 Edge WebView2 渲染内嵌页面；页面与隧道
+// 之间走本机回环上的一个受 token 保护的小 HTTP 服务。这样既是单窗口桌面程序，
+// 又不必引入 CGO 或额外的 GUI 工具链——分发物仍是 exe + wintun.dll。
 //
 // 隧道本身需要管理员权限（虚拟网卡、路由表、防火墙规则），未提权时会主动
 // 触发一次 UAC 重启自身。
@@ -14,11 +14,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
-	"time"
 
 	"pfapp/internal/syssetup"
 )
@@ -33,12 +31,20 @@ const (
 )
 
 func main() {
-	// 未提权：请求 UAC 重启自身。用户拒绝时（1223）静默退出，界面仍可打开
-	// 但会显示权限提示，避免用户以为程序崩了。
+	// WebView2 的消息循环必须固定在创建它的 OS 线程上。
+	runtime.LockOSThread()
+
+	// 未提权：请求 UAC 重启自身。用户拒绝时窗口照常打开，但会显示权限提示，
+	// 避免用户以为程序没反应。
 	if !syssetup.IsElevated() && os.Getenv("PF_NO_ELEVATE") == "" {
 		if err := syssetup.RelaunchElevated(); err == nil {
 			return
 		}
+	}
+
+	if !webview2Available() {
+		alert("缺少运行时组件", webview2Hint)
+		os.Exit(1)
 	}
 
 	eng := NewEngine()
@@ -47,18 +53,12 @@ func main() {
 		alert("启动失败", err.Error())
 		os.Exit(1)
 	}
-	eng.logf("界面已就绪：%s", url)
-	// 从终端启动时打印入口地址（GUI 模式无控制台，写入静默失败）；
-	// 浏览器没能自动弹出时用户也能手工打开。
-	fmt.Println("界面地址：" + url)
 
 	if !syssetup.IsElevated() {
 		eng.logf("[!] 当前未以管理员身份运行，无法建立隧道。")
 	}
 
-	openBrowser(url)
-
-	// 自动连接上次使用的地址，省掉重复输入。
+	// 自动连接上次使用的地址，正常使用无需任何输入。
 	if last := loadLastAddr(); last != "" && syssetup.IsElevated() {
 		eng.logf("正在连接上次使用的地址：%s", last)
 		if err := eng.Start(last); err != nil {
@@ -66,26 +66,20 @@ func main() {
 		}
 	}
 
-	// 退出路径有两条：界面上的「退出程序」按钮，或 Ctrl+C / 系统终止信号。
-	// 两者都要走 Stop()，否则 /32 路由和防火墙规则会残留在系统里。
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	select {
-	case <-sig:
-	case <-quit:
+	// 界面上的「退出程序」按钮：关掉窗口，让消息循环退出。
+	go func() {
+		<-quit
+		terminateWindow()
+	}()
+
+	// 阻塞直到窗口关闭；随后清理 /32 路由与防火墙规则。
+	if err := runWindow(url); err != nil {
+		alert("界面异常", err.Error())
 	}
 	eng.Stop()
-	// 给 defer 中的系统命令（route delete / 防火墙规则移除）留出执行时间。
-	time.Sleep(300 * time.Millisecond)
 }
 
-// openBrowser 用系统默认浏览器打开界面。
-// rundll32 比 `cmd /c start` 稳妥：不会因 URL 中的 & 被 cmd 解析而截断。
-func openBrowser(url string) {
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-}
-
-// alert 弹出一个原生消息框（此时界面还没起来，只能走系统对话框）。
+// alert 弹出一个原生消息框（窗口尚未就绪时只能走系统对话框）。
 func alert(title, msg string) {
 	_ = exec.Command("mshta", fmt.Sprintf(
 		`javascript:alert("%s\n\n%s");close()`,

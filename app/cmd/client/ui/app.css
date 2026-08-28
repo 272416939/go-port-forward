@@ -128,5 +128,6 @@ input[type="text"]:disabled { opacity: .55; }
 ::-webkit-scrollbar-thumb:hover { background: #3c4756; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* 已退出：禁用全部操作，只留日志可读 */
-.is-closed .card:not(.card-wide) { opacity: .45; pointer-events: none; }
+/* 桌面窗口内不需要文本选中高亮，但日志要能复制 */
+body { user-select: none; }
+.logs, .routes, input { user-select: text; }
