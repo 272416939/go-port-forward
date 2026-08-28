@@ -432,6 +432,7 @@ Windows 机器的其它上网/RDP 流量、以及“通过后端公网 IP 直接
 ### 注意事项 | Notes
 
 - 透明模式与 PROXY 协议透传互斥（二选一）；两者都保留，按拓扑任选。
+- 透明模式**仅支持 UDP 规则**（TCP 的回包无法送达透明 socket），协议含 TCP 时开关会被拒绝；UDP 场景（如基岩版 19132/58618）完全覆盖。
 - 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
 - Windows 端需要管理员权限（wintun 驱动 + 路由管理）。
 - 服务端已内置隧道（`tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward/MASQUERADE/FORWARD 放行），**无需单独的 pf-server 进程**。

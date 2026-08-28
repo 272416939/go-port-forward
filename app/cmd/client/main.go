@@ -41,6 +41,8 @@ var (
 	// 数据面统计（每 5 秒打印，用于定位断点在隧道段还是 Windows 本地段）
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（玩家回包方向）
 	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
+
+	serverIP net.IP // 中转机公网地址：回包源改写目标（10.66.0.2 → serverIP）
 )
 
 func main() {
@@ -57,6 +59,9 @@ func main() {
 	serverAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		fatal("地址无效 | invalid address: %v", err)
+	}
+	if ra, rerr := net.ResolveIPAddr("ip4", serverAddr.IP.String()); rerr == nil {
+		serverIP = ra.IP
 	}
 
 	udp, err := net.DialUDP("udp", nil, serverAddr)
@@ -174,6 +179,12 @@ func handshake(udp *net.UDPConn, server *net.UDPAddr) (*tunnel.Session, error) {
 		}
 		_ = udp.SetReadDeadline(time.Time{})
 		shared := tunnel.ECDHShared(&accept.Eph, priv)
+		if serverIP == nil {
+			if ra, rerr := net.ResolveIPAddr("ip4", server.IP.String()); rerr == nil {
+				serverIP = ra.IP
+				fmt.Println(t("服务器公网地址（回包源改写目标）：", "Server public IP (rewrite target): ") + serverIP.String())
+			}
+		}
 		return tunnel.NewSession(tunnel.DeriveSessionKey(shared, []byte(defaultPSK))), nil
 	}
 	return nil, fmt.Errorf("服务端无应答（检查地址/端口/防火墙）")
@@ -194,6 +205,7 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 		case n > 0 && buf[0] == tunnel.TypeData:
 			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
 				statTunnelToTun.Add(1)
+				rewriteSource(plain)
 				_ = dev.WritePacket(plain)
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:

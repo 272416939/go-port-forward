@@ -672,6 +672,9 @@ func (m *Manager) startForwarders(r *models.ForwardRule) error {
 		if r.ProxyProtocol {
 			return fmt.Errorf("透明模式与 PROXY 协议互斥 | transparent conflicts with proxy_protocol")
 		}
+		if r.Protocol != models.ProtocolUDP {
+			return fmt.Errorf("透明模式仅支持 UDP 规则（TCP 回包无法送达透明 socket），请将协议改为 udp | transparent mode only supports UDP rules")
+		}
 		if err := checkTransparentSupport(); err != nil {
 			return err
 		}

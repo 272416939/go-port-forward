@@ -41,19 +41,16 @@ func defaultOutInterface() (string, error) {
 	return "", fmt.Errorf("tunnelapp: 未找到默认路由接口: %s", strings.TrimSpace(out))
 }
 
-// setupNAT 启用 IP 转发、放行 TUN 转发、并对隧道网段做 MASQUERADE（幂等）。
-// FORWARD 放行至关重要：云镜像普遍默认 DROP FORWARD，缺失会导致
-// “隧道通但业务不通”（回包被内核静默丢弃）。
-//
-// 注意：iptables 的 -t <table> 必须位于 -A/-C 等命令之前，否则报
-// Bad argument 'nat'。
+// setupNetwork 启用 IP 转发、放行 TUN 转发并放宽 rp_filter（幂等）。
+// 透明模式的回包源地址已被 pf-client 在 Windows 侧改写为服务器公网 IP，
+// 因此这里不需要 MASQUERADE；FORWARD 放行至关重要（云镜像普遍默认 DROP）。
+// rp_filter 放宽为 loose：TUN 入包的源地址（玩家 IP）的对称路由不在入接口上。
 func setupNAT(tunName, tunCIDR string) error {
 	if _, err := run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		return err
 	}
-	iface, err := defaultOutInterface()
-	if err != nil {
-		return err
+	for _, key := range []string{"net.ipv4.conf.all.rp_filter", "net.ipv4.conf.default.rp_filter", "net.ipv4.conf." + tunName + ".rp_filter"} {
+		_, _ = run("sysctl", "-w", key+"=2")
 	}
 	ensure := func(table string, ruleSpec ...string) error {
 		check := append([]string{"-t", table, "-C"}, ruleSpec...)
@@ -63,9 +60,6 @@ func setupNAT(tunName, tunCIDR string) error {
 		add := append([]string{"-t", table, "-A"}, ruleSpec...)
 		_, aerr := run("iptables", add...)
 		return aerr
-	}
-	if err := ensure("nat", "POSTROUTING", "-s", tunCIDR, "-o", iface, "-j", "MASQUERADE"); err != nil {
-		return err
 	}
 	if err := ensure("filter", "FORWARD", "-i", tunName, "-j", "ACCEPT"); err != nil {
 		return err
