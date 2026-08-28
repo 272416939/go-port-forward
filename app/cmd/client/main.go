@@ -37,6 +37,10 @@ var (
 	peerPtr atomic.Pointer[net.UDPAddr]
 	addedMu sync.Mutex
 	added   = map[string]bool{} // 已添加回程路由的 IP
+
+	// 数据面统计（每 5 秒打印，用于定位断点在隧道段还是 Windows 本地段）
+	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（玩家回包方向）
+	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
 )
 
 func main() {
@@ -82,10 +86,24 @@ func main() {
 			if s := sessPtr.Load(); s != nil {
 				pkt := make([]byte, n)
 				copy(pkt, buf[:n])
+				statTunToTunnel.Add(1)
 				if _, werr := udp.Write(s.SealData(pkt)); werr != nil {
 					return
 				}
 			}
+		}
+	}()
+
+	// 后台：数据面统计（隧道建立后每 5 秒一行）
+	go func() {
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for range tick.C {
+			if sessPtr.Load() == nil {
+				continue
+			}
+			ti, to := statTunToTunnel.Load(), statTunnelToTun.Load()
+			fmt.Printf("%s", fmt.Sprintf(t("[流量] 回程(TUN→隧道) %d 包 | 入站(隧道→TUN) %d 包\n", "[traffic] return(TUN->tunnel) %d pkts | inbound(tunnel->TUN) %d pkts\n"), ti, to))
 		}
 	}()
 
@@ -174,8 +192,8 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 		_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
 		switch {
 		case n > 0 && buf[0] == tunnel.TypeData:
-			plain, oerr := sess.OpenData(buf[:n])
-			if oerr == nil {
+			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
+				statTunnelToTun.Add(1)
 				_ = dev.WritePacket(plain)
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:
