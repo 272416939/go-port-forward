@@ -82,7 +82,7 @@ func main() {
 			if s := sessPtr.Load(); s != nil {
 				pkt := make([]byte, n)
 				copy(pkt, buf[:n])
-				if _, werr := udp.WriteToUDP(s.SealData(pkt), serverAddr); werr != nil {
+				if _, werr := udp.Write(s.SealData(pkt)); werr != nil {
 					return
 				}
 			}
@@ -95,7 +95,7 @@ func main() {
 		defer tick.Stop()
 		for range tick.C {
 			if s := sessPtr.Load(); s != nil {
-				_, _ = udp.WriteToUDP(s.SealPing(), serverAddr)
+				_, _ = udp.Write(s.SealPing())
 			}
 		}
 	}()
@@ -139,19 +139,17 @@ func handshake(udp *net.UDPConn, server *net.UDPAddr) (*tunnel.Session, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := udp.WriteToUDP(hello.Marshal(), server); err != nil {
+		if _, err := udp.Write(hello.Marshal()); err != nil {
 			return nil, err
 		}
 		buf := make([]byte, tunnel.MaxPacket+64)
 		_ = udp.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		n, from, err := udp.ReadFromUDP(buf)
+		n, err := udp.Read(buf)
 		if err != nil {
 			fmt.Printf(t("  等待服务端应答 (%d/%d)…\n", "  waiting for server (%d/%d)…\n"), attempt, handshakeTries)
 			continue
 		}
-		if !from.IP.Equal(server.IP) || from.Port != server.Port {
-			continue
-		}
+
 		accept, err := tunnel.ParseServerAccept([]byte(defaultPSK), buf[:n], hello.Eph)
 		if err != nil {
 			return nil, fmt.Errorf("%v（请核对服务端 PSK 配置）", err)
@@ -169,7 +167,7 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 	buf := make([]byte, tunnel.MaxPacket+64)
 	_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
 	for {
-		n, _, err := udp.ReadFromUDP(buf)
+		n, err := udp.Read(buf)
 		if err != nil {
 			return err // 超时或错误 → 外层重握手
 		}
@@ -188,7 +186,7 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 			pong := make([]byte, 0, 1+24+16)
 			pong = append(pong, tunnel.TypePong)
 			pong = append(pong, sess.Seal(nil)...)
-			_, _ = udp.WriteToUDP(pong, server)
+			_, _ = udp.Write(pong)
 		}
 	}
 }
