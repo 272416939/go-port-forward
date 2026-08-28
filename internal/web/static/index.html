@@ -56,9 +56,9 @@
         <i class="bi bi-shield-lock sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('访问控制','Access Control')"></span>
       </a>
-      <a href="#" class="sidebar__link" @click.prevent="showPlayersModal()">
-        <i class="bi bi-people sidebar__link-icon"></i>
-        <span class="sidebar__link-text" x-text="t('在线玩家','Players')"></span>
+      <a href="#" class="sidebar__link" @click.prevent="showSessionsModal()">
+        <i class="bi bi-arrow-left-right sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('活跃会话','Sessions')"></span>
       </a>
       <a href="#" class="sidebar__link" @click.prevent="showDiagnosticsModal()">
         <i class="bi bi-activity sidebar__link-icon"></i>
@@ -702,7 +702,7 @@
 </div>
 
 <!-- ============================================================
-     Access Control Modal（IP 名单 / 玩家封禁 / 连接日志）
+     Access Control Modal（IP 名单 / 连接日志）
      ============================================================ -->
 <div class="modal fade" id="aclModal" tabindex="-1" aria-labelledby="aclModalLabel">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -714,7 +714,6 @@
       <div class="modal-body">
         <ul class="nav nav-tabs mb-3">
           <li class="nav-item"><button class="nav-link" :class="{active: aclTab==='ip'}" @click="aclTab='ip'" x-text="t('IP 黑白名单','IP Rules')"></button></li>
-          <li class="nav-item"><button class="nav-link" :class="{active: aclTab==='bans'}" @click="aclTab='bans'; loadBans()" x-text="t('玩家封禁','Player Bans')"></button></li>
           <li class="nav-item"><button class="nav-link" :class="{active: aclTab==='logs'}" @click="aclTab='logs'; loadConnLogs()" x-text="t('连接日志','Connection Logs')"></button></li>
         </ul>
 
@@ -770,49 +769,6 @@
           </div>
         </div>
 
-        <!-- 玩家封禁 -->
-        <div x-show="aclTab==='bans'" x-cloak>
-          <form class="row g-2 align-items-end mb-3" @submit.prevent="saveBan()">
-            <div class="col-md-3">
-              <label class="form-label small mb-1" x-text="t('类型','Type')"></label>
-              <select class="form-select form-select-sm" x-model="banForm.type">
-                <option value="gamertag" x-text="t('玩家名 (Gamertag)','Gamertag')"></option>
-                <option value="xuid" x-text="t('XUID','XUID')"></option>
-              </select>
-            </div>
-            <div class="col-md-5">
-              <label class="form-label small mb-1" x-text="t('值','Value')"></label>
-              <input class="form-control form-control-sm" x-model="banForm.value" :placeholder="t('玩家名或 XUID','Gamertag or XUID')"/>
-            </div>
-            <div class="col-md-4">
-              <button type="submit" class="btn btn-danger btn-sm w-100" :disabled="banSaving">
-                <span x-text="t('添加封禁（命中即踢）','Ban (kick on match)')"></span>
-              </button>
-            </div>
-          </form>
-          <div class="table-responsive">
-            <table class="table table-sm table-hover align-middle">
-              <thead><tr>
-                <th x-text="t('类型','Type')"></th>
-                <th x-text="t('值','Value')"></th>
-                <th x-text="t('备注','Comment')"></th>
-                <th></th>
-              </tr></thead>
-              <tbody>
-                <template x-for="b in playerBans" :key="b.id">
-                  <tr>
-                    <td><span class="badge text-bg-secondary rounded-pill" x-text="b.type"></span></td>
-                    <td class="font-monospace small" x-text="b.value"></td>
-                    <td class="small text-muted" x-text="b.comment || ''"></td>
-                    <td class="text-end"><button class="btn btn-sm btn-outline-danger btn-icon" @click="deleteBan(b)" :title="t('解除','Remove')"><i class="bi bi-trash"></i></button></td>
-                  </tr>
-                </template>
-                <tr x-show="playerBans.length===0"><td colspan="4" class="text-center text-muted small py-3" x-text="t('暂无封禁','No bans')"></td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
         <!-- 连接日志 -->
         <div x-show="aclTab==='logs'" x-cloak>
           <div class="d-flex justify-content-end mb-2">
@@ -829,7 +785,6 @@
                 <th x-text="t('协议','Proto')"></th>
                 <th x-text="t('规则','Rule')"></th>
                 <th x-text="t('来源','Source')"></th>
-                <th x-text="t('玩家','Player')"></th>
                 <th x-text="t('流量 ↓/↑','Traffic ↓/↑')"></th>
                 <th></th>
               </tr></thead>
@@ -841,15 +796,13 @@
                     <td class="small text-uppercase" x-text="l.protocol"></td>
                     <td class="small" x-text="l.rule_name || ''"></td>
                     <td class="font-monospace small" x-text="l.src_ip + ':' + l.src_port"></td>
-                    <td class="small" x-text="l.player || ''"></td>
                     <td class="small" x-text="fmtBytes(l.bytes_in) + ' / ' + fmtBytes(l.bytes_out)"></td>
                     <td class="text-end text-nowrap">
-                      <button class="btn btn-sm btn-outline-danger btn-icon me-1" @click="quickBanIP(l)" x-show="l.event!=='kick'" :title="t('封禁此 IP','Ban this IP')">IP</button>
-                      <button class="btn btn-sm btn-outline-danger btn-icon" @click="quickBanPlayer(l)" x-show="l.player" :title="t('封禁此玩家','Ban this player')"><i class="bi bi-person-slash"></i></button>
+                      <button class="btn btn-sm btn-outline-danger btn-icon" @click="quickBanIP(l)" x-show="l.event!=='leave'" :title="t('封禁此 IP','Ban this IP')">IP</button>
                     </td>
                   </tr>
                 </template>
-                <tr x-show="connLogs.length===0"><td colspan="8" class="text-center text-muted small py-3" x-text="t('暂无记录','No records')"></td></tr>
+                <tr x-show="connLogs.length===0"><td colspan="7" class="text-center text-muted small py-3" x-text="t('暂无记录','No records')"></td></tr>
               </tbody>
             </table>
           </div>
@@ -860,15 +813,15 @@
 </div>
 
 <!-- ============================================================
-     Online Players Modal
+     Active Sessions Modal
      ============================================================ -->
-<div class="modal fade" id="playersModal" tabindex="-1" aria-labelledby="playersModalLabel">
+<div class="modal fade" id="sessionsModal" tabindex="-1" aria-labelledby="sessionsModalLabel">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title" id="playersModalLabel"><i class="bi bi-people me-2"></i><span x-text="t('在线玩家','Online Players')"></span></h5>
+        <h5 class="modal-title" id="sessionsModalLabel"><i class="bi bi-arrow-left-right me-2"></i><span x-text="t('活跃会话','Active Sessions')"></span></h5>
         <div class="d-flex align-items-center gap-2">
-          <button type="button" class="btn btn-sm btn-outline-secondary btn-icon" @click="loadPlayers()" :disabled="playersLoading">
+          <button type="button" class="btn btn-sm btn-outline-secondary btn-icon" @click="loadSessions()" :disabled="sessionsLoading">
             <i class="bi bi-arrow-clockwise"></i>
             <span x-text="t('刷新','Refresh')"></span>
           </button>
@@ -876,31 +829,29 @@
         </div>
       </div>
       <div class="modal-body">
-        <div class="form-text mb-2" x-text="t('玩家名与 XUID 通过基岩版登录握手被动识别（实验性），仅转发 UDP 规则的会话会出现。','Gamertag/XUID are passively identified from the Bedrock login handshake (experimental); only UDP rule sessions appear here.')"></div>
+        <div class="form-text mb-2" x-text="t('当前所有客户端会话的实时视图（来源、规则、时长、流量），TCP 与 UDP 通用。','Live view of all client sessions (source, rule, uptime, traffic) for both TCP and UDP.')"></div>
         <div class="table-responsive">
           <table class="table table-sm table-hover align-middle">
             <thead><tr>
-              <th x-text="t('玩家','Player')"></th>
-              <th>XUID</th>
-              <th x-text="t('来源','Source')"></th>
+              <th x-text="t('协议','Proto')"></th>
               <th x-text="t('规则','Rule')"></th>
-              <th x-text="t('加入时间','Joined')"></th>
+              <th x-text="t('来源','Source')"></th>
+              <th x-text="t('建立时间','Since')"></th>
               <th x-text="t('流量 ↓/↑','Traffic ↓/↑')"></th>
               <th></th>
             </tr></thead>
             <tbody>
-              <template x-for="p in onlinePlayers" :key="p.session_key">
+              <template x-for="s in activeSessions" :key="s.key">
                 <tr>
-                  <td class="small fw-semibold" x-text="p.player || t('未识别','Unknown')"></td>
-                  <td class="font-monospace small text-muted" x-text="p.xuid || ''"></td>
-                  <td class="font-monospace small" x-text="p.src_ip + ':' + p.src_port"></td>
-                  <td class="small" x-text="p.rule_name"></td>
-                  <td class="small" x-text="fmtDateTime(p.since)"></td>
-                  <td class="small" x-text="fmtBytes(p.bytes_in) + ' / ' + fmtBytes(p.bytes_out)"></td>
-                  <td class="text-end"><button class="btn btn-sm btn-outline-danger btn-icon" @click="kickBanPlayer(p)" x-show="p.player" :title="t('封禁并踢出','Ban & kick')"><i class="bi bi-person-slash"></i></button></td>
+                  <td><span class="badge text-bg-secondary rounded-pill text-uppercase" x-text="s.protocol"></span></td>
+                  <td class="small" x-text="s.rule_name"></td>
+                  <td class="font-monospace small" x-text="s.src_ip + ':' + s.src_port"></td>
+                  <td class="small" x-text="fmtDateTime(s.since)"></td>
+                  <td class="small" x-text="fmtBytes(s.bytes_in) + ' / ' + fmtBytes(s.bytes_out)"></td>
+                  <td class="text-end"><button class="btn btn-sm btn-outline-danger btn-icon" @click="quickBanSession(s)" :title="t('封禁此来源 IP','Ban this source IP')">IP</button></td>
                 </tr>
               </template>
-              <tr x-show="onlinePlayers.length===0"><td colspan="7" class="text-center text-muted small py-3" x-text="t('当前没有已识别的在线玩家','No identified players right now')"></td></tr>
+              <tr x-show="activeSessions.length===0"><td colspan="6" class="text-center text-muted small py-3" x-text="t('当前没有活跃会话','No active sessions')"></td></tr>
             </tbody>
           </table>
         </div>
@@ -997,21 +948,18 @@ function portForwardApp() {
 	    _refreshTimer: null,
 	    _refreshInFlight: false,
 	    _focusedRuleTimer: null,
-	    // 访问控制 / 玩家识别
+	    // 访问控制 / 活跃会话
 	    aclTab: 'ip',
 	    aclEntries: [],
-	    playerBans: [],
 	    connLogs: [],
-	    onlinePlayers: [],
+	    activeSessions: [],
 	    aclForm: { cidr: '', action: 'deny', comment: '' },
-	    banForm: { type: 'gamertag', value: '', comment: '' },
 	    aclSaving: false,
-	    banSaving: false,
 	    logsLoading: false,
-	    playersLoading: false,
+	    sessionsLoading: false,
 	    _aclModal: null,
-	    _playersModal: null,
-	    _playersTimer: null,
+	    _sessionsModal: null,
+	    _sessionsTimer: null,
 
     get filteredRules() {
       const q = this.search.trim().toLowerCase()
@@ -1032,14 +980,14 @@ function portForwardApp() {
       this._ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'))
       this._wslModal  = new bootstrap.Modal(document.getElementById('wslModal'))
       this._aclModal = new bootstrap.Modal(document.getElementById('aclModal'))
-      this._playersModal = new bootstrap.Modal(document.getElementById('playersModal'))
-      const playersModalEl = document.getElementById('playersModal')
-      playersModalEl.addEventListener('shown.bs.modal', () => {
-        this.loadPlayers()
-        this._playersTimer = setInterval(() => this.loadPlayers(true), 5000)
+      this._sessionsModal = new bootstrap.Modal(document.getElementById('sessionsModal'))
+      const sessionsModalEl = document.getElementById('sessionsModal')
+      sessionsModalEl.addEventListener('shown.bs.modal', () => {
+        this.loadSessions()
+        this._sessionsTimer = setInterval(() => this.loadSessions(true), 5000)
       })
-      playersModalEl.addEventListener('hidden.bs.modal', () => {
-        if (this._playersTimer) { clearInterval(this._playersTimer); this._playersTimer = null }
+      sessionsModalEl.addEventListener('hidden.bs.modal', () => {
+        if (this._sessionsTimer) { clearInterval(this._sessionsTimer); this._sessionsTimer = null }
       })
 	      const diagnosticsModalEl = document.getElementById('diagnosticsModal')
 	      this._diagnosticsModal = new bootstrap.Modal(diagnosticsModalEl)
@@ -1269,15 +1217,15 @@ function portForwardApp() {
       }
     },
 
-	    // --- 访问控制 / 玩家识别 ---
+	    // --- 访问控制 / 活跃会话 ---
     showACLModal() {
       this.loadACL()
       this._aclModal.show()
     },
 
-    showPlayersModal() {
-      this.loadPlayers()
-      this._playersModal.show()
+    showSessionsModal() {
+      this.loadSessions()
+      this._sessionsModal.show()
     },
 
     ruleNameById(id) {
@@ -1294,7 +1242,6 @@ function portForwardApp() {
         join: _t('加入','join'),
         leave: _t('离开','leave'),
         denied: _t('已拒绝','denied'),
-        kick: _t('已踢出','kicked'),
       }[ev] || ev
     },
 
@@ -1340,45 +1287,14 @@ function portForwardApp() {
       else showToast('danger', d.message || _t('删除失败','Delete failed'))
     },
 
-    async loadBans() {
+    async loadSessions(background = false) {
+      if (!background) this.sessionsLoading = true
       try {
-        const res = await fetch('/api/bans')
+        const res = await fetch('/api/sessions')
         const d = await res.json()
-        if (d.success) this.playerBans = d.data || []
+        if (d.success) this.activeSessions = (d.data && d.data.sessions) || []
       } catch (e) { /* 静默 */ }
-    },
-
-    async saveBan() {
-      if (!this.banForm.value.trim()) {
-        showToast('warning', _t('请填写玩家名或 XUID','Please enter a gamertag or XUID'))
-        return
-      }
-      this.banSaving = true
-      try {
-        const res = await fetch('/api/bans', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ type: this.banForm.type, value: this.banForm.value.trim(), comment: this.banForm.comment || '' })
-        })
-        const d = await res.json()
-        if (d.success) {
-          showToast('success', _t('封禁已生效','Ban is active'))
-          this.banForm.value = ''
-          this.loadBans()
-        } else {
-          showToast('danger', d.message || _t('保存失败','Save failed'))
-        }
-      } catch (e) {
-        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
-      } finally { this.banSaving = false }
-    },
-
-    async deleteBan(b) {
-      if (!confirm(_t('解除该玩家的封禁？','Remove this ban?'))) return
-      const res = await fetch('/api/bans/'+b.id, { method:'DELETE' })
-      const d = await res.json()
-      if (d.success) this.loadBans()
-      else showToast('danger', d.message || _t('操作失败','Operation failed'))
+      finally { this.sessionsLoading = false }
     },
 
     async loadConnLogs() {
@@ -1391,14 +1307,20 @@ function portForwardApp() {
       finally { this.logsLoading = false }
     },
 
-    async loadPlayers(background = false) {
-      if (!background) this.playersLoading = true
-      try {
-        const res = await fetch('/api/players')
-        const d = await res.json()
-        if (d.success) this.onlinePlayers = (d.data && d.data.players) || []
-      } catch (e) { /* 静默 */ }
-      finally { this.playersLoading = false }
+    async quickBanSession(s) {
+      if (!s.src_ip) return
+      if (!confirm(_t('封禁来源 IP '+s.src_ip+' ？该来源的新连接将被拒绝。','Ban source IP '+s.src_ip+' ? New connections from this source will be rejected.'))) return
+      const res = await fetch('/api/acl', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ cidr: s.src_ip, action: 'deny', comment: _t('来自会话面板','from sessions panel') })
+      })
+      const d = await res.json()
+      if (d.success) {
+        showToast('success', _t('已封禁该 IP，现存会话不受影响，新连接将被拒绝','IP banned: existing session unaffected, new connections rejected'))
+      } else {
+        showToast('danger', d.message || _t('操作失败','Operation failed'))
+      }
     },
 
     async quickBanIP(l) {
@@ -1414,31 +1336,6 @@ function portForwardApp() {
         showToast('success', _t('已封禁该 IP','IP banned'))
         this.aclTab = 'logs'
         this.loadConnLogs()
-      } else {
-        showToast('danger', d.message || _t('操作失败','Operation failed'))
-      }
-    },
-
-    async quickBanPlayer(l) {
-      await this.banByValue('gamertag', l.player)
-    },
-
-    async kickBanPlayer(p) {
-      await this.banByValue('gamertag', p.player)
-    },
-
-    async banByValue(type, value) {
-      if (!value) return
-      if (!confirm(_t('封禁 '+value+' ？被踢后其新会话也会被立即断开。','Ban '+value+' ? Future sessions will be cut immediately.'))) return
-      const res = await fetch('/api/bans', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ type, value, comment: _t('来自面板操作','from panel') })
-      })
-      const d = await res.json()
-      if (d.success) {
-        showToast('success', _t('封禁已生效','Ban is active'))
-        this.loadPlayers(true)
       } else {
         showToast('danger', d.message || _t('操作失败','Operation failed'))
       }

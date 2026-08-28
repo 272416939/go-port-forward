@@ -125,21 +125,48 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 	defer src.Close()
 
 	// 访问控制：拒绝的连接直接关闭
-	if remote, ok := src.RemoteAddr().(*net.TCPAddr); ok {
-		if !f.svc.allowed(rule.ID, remote.IP) {
-			logger.S.Warnw("TCP source denied by ACL", "rule", rule.Name, "src", remote.String())
-			if f.svc != nil {
-				f.svc.logEvent(models.ConnLogEntry{
-					Protocol: models.ProtocolTCP,
-					RuleID:   rule.ID,
-					RuleName: rule.Name,
-					SrcIP:    remote.IP.String(),
-					SrcPort:  remote.Port,
-					Event:    models.ConnEventDenied,
-				})
-			}
-			return
+	remote, remoteOK := src.RemoteAddr().(*net.TCPAddr)
+	if remoteOK && !f.svc.allowed(rule.ID, remote.IP) {
+		logger.S.Warnw("TCP source denied by ACL", "rule", rule.Name, "src", remote.String())
+		if f.svc != nil {
+			f.svc.logEvent(models.ConnLogEntry{
+				Protocol: models.ProtocolTCP,
+				RuleID:   rule.ID,
+				RuleName: rule.Name,
+				SrcIP:    remote.IP.String(),
+				SrcPort:  remote.Port,
+				Event:    models.ConnEventDenied,
+			})
 		}
+		return
+	}
+
+	// 通用会话登记（活跃会话视图 + join/leave 日志）
+	var si *sessionInfo
+	now := time.Now()
+	if f.svc != nil && f.svc.sessions != nil && remoteOK {
+		key := sessionKey(models.ProtocolTCP, rule.ID, remote)
+		si = f.svc.sessions.obtain(key, &sessionInfo{
+			key:      key,
+			Protocol: models.ProtocolTCP,
+			RuleID:   rule.ID,
+			RuleName: rule.Name,
+			SrcIP:    remote.IP.String(),
+			SrcPort:  remote.Port,
+			Since:    now,
+		})
+		f.svc.logEvent(models.ConnLogEntry{
+			Protocol: models.ProtocolTCP,
+			RuleID:   rule.ID,
+			RuleName: rule.Name,
+			SrcIP:    remote.IP.String(),
+			SrcPort:  remote.Port,
+			Event:    models.ConnEventJoin,
+		})
+		defer func() {
+			f.svc.sessions.remove(si.key)
+			si.finish(models.ConnEventLeave, f.svc.logs)
+		}()
 	}
 
 	f.trackConn(src)
@@ -183,10 +210,16 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// per-connection 会话字节计数（无会话登记时为 nil）
+	var inExtra, outExtra *atomic.Int64
+	if si != nil {
+		inExtra, outExtra = &si.bytesIn, &si.bytesOut
+	}
+
 	// client → target: after EOF from client, half-close the target write side
 	go func() {
 		defer wg.Done()
-		f.copyBufCounting(dst, src, &f.bytesIn)
+		f.copyBufCounting(dst, src, &f.bytesIn, inExtra)
 		if tc, ok := dst.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
@@ -194,7 +227,7 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 	// target → client: after EOF from target, half-close the client write side
 	go func() {
 		defer wg.Done()
-		f.copyBufCounting(src, dst, &f.bytesOut)
+		f.copyBufCounting(src, dst, &f.bytesOut, outExtra)
 		if tc, ok := src.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
@@ -204,8 +237,9 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 
 // countingWriter wraps an io.Writer and atomically accumulates bytes written in real time.
 type countingWriter struct {
-	w       io.Writer
-	counter *atomic.Int64
+	w        io.Writer
+	counter  *atomic.Int64 // 聚合计数（转发器级）| forwarder-wide counter
+	extra    *atomic.Int64 // 可选：单连接计数（会话视图）| optional per-connection counter
 }
 
 // countingWriterPool 复用 countingWriter，避免每次连接的双向拷贝各分配一个堆对象。
@@ -218,6 +252,9 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	if n > 0 {
 		cw.counter.Add(int64(n))
+		if cw.extra != nil {
+			cw.extra.Add(int64(n))
+		}
 	}
 	return n, err
 }
@@ -226,18 +263,21 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 func (cw *countingWriter) reset() {
 	cw.w = nil
 	cw.counter = nil
+	cw.extra = nil
 }
 
-// copyBufCounting copies from src to dst using a pooled buffer, updating counter on every write.
+// copyBufCounting copies from src to dst using a pooled buffer, updating the
+// forwarder-wide counter (and optional per-connection counter) on every write.
 // countingWriter 从 sync.Pool 获取，拷贝完成后归还，所有计量在归还前已完成。
 // countingWriter is obtained from sync.Pool and returned after copy; all counting is done before return.
-func (f *TCPForwarder) copyBufCounting(dst io.Writer, src io.Reader, counter *atomic.Int64) {
+func (f *TCPForwarder) copyBufCounting(dst io.Writer, src io.Reader, counter *atomic.Int64, extra *atomic.Int64) {
 	buf := pool.GetBuffer(f.bufferSize)
 	defer pool.PutBuffer(buf)
 
 	cw := countingWriterPool.Get().(*countingWriter)
 	cw.w = dst
 	cw.counter = counter
+	cw.extra = extra
 
 	_, _ = io.CopyBuffer(cw, src, buf)
 

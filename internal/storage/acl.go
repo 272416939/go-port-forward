@@ -12,9 +12,8 @@ import (
 )
 
 var (
-	aclBucket        = []byte("acl")
-	playerBansBucket = []byte("playerbans")
-	connLogsBucket   = []byte("connlogs")
+	aclBucket      = []byte("acl")
+	connLogsBucket = []byte("connlogs")
 )
 
 // ListACLEntries returns every IP access-control entry.
@@ -51,43 +50,6 @@ func (s *boltStore) SaveACLEntry(entry *models.ACLEntry) error {
 func (s *boltStore) DeleteACLEntry(id string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(aclBucket).Delete([]byte(id))
-	})
-}
-
-// ListPlayerBans returns every banned player entry.
-func (s *boltStore) ListPlayerBans() ([]*models.PlayerBan, error) {
-	var bans []*models.PlayerBan
-	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(playerBansBucket).ForEach(func(_, v []byte) error {
-			var b models.PlayerBan
-			if err := json.Unmarshal(v, &b); err != nil {
-				return err
-			}
-			bans = append(bans, &b)
-			return nil
-		})
-	})
-	return bans, err
-}
-
-// SavePlayerBan inserts or updates a ban keyed by ID.
-func (s *boltStore) SavePlayerBan(ban *models.PlayerBan) error {
-	if ban.ID == "" {
-		return fmt.Errorf("storage: player ban id is required")
-	}
-	data, err := json.Marshal(ban)
-	if err != nil {
-		return err
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(playerBansBucket).Put([]byte(ban.ID), data)
-	})
-}
-
-// DeletePlayerBan removes a ban by ID.
-func (s *boltStore) DeletePlayerBan(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(playerBansBucket).Delete([]byte(id))
 	})
 }
 

@@ -2,12 +2,12 @@ package forward
 
 import (
 	"go-port-forward/internal/models"
-	"go-port-forward/internal/raksniff"
 	"go-port-forward/internal/storage"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ACLGuard 持有编译后的黑白名单快照；热路径无锁读取。
@@ -86,63 +86,6 @@ func (g *ACLGuard) Allowed(ruleID string, ip net.IP) bool {
 	return true
 }
 
-// BanGuard 持有按玩家封禁名单的编译快照。
-// BanGuard holds the compiled banned-players snapshot.
-type BanGuard struct {
-	v atomic.Pointer[banSnapshot]
-}
-
-type banSnapshot struct {
-	gamertags map[string]struct{} // 统一小写比较 | lower-cased
-	xuids     map[string]struct{}
-}
-
-func compileBans(bans []*models.PlayerBan) *banSnapshot {
-	s := &banSnapshot{
-		gamertags: make(map[string]struct{}),
-		xuids:     make(map[string]struct{}),
-	}
-	for _, b := range bans {
-		v := strings.TrimSpace(b.Value)
-		if v == "" {
-			continue
-		}
-		if strings.EqualFold(b.Type, models.PlayerBanTypeXUID) {
-			s.xuids[strings.ToLower(v)] = struct{}{}
-		} else {
-			s.gamertags[strings.ToLower(v)] = struct{}{}
-		}
-	}
-	return s
-}
-
-// Reload replaces the snapshot.
-func (b *BanGuard) Reload(bans []*models.PlayerBan) {
-	b.v.Store(compileBans(bans))
-}
-
-// Banned reports whether this identity should be cut immediately.
-func (b *BanGuard) Banned(gamertag, xuid string) bool {
-	if b == nil || (gamertag == "" && xuid == "") {
-		return false
-	}
-	s := b.v.Load()
-	if s == nil {
-		return false
-	}
-	if gamertag != "" {
-		if _, hit := s.gamertags[strings.ToLower(gamertag)]; hit {
-			return true
-		}
-	}
-	if xuid != "" {
-		if _, hit := s.xuids[strings.ToLower(xuid)]; hit {
-			return true
-		}
-	}
-	return false
-}
-
 // connLogger 异步把连接事件写入存储（热路径非阻塞，队列满则丢弃）。
 // connLogger persists connection events asynchronously off the hot path;
 // overflow drops newest events rather than blocking forwarders.
@@ -207,37 +150,45 @@ func (l *connLogger) loop() {
 	}
 }
 
-// playerRegistry tracks currently-known Bedrock client sessions（key 同 udpSession.key）。
-// 存的是 *udpSession 本体，字节数/身份等直接读会话上的原子计数，避免双份状态。
-type playerRegistry struct {
+// sessionRegistry 跟踪当前活跃的客户端会话（conntrack 风格视图），TCP/UDP 通用。
+// sessionRegistry tracks currently-active client sessions; shared by TCP and UDP.
+type sessionRegistry struct {
 	mu sync.Mutex
-	m  map[string]*udpSession
+	m  map[string]*sessionInfo
 }
 
-func newPlayerRegistry() *playerRegistry {
-	return &playerRegistry{m: make(map[string]*udpSession)}
+// sessionInfo is one live client session; bytes are per-connection atomics.
+type sessionInfo struct {
+	key      string // "<proto>|<ruleID>|<srcIP>:<srcPort>"
+	Protocol models.Protocol
+	RuleID   string
+	RuleName string
+	SrcIP    string
+	SrcPort  int
+	Since    time.Time
+	bytesIn  atomic.Int64
+	bytesOut atomic.Int64
 }
 
-func (r *playerRegistry) put(key string, s *udpSession) {
+func newSessionRegistry() *sessionRegistry {
+	return &sessionRegistry{m: make(map[string]*sessionInfo)}
+}
+
+// obtain returns the existing session info or registers a fresh one.
+func (r *sessionRegistry) obtain(key string, fresh *sessionInfo) *sessionInfo {
 	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	r.m[key] = s
-	r.mu.Unlock()
-}
-
-func (r *playerRegistry) get(key string) (*udpSession, bool) {
-	if r == nil {
-		return nil, false
+		return fresh
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s, ok := r.m[key]
-	return s, ok
+	if si, ok := r.m[key]; ok {
+		return si
+	}
+	r.m[key] = fresh
+	return fresh
 }
 
-func (r *playerRegistry) remove(key string) {
+func (r *sessionRegistry) remove(key string) {
 	if r == nil {
 		return
 	}
@@ -246,26 +197,57 @@ func (r *playerRegistry) remove(key string) {
 	r.mu.Unlock()
 }
 
-func (r *playerRegistry) snapshot() []models.OnlinePlayer {
+func (r *sessionRegistry) snapshot() []models.SessionEntry {
 	if r == nil {
 		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]models.OnlinePlayer, 0, len(r.m))
-	for _, s := range r.m {
-		out = append(out, s.onlineView())
+	out := make([]models.SessionEntry, 0, len(r.m))
+	for _, si := range r.m {
+		out = append(out, si.view())
 	}
 	return out
 }
 
+// view 生成会话面板的只读视图。
+func (si *sessionInfo) view() models.SessionEntry {
+	return models.SessionEntry{
+		Key:      si.key,
+		Protocol: si.Protocol,
+		RuleID:   si.RuleID,
+		RuleName: si.RuleName,
+		SrcIP:    si.SrcIP,
+		SrcPort:  si.SrcPort,
+		Since:    si.Since,
+		BytesIn:  si.bytesIn.Load(),
+		BytesOut: si.bytesOut.Load(),
+	}
+}
+
+// finish 结束会话：有实际流量时落一条离开日志（控制噪音）。
+func (si *sessionInfo) finish(ev models.ConnEvent, logs *connLogger) {
+	in, out := si.bytesIn.Load(), si.bytesOut.Load()
+	if logs == nil || (in == 0 && out == 0) {
+		return
+	}
+	logs.Log(models.ConnLogEntry{
+		Protocol: si.Protocol,
+		RuleID:   si.RuleID,
+		RuleName: si.RuleName,
+		SrcIP:    si.SrcIP,
+		SrcPort:  si.SrcPort,
+		Event:    ev,
+		BytesIn:  in,
+		BytesOut: out,
+	})
+}
+
 // forwardServices 是注入到各转发器的旁路服务集合；所有字段与方法都可空。
 type forwardServices struct {
-	guard   *ACLGuard
-	bans    *BanGuard
-	sniff   *raksniff.Controller
-	players *playerRegistry
-	logs    *connLogger
+	guard    *ACLGuard
+	sessions *sessionRegistry
+	logs     *connLogger
 }
 
 func (s *forwardServices) allowed(ruleID string, ip net.IP) bool {

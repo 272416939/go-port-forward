@@ -435,17 +435,14 @@ func (s *countingStore) DeleteRule(id string) error {
 
 func (s *countingStore) Close() error { return nil }
 
-// --- ACL / player-ban / conn-log stubs required by the extended Store interface ---
+// --- ACL / conn-log stubs required by the extended Store interface ---
 
-func (s *countingStore) ListACLEntries() ([]*models.ACLEntry, error)               { return nil, nil }
-func (s *countingStore) SaveACLEntry(entry *models.ACLEntry) error                 { return nil }
-func (s *countingStore) DeleteACLEntry(id string) error                            { return nil }
-func (s *countingStore) ListPlayerBans() ([]*models.PlayerBan, error)              { return nil, nil }
-func (s *countingStore) SavePlayerBan(ban *models.PlayerBan) error                 { return nil }
-func (s *countingStore) DeletePlayerBan(id string) error                           { return nil }
-func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error            { return nil }
-func (s *countingStore) ListConnLogs(limit int) ([]*models.ConnLogEntry, error)    { return nil, nil }
-func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)                  { return 0, nil }
+func (s *countingStore) ListACLEntries() ([]*models.ACLEntry, error)            { return nil, nil }
+func (s *countingStore) SaveACLEntry(entry *models.ACLEntry) error              { return nil }
+func (s *countingStore) DeleteACLEntry(id string) error                         { return nil }
+func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error         { return nil }
+func (s *countingStore) ListConnLogs(limit int) ([]*models.ConnLogEntry, error) { return nil, nil }
+func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)               { return 0, nil }
 
 func (s *countingStore) listCalls() int {
 	s.mu.Lock()

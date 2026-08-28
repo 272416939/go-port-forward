@@ -27,11 +27,6 @@ type Store interface {
 	SaveACLEntry(entry *models.ACLEntry) error
 	DeleteACLEntry(id string) error
 
-	// Banned Bedrock players (gamertag/XUID)
-	ListPlayerBans() ([]*models.PlayerBan, error)
-	SavePlayerBan(ban *models.PlayerBan) error
-	DeletePlayerBan(id string) error
-
 	// Connection/session event log
 	AppendConnLog(entry *models.ConnLogEntry) error
 	ListConnLogs(limit int) ([]*models.ConnLogEntry, error)
@@ -52,7 +47,7 @@ func Open(path string) (Store, error) {
 	}
 	// Ensure buckets exist
 	if err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{rulesBucket, aclBucket, playerBansBucket, connLogsBucket} {
+		for _, b := range [][]byte{rulesBucket, aclBucket, connLogsBucket} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}

@@ -10,7 +10,6 @@ import (
 
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
-	"go-port-forward/internal/raksniff"
 	"go-port-forward/pkg/pool"
 
 	"github.com/pires/go-proxyproto"
@@ -40,61 +39,16 @@ func makeUDPAddrKey(addr *net.UDPAddr) udpAddrKey {
 
 // udpSession tracks an upstream UDP connection for a specific client address.
 type udpSession struct {
-	upstream   *net.UDPConn
-	lastSeen   time.Time
-	key        string // 全局会话键 "<ruleID>|<src>" | global session key
-	srcIP      string
-	srcPort    int
-	ruleName   string
-	idMu       sync.Mutex // 保护下面三个身份字段 | guards identity fields
-	playerName string     // 嗅探到的玩家名（可能为空）| sniffed gamertag (may be empty)
-	xuid       string
-	identified atomic.Bool
-	killed     atomic.Bool  // 命中玩家封禁后被踢 | set when banned player is cut
-	bIn        atomic.Int64 // client→upstream 实际转发字节 | forwarded client bytes
-	bOut       atomic.Int64 // upstream→client 回写字节 | relayed response bytes
-	finalOnce  sync.Once
-}
-
-// setIdentity 写入嗅探到的身份（并发安全）。
-func (s *udpSession) setIdentity(id raksniff.Identity) {
-	s.idMu.Lock()
-	if id.Gamertag != "" {
-		s.playerName = id.Gamertag
-	}
-	if id.XUID != "" {
-		s.xuid = id.XUID
-	}
-	s.idMu.Unlock()
-	s.identified.Store(true)
-}
-
-// identityView 返回身份快照。
-func (s *udpSession) identityView() (player, xuid string, identified bool) {
-	s.idMu.Lock()
-	defer s.idMu.Unlock()
-	return s.playerName, s.xuid, s.identified.Load()
-}
-
-// onlineView 生成在线玩家面板的只读视图。
-func (s *udpSession) onlineView() models.OnlinePlayer {
-	player, xuid, _ := s.identityView()
-	return models.OnlinePlayer{
-		SessionKey: s.key,
-		RuleName:   s.ruleName,
-		Player:     player,
-		XUID:       xuid,
-		SrcIP:      s.srcIP,
-		SrcPort:    s.srcPort,
-		Since:      s.lastSeen,
-		BytesIn:    s.bIn.Load(),
-		BytesOut:   s.bOut.Load(),
-	}
+	upstream  *net.UDPConn
+	lastSeen  time.Time
+	key       string       // 全局会话键 "<proto>|<ruleID>|<src>" | global session key
+	sinfo     *sessionInfo // 活跃会话注册表条目（字节数/日志都在其上）| live session entry
+	finalOnce sync.Once
 }
 
 // sessionKey 构造跨转发器唯一的会话键。
-func sessionKey(ruleID string, addr *net.UDPAddr) string {
-	return ruleID + "|" + addr.String()
+func sessionKey(proto models.Protocol, ruleID string, addr net.Addr) string {
+	return string(proto) + "|" + ruleID + "|" + addr.String()
 }
 
 // UDPForwarder listens on a local UDP port and forwards datagrams to a target.
@@ -244,20 +198,6 @@ func (f *UDPForwarder) forward(srcAddr *net.UDPAddr, data []byte) {
 	if sess == nil {
 		return
 	}
-	if sess.killed.Load() {
-		return // 被封禁玩家的后续包直接丢弃 | banned player: drop silently
-	}
-
-	// 玩家身份嗅探（仅在识别完成前生效；失败自动降级为只记 IP）
-	if !sess.identified.Load() && f.svc != nil && f.svc.sniff != nil {
-		f.svc.sniff.Observe(sess.key, data, srcAddr.IP.String(), srcAddr.Port,
-			func(_ string, _ string, _ int, id raksniff.Identity) {
-				f.onIdentity(sess, id)
-			})
-		if sess.killed.Load() {
-			return
-		}
-	}
 
 	// PROXY Protocol v2：仅在每个客户端会话的首个数据报前附加头，
 	// 后续数据报原样透传（与后端的 PROXY 解析端按会话缓存语义配合）。
@@ -273,74 +213,21 @@ func (f *UDPForwarder) forward(srcAddr *net.UDPAddr, data []byte) {
 	}
 
 	n, _ := sess.upstream.Write(payload)
-	sess.bIn.Add(int64(n))
+	if sess.sinfo != nil {
+		sess.sinfo.bytesIn.Add(int64(n))
+	}
 	f.bytesIn.Add(int64(n))
 }
 
-// onIdentity 登记嗅探到的玩家身份并执行封禁检查。
-func (f *UDPForwarder) onIdentity(sess *udpSession, id raksniff.Identity) {
-	sess.setIdentity(id)
-	if f.svc == nil || f.svc.players == nil {
-		return
-	}
-	if _, exists := f.svc.players.get(sess.key); !exists {
-		f.svc.players.put(sess.key, sess)
-	}
-	player, xuid, _ := sess.identityView()
-	logger.S.Infow("player identified", "rule", f.rule.Name,
-		"player", player, "xuid", xuid, "src", sess.srcIP)
-	f.svc.logEvent(models.ConnLogEntry{
-		Protocol: models.ProtocolUDP,
-		RuleID:   f.rule.ID,
-		RuleName: f.rule.Name,
-		SrcIP:    sess.srcIP,
-		SrcPort:  sess.srcPort,
-		Player:   player,
-		XUID:     xuid,
-		Event:    models.ConnEventJoin,
-	})
-	if f.svc.bans.Banned(player, xuid) {
-		f.kickSession(sess, "命中玩家封禁名单 | matched player ban list")
-	}
-}
-
-// kickSession 掐断会话：停止转发并关闭上游 socket，玩家侧表现为掉线。
-func (f *UDPForwarder) kickSession(sess *udpSession, reason string) {
-	if sess.killed.CompareAndSwap(false, true) {
-		player, xuid, _ := sess.identityView()
-		logger.S.Warnw("kicking session", "rule", f.rule.Name,
-			"player", player, "xuid", xuid, "src", sess.srcIP, "reason", reason)
-		_ = sess.upstream.Close()
-		f.finalizeSession(sess, models.ConnEventKick)
-	}
-}
-
-// finalizeSession 每会话仅执行一次：清理注册表/嗅探状态并落一条离开日志。
+// finalizeSession 每会话仅执行一次：从注册表移除并按流量决定是否落离开日志。
 func (f *UDPForwarder) finalizeSession(sess *udpSession, ev models.ConnEvent) {
 	sess.finalOnce.Do(func() {
-		if f.svc != nil {
-			if f.svc.players != nil {
-				f.svc.players.remove(sess.key)
-			}
-			if f.svc.sniff != nil {
-				f.svc.sniff.Release(sess.key)
-			}
-			player, xuid, _ := sess.identityView()
-			// 只有识别过身份或有过实际流量的会话才值得一条离开日志
-			if sess.identified.Load() || sess.bIn.Load() > 0 || sess.bOut.Load() > 0 {
-				f.svc.logEvent(models.ConnLogEntry{
-					Protocol: models.ProtocolUDP,
-					RuleID:   f.rule.ID,
-					RuleName: f.rule.Name,
-					SrcIP:    sess.srcIP,
-					SrcPort:  sess.srcPort,
-					Player:   player,
-					XUID:     xuid,
-					Event:    ev,
-					BytesIn:  sess.bIn.Load(),
-					BytesOut: sess.bOut.Load(),
-				})
-			}
+		if f.svc == nil {
+			return
+		}
+		f.svc.sessions.remove(sess.key)
+		if sess.sinfo != nil {
+			sess.sinfo.finish(ev, f.svc.logs)
 		}
 	})
 }
@@ -355,11 +242,10 @@ func (f *UDPForwarder) relayBack(clientAddr *net.UDPAddr, sess *udpSession) {
 		if err != nil {
 			return
 		}
-		if sess.killed.Load() {
-			return
-		}
 		out, _ := f.conn.WriteToUDP(buf[:n], clientAddr)
-		sess.bOut.Add(int64(out))
+		if sess.sinfo != nil {
+			sess.sinfo.bytesOut.Add(int64(out))
+		}
 		f.bytesOut.Add(int64(out))
 	}
 }
@@ -431,10 +317,26 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 	sess = &udpSession{
 		upstream: up,
 		lastSeen: now,
-		key:      sessionKey(f.rule.ID, srcAddr),
-		srcIP:    srcAddr.IP.String(),
-		srcPort:  srcAddr.Port,
-		ruleName: f.rule.Name,
+		key:      sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr),
+	}
+	if f.svc != nil && f.svc.sessions != nil {
+		sess.sinfo = f.svc.sessions.obtain(sess.key, &sessionInfo{
+			key:      sess.key,
+			Protocol: models.ProtocolUDP,
+			RuleID:   f.rule.ID,
+			RuleName: f.rule.Name,
+			SrcIP:    srcAddr.IP.String(),
+			SrcPort:  srcAddr.Port,
+			Since:    now,
+		})
+		f.svc.logEvent(models.ConnLogEntry{
+			Protocol: models.ProtocolUDP,
+			RuleID:   f.rule.ID,
+			RuleName: f.rule.Name,
+			SrcIP:    srcAddr.IP.String(),
+			SrcPort:  srcAddr.Port,
+			Event:    models.ConnEventJoin,
+		})
 	}
 	f.sessions[key] = sess
 	f.active.Add(1)

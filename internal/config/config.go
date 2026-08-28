@@ -43,12 +43,11 @@ type LogConfig struct {
 
 // ForwardConfig holds forwarding tuning parameters.
 type ForwardConfig struct {
-	PoolSize          int  `mapstructure:"pool_size"`           // goroutine pool size (0 = NumCPU*64)
-	BufferSize        int  `mapstructure:"buffer_size"`         // I/O buffer size in bytes
-	UDPTimeout        int  `mapstructure:"udp_timeout"`         // UDP session idle timeout (seconds)
-	DialTimeout       int  `mapstructure:"dial_timeout"`        // outbound dial timeout (seconds)
-	BedrockSniff      bool `mapstructure:"bedrock_sniff"`       // passive Bedrock player identity sniffing
-	ConnLogMaxEntries int  `mapstructure:"connlog_max_entries"` // connection log retention cap (rows)
+	PoolSize          int `mapstructure:"pool_size"`           // goroutine pool size (0 = NumCPU*64)
+	BufferSize        int `mapstructure:"buffer_size"`         // I/O buffer size in bytes
+	UDPTimeout        int `mapstructure:"udp_timeout"`         // UDP session idle timeout (seconds)
+	DialTimeout       int `mapstructure:"dial_timeout"`        // outbound dial timeout (seconds)
+	ConnLogMaxEntries int `mapstructure:"connlog_max_entries"` // connection log retention cap (rows)
 }
 
 // GCConfig holds garbage collection management configuration.
@@ -125,7 +124,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("forward.buffer_size", 32768)
 	v.SetDefault("forward.udp_timeout", 30)
 	v.SetDefault("forward.dial_timeout", 10)
-	v.SetDefault("forward.bedrock_sniff", true)
 	v.SetDefault("forward.connlog_max_entries", 2000)
 
 	// GC defaults
