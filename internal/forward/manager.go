@@ -212,6 +212,7 @@ func (m *Manager) AddRule(req *models.CreateRuleRequest) (*models.ForwardRule, e
 		TargetPort:    normalized.TargetPort,
 		AddFirewall:   normalized.AddFirewall,
 		ProxyProtocol: normalized.ProxyProtocol,
+		Transparent:   normalized.Transparent,
 		Comment:       normalized.Comment,
 		Enabled:       normalized.Enabled,
 		CreatedAt:     time.Now(),
@@ -666,6 +667,15 @@ func protocolsOverlap(a, b models.Protocol) bool {
 }
 
 func (m *Manager) startForwarders(r *models.ForwardRule) error {
+	// 透明模式环境预检（fail-closed：非 Linux / 无权限直接失败并写入规则错误）
+	if r.Transparent {
+		if r.ProxyProtocol {
+			return fmt.Errorf("透明模式与 PROXY 协议互斥 | transparent conflicts with proxy_protocol")
+		}
+		if err := checkTransparentSupport(); err != nil {
+			return err
+		}
+	}
 	e := &entry{}
 	if r.Protocol == models.ProtocolTCP || r.Protocol == models.ProtocolBoth {
 		t := newTCPForwarder(r, m.cfg.DialTimeout, m.cfg.BufferSize)
@@ -864,6 +874,9 @@ func applyUpdate(r *models.ForwardRule, req *models.UpdateRuleRequest) {
 	if req.ProxyProtocol != nil {
 		r.ProxyProtocol = *req.ProxyProtocol
 	}
+	if req.Transparent != nil {
+		r.Transparent = *req.Transparent
+	}
 	if req.Comment != nil {
 		r.Comment = *req.Comment
 	}
@@ -882,5 +895,6 @@ func requiresForwarderRestart(before, after *models.ForwardRule) bool {
 		models.NormalizeProtocol(before.Protocol) != models.NormalizeProtocol(after.Protocol) ||
 		before.TargetAddr != after.TargetAddr ||
 		before.TargetPort != after.TargetPort ||
-		before.ProxyProtocol != after.ProxyProtocol
+		before.ProxyProtocol != after.ProxyProtocol ||
+		before.Transparent != after.Transparent
 }

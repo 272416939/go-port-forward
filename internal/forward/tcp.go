@@ -182,6 +182,14 @@ func (f *TCPForwarder) handleConn(ctx context.Context, src net.Conn, rule *model
 	err := retry.DoWithExponentialCapped(ctx, 3, 500*time.Millisecond, 5*time.Second,
 		func(retryCtx context.Context) error {
 			dialer := &net.Dialer{Timeout: f.dialTimeout}
+			if rule.Transparent {
+				// 透明模式：以客户端真实 IP 为源拨号（IP_TRANSPARENT）
+				var srcIP net.IP
+				if ra, ok := src.RemoteAddr().(*net.TCPAddr); ok {
+					srcIP = ra.IP
+				}
+				dialer = transparentDialer(retryCtx, srcIP, dialer)
+			}
 			conn, dialErr := dialer.DialContext(retryCtx, "tcp", target)
 			if dialErr != nil {
 				return retry.RetryableError(dialErr)

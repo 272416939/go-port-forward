@@ -51,6 +51,7 @@ type ForwardRule struct {
 	Enabled       bool       `json:"enabled"`
 	AddFirewall   bool       `json:"add_firewall"`   // auto-add firewall rule on creation
 	ProxyProtocol bool       `json:"proxy_protocol"` // prepend PROXY Protocol v2 header with real client IP toward target
+	Transparent   bool       `json:"transparent"`    // bind real client source IP toward target (Linux+root only; pair with tunnel)
 }
 
 // ListenKey returns a unique key for the listen address+port+protocol combination
@@ -190,6 +191,7 @@ type CreateRuleRequest struct {
 	TargetPort    int      `json:"target_port"`
 	AddFirewall   bool     `json:"add_firewall"`
 	ProxyProtocol bool     `json:"proxy_protocol"`
+	Transparent   bool     `json:"transparent"`
 	Enabled       bool     `json:"enabled"`
 }
 
@@ -203,6 +205,7 @@ type UpdateRuleRequest struct {
 	TargetPort    *int      `json:"target_port"`
 	AddFirewall   *bool     `json:"add_firewall"`
 	ProxyProtocol *bool     `json:"proxy_protocol"`
+	Transparent   *bool     `json:"transparent"`
 	Comment       *string   `json:"comment"`
 	Enabled       *bool     `json:"enabled"`
 }
@@ -370,6 +373,9 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 	if !IsValidProtocol(req.Protocol) {
 		return fmt.Errorf("协议必须为 tcp、udp 或 both | protocol must be tcp, udp, or both")
 	}
+	if req.Transparent && req.ProxyProtocol {
+		return fmt.Errorf("透明模式与 PROXY 协议互斥，只能二选一 | transparent and proxy_protocol are mutually exclusive")
+	}
 	return nil
 }
 
@@ -398,6 +404,9 @@ func ValidateForwardRule(rule *ForwardRule) error {
 	}
 	if !IsValidProtocol(rule.Protocol) {
 		return fmt.Errorf("协议必须为 tcp、udp 或 both | protocol must be tcp, udp, or both")
+	}
+	if rule.Transparent && rule.ProxyProtocol {
+		return fmt.Errorf("透明模式与 PROXY 协议互斥，只能二选一 | transparent and proxy_protocol are mutually exclusive")
 	}
 	return nil
 }

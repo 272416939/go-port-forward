@@ -296,9 +296,15 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 		return nil, false
 	}
 
-	up, err := net.DialUDP("udp", nil, f.targetAddr)
+	up, err := f.dialUpstream(srcAddr)
 	if err != nil {
-		logger.L.Warn("UDP dial failed", zap.String("target", f.targetAddr.String()), zap.Error(err))
+		// 透明模式绑定失败多为权限问题：限频记录，丢弃该包（fail-closed）
+		nowUnix := time.Now().Unix()
+		last := f.lastDenied.Load()
+		if nowUnix-last >= 5 && f.lastDenied.CompareAndSwap(last, nowUnix) {
+			logger.L.Warn("UDP upstream dial failed", zap.String("rule", f.rule.Name),
+				zap.String("src", srcAddr.String()), zap.Error(err))
+		}
 		return nil, false
 	}
 
@@ -345,6 +351,19 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 	go f.relayBack(cloneUDPAddr(srcAddr), sess)
 	f.mu.Unlock()
 	return sess, true
+}
+
+// dialUpstream 建立到目标的上游 socket；透明模式以玩家 IP:端口 为源绑定
+// （IP_TRANSPARENT，需 root；回包经隧道/SNAT 独立路径返回，不经过此 socket）。
+func (f *UDPForwarder) dialUpstream(srcAddr *net.UDPAddr) (*net.UDPConn, error) {
+	if !f.rule.Transparent {
+		return net.DialUDP("udp", nil, f.targetAddr)
+	}
+	pc, err := transparentListenPacket(srcAddr.String())
+	if err != nil {
+		return nil, err
+	}
+	return dialUDPConnected(pc, f.targetAddr)
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

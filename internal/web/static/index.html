@@ -303,6 +303,12 @@
               <label class="form-check-label" for="chkProxyProto" :title="t('向目标服务器注入 PROXY Protocol v2 头以透传客户端真实 IP，需后端支持该协议，否则会把头当作应用数据','Prepends a PROXY Protocol v2 header carrying the real client IP toward the target. The backend must support it, otherwise the header is treated as payload')" x-text="t('启用真实IP透传','Real IP Passthrough (PROXY v2)')"></label>
             </div>
           </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" x-model="form.transparent" id="chkTransparent"/>
+              <label class="form-check-label" for="chkTransparent" :title="t('以客户端真实 IP:端口 为源地址转发（仅 Linux+root）。需配合隧道组件 app：后端机运行 pf-client，转发目标填其虚拟 IP。与「真实IP透传」互斥。','Forwards with the real client IP:port as source (Linux+root only). Requires the tunnel app on the backend host; set the rule target to its virtual IP. Mutually exclusive with PROXY passthrough.')" x-text="t('透明模式','Transparent Mode')"></label>
+            </div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
@@ -1071,6 +1077,7 @@ function portForwardApp() {
 	        enabled:true,
 	        add_firewall:false,
 	        proxy_protocol:false,
+	        transparent:false,
 	      }
 	    },
 
@@ -1087,6 +1094,7 @@ function portForwardApp() {
 	        enabled: rule.enabled ?? true,
 	        add_firewall: rule.add_firewall ?? false,
 	        proxy_protocol: rule.proxy_protocol ?? false,
+	        transparent: rule.transparent ?? false,
 	      }
 	    },
 
@@ -1102,6 +1110,7 @@ function portForwardApp() {
 	        enabled: !!this.form.enabled,
 	        add_firewall: !!this.form.add_firewall,
 	        proxy_protocol: !!this.form.proxy_protocol,
+	        transparent: !!this.form.transparent,
 	      }
 	    },
 

@@ -58,6 +58,8 @@ A high-performance cross-platform TCP/UDP port forwarder with a built-in Web UI.
   Real IP passthrough (PROXY Protocol v2) — prepends a PROXY v2 header carrying the real client IP toward the target (TCP stream prefix / UDP session first datagram)
 - **访问控制** — 按 IP/CIDR 黑白名单、连接日志、活跃会话实时视图（TCP/UDP 通用）
   Access control — IP/CIDR black/whitelist, connection logs and a live session view (works for any TCP/UDP service)
+- **隧道组件与透明模式** — 自研迷你加密隧道（app/，Linux 服务端 + Windows 客户端）配合规则级透明模式，跨公网实现后端零插件看到玩家真实 IP
+  Tunnel app & transparent mode — a mini encrypted tunnel (app/) plus per-rule transparent mode delivers real client IPs across the public internet with zero backend plugins
 
 ## 🎯 痛点分析 | Pain Points
 
@@ -397,6 +399,41 @@ The **Active Sessions** panel lists all current client sessions (protocol / sour
   Bedrock (BDS) has no native PROXY Protocol support and no mature parsing plugin exists today; the mature solutions all belong to the Java Edition ecosystem.
 - 因此本项目把真实 IP 的价值放在**中转机侧变现**（本节访问控制/连接日志/会话视图），同时保留 PROXY v2 注入开关，供未来出现解析端、或后端本身支持该协议（Java 版/面板类）时直接使用。
   Hence this project realizes the value of real IPs relay-side (this section), while keeping the PROXY v2 injection toggle for future parsing-capable backends.
+
+## 🌉 透明模式与隧道组件 | Transparent Mode & Tunnel App
+
+上一节的结论是“跨公网独立 VPS 无法直接透明”。**隧道组件（`app/`）正是补齐这一前提的官方方案**：自研迷你加密隧道把两端“缝”成一个虚拟内网，随后规则级**透明模式**让后端零插件看到玩家真实 IP。
+
+```
+玩家P ──► [中转 Linux VPS]                          [Windows / BDS]
+          go-port-forward（透明模式：                    ▲ pf-client
+            源地址=P真实IP）──► 路由进 TUN ══加密隧道═════╝ (10.66.0.2)
+          pf-server (TUN 10.66.0.1)
+          MASQUERADE：回包源改写为公网IP ──► 玩家P ◄──────┘
+```
+
+### 部署步骤 | Deployment
+
+1. **构建**：`bash app/build.sh` → 产物在 `app/bin/`（`pf-server`、`pf-client.exe`、`wintun.dll`）。
+   客户端目标机**无需 Go 环境**，`pf-client.exe` 与 `wintun.dll` 同目录分发即可。
+2. **中转机（Linux，root）**：`sudo ./pf-server -c config.yaml`（配置见 `app/configs/server.example.yaml`；
+   防火墙放行 UDP 7947；建议注册 systemd 常驻）。
+3. **后端机（Windows，管理员）**：`pf-client.exe` → 提示输入 **Port Forward 代理地址**（中转机 IP:7947）→
+   自动创建虚拟网卡（10.66.0.2）并按会话动态维护回程路由；Ctrl+C 自动清理。
+4. **go-port-forward**：添加/编辑规则，目标地址填 **10.66.0.2**（客户端虚拟 IP），开启 **透明模式** 开关。
+   仅 Linux+root 可用；Windows 上该开关的规则会启动失败并给出明确原因（fail-closed）。
+
+### 回程路由原理（不影响其它流量）| Dynamic Return Routing
+
+服务端每 10 秒拉取 go-port-forward 活跃会话的来源 IP，经加密控制通道推给客户端；
+客户端**只对这些 IP 添加 /32 路由**进隧道，玩家断开约 30 秒后路由自动删除。
+Windows 机器的其它上网/RDP 流量、以及“通过后端公网 IP 直接访问”的流量完全不经过隧道。
+
+### 注意事项 | Notes
+
+- 透明模式与 PROXY 协议透传互斥（二选一）；两者都保留，按拓扑任选。
+- 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
+- Windows 端需要管理员权限（wintun 驱动 + 路由管理）。
 
 ## 🔌 REST API
 
