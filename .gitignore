@@ -443,3 +443,7 @@ test/
 app/bin/
 app/server
 app/pf-client.exe
+# `go build ./cmd/client/` 会把 exe 留在包目录，与 bin/ 下的正式产物同名不同
+# 配置（缺 -H=windowsgui，会多弹一个控制台窗口），别让它进仓库或被误发。
+app/client.exe
+app/cmd/client/client.exe

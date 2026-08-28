@@ -408,43 +408,52 @@ The **Active Sessions** panel lists all current client sessions (protocol / sour
 玩家P ──► [中转 Linux VPS]                          [Windows / BDS]
           go-port-forward（透明模式：                    ▲ pf-client
             源地址=P真实IP）──► 路由进 TUN ══加密隧道═════╝ (10.66.0.2)
-          pf-server (TUN 10.66.0.1)
-          MASQUERADE：回包源改写为公网IP ──► 玩家P ◄──────┘
+          内置隧道服务端 (TUN 10.66.0.1)
+          策略路由把回包交回透明 socket ──► 玩家P ◄──────┘
 ```
 
 ### 部署步骤 | Deployment
 
-1. **构建**：`bash app/build.sh` → 产物在 `app/bin/`（`pf-server`、`pf-client.exe`、`wintun.dll`）。
-   客户端目标机**无需 Go 环境**，`pf-client.exe` 与 `wintun.dll` 同目录分发即可。
-2. **中转机（Linux，root）**：`sudo ./pf-server -c config.yaml`（配置见 `app/configs/server.example.yaml`；
-   防火墙放行 UDP 7947；建议注册 systemd 常驻）。
-3. **后端机（Windows，管理员）**：`pf-client.exe` → 提示输入 **Port Forward 代理地址**（中转机 IP:7947）→
-   自动创建虚拟网卡（10.66.0.2）并按会话动态维护回程路由；Ctrl+C 自动清理。
+1. **构建**：`bash app/build.sh` → 产物在 `app/bin/`，只有两个文件：`pf-client.exe` + `wintun.dll`。
+   客户端目标机**无需 Go 环境**，两个文件同目录分发即可。
+   （中转机侧不需要单独进程，隧道服务端已内置在主程序里。）
+2. **中转机（Linux，root）**：`config.yaml` 里开 `tunnel.enabled: true`，启动主程序即可；
+   防火墙放行 UDP 7947。
+3. **后端机（Windows）**：双击 `pf-client.exe` → 自动请求管理员权限 → 打开图形界面 →
+   填中转机地址（IP:7947，会记住，下次自动连接）→ 自动创建虚拟网卡（10.66.0.2）
+   并按会话动态维护回程路由。关闭窗口收进右下角托盘继续运行，托盘菜单可退出。
 4. **go-port-forward**：添加/编辑规则，目标地址填 **10.66.0.2**（客户端虚拟 IP），开启 **透明模式** 开关。
    仅 Linux+root 可用；Windows 上该开关的规则会启动失败并给出明确原因（fail-closed）。
 
+> `app/bin/pf-client.exe` 是唯一的正式客户端产物。若你直接跑过 `go build ./cmd/client/`，
+> 包目录下会留一个同名程序，但它缺少 `-H=windowsgui`，运行时会多弹一个黑色控制台
+> 窗口——那不是发布产物，`build.sh` 会自动清掉它。
+
 ### 回程路由原理（不影响其它流量）| Dynamic Return Routing
 
-服务端每 10 秒拉取 go-port-forward 活跃会话的来源 IP，经加密控制通道推给客户端；
-客户端**只对这些 IP 添加 /32 路由**进隧道，玩家断开约 30 秒后路由自动删除。
-Windows 机器的其它上网/RDP 流量、以及“通过后端公网 IP 直接访问”的流量完全不经过隧道。
+服务端每 10 秒把 go-port-forward 活跃会话的来源 IP 经加密控制通道推给客户端；
+客户端另外在收到玩家入站包时即时补齐路由（探测器这类"一来一回"的交互等不到下一次推送）。
+**只对这些 IP 添加 /32 路由**进隧道，空闲超过 5 分钟才回收。
+Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接访问"的流量完全不经过隧道。
 
 ### 注意事项 | Notes
 
 - 透明模式与 PROXY 协议透传互斥（二选一）；两者都保留，按拓扑任选。
 - 透明模式**仅支持 UDP 规则**（TCP 的回包无法送达透明 socket），协议含 TCP 时开关会被拒绝；UDP 场景（如基岩版 19132/58618）完全覆盖。
 - 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
-- Windows 端需要管理员权限（wintun 驱动 + 路由管理）。
-- 服务端已内置隧道（`tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward/MASQUERADE/FORWARD 放行），**无需单独的 pf-server 进程**。
+- Windows 端需要管理员权限（wintun 驱动 + 路由管理），未提权时程序会主动弹 UAC。
+- 客户端界面由系统自带的 Edge WebView2 渲染；Win11 与近年更新过的 Win10 均已预装，缺失时程序会给出下载指引。
+- 服务端 `tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward + 策略路由 + FORWARD/INPUT 放行，**不使用 MASQUERADE**（透明模式下正向首包走 OUTPUT 不匹配 NAT，conntrack 会判定整流不改写）。
 
 ### 排查清单 | Troubleshooting
 
 | 现象 | 检查 |
 |------|------|
 | pf-client 一直握手失败 | 中转机 `tunnel.enabled` 是否开启、UDP 7947 是否放行、psk 是否与服务端一致 |
-| 隧道已建立但业务不通 | 中转机 `ping 10.66.0.2`；客户端控制台是否打印 `[+] 已添加回程路由: <玩家IP>`（发包后 10 秒内） |
+| 隧道已建立但业务不通 | 客户端界面「活跃玩家流量」是否出现玩家 IP，上下行字节是否同时增长；只有一个方向说明回程路由或策略路由有问题 |
 | 规则开启透明模式变红 | 非 Linux 或非 root 运行（需 root 或给进程 CAP_NET_ADMIN） |
-| 会话通但无回包 | 中转机 `iptables -t nat -L POSTROUTING` 应有隧道网段 MASQUERADE；FORWARD 链应放行 TUN 接口 |
+| 能进游戏但服务器列表探测失败 | 客户端版本过旧：入站首包即时补路由是后来才加的，旧版只靠 10 秒周期推送，短交互赶不上 |
+| 中转机日志刷屏 | 例行推送已降为 debug；仍刷屏说明 `log.level` 设成了 debug |
 
 ## 🔌 REST API
 
