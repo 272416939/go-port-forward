@@ -6,7 +6,6 @@
 package tunnet
 
 import (
-	"encoding/binary"
 	"fmt"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -49,17 +48,13 @@ func (d *Device) ReadPacket(buf []byte) (int, error) {
 	return sizes[0] - Offset, nil
 }
 
-// WritePacket 写出一个 IP 包（自动填充平台前缀）。
+// WritePacket 写出一个 IP 包。IP 包必须位于 buf[Offset:]（wireguard/tun
+// 约定：offset 前的空间由实现自动填充链路层头——Linux 按 IP 版本补
+// flags+proto；Windows wintun 无头但同样跳过 offset）。
 func (d *Device) WritePacket(p []byte) error {
 	buf := make([]byte, Offset+len(p))
-	// IPv4: 前缀 = AF_INET(2, 小端) ；IPv6 = AF_INET6(10)。按版本填充。
-	if len(p) >= 1 && p[0]>>4 == 6 {
-		binary.BigEndian.PutUint16(buf[:2], 10) // AF_INET6
-	} else {
-		binary.BigEndian.PutUint16(buf[:2], 2) // AF_INET
-	}
 	copy(buf[Offset:], p)
-	_, err := d.dev.Write([][]byte{buf}, 0)
+	_, err := d.dev.Write([][]byte{buf}, Offset)
 	return err
 }
 
