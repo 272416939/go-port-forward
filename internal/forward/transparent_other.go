@@ -26,7 +26,3 @@ func transparentDialer(ctx context.Context, srcIP net.IP, base *net.Dialer) *net
 func transparentListenPacket(srcAddr string) (net.PacketConn, error) {
 	return nil, errors.New("transparent mode unsupported on this platform")
 }
-
-func dialUDPConnected(pc net.PacketConn, target *net.UDPAddr) (*net.UDPConn, error) {
-	return nil, errors.New("transparent mode unsupported on this platform")
-}

@@ -54,17 +54,3 @@ func transparentListenPacket(srcAddr string) (net.PacketConn, error) {
 	lc := net.ListenConfig{Control: transparentControl}
 	return lc.ListenPacket(context.Background(), "udp", srcAddr)
 }
-
-// dialUDPConnected 在已绑定的 PacketConn 上连接目标并返回 *net.UDPConn。
-func dialUDPConnected(pc net.PacketConn, target *net.UDPAddr) (*net.UDPConn, error) {
-	udp, ok := pc.(*net.UDPConn)
-	if !ok {
-		pc.Close()
-		return nil, fmt.Errorf("透明模式：上游 socket 类型异常 | unexpected packet conn type")
-	}
-	if err := udp.Connect(target); err != nil {
-		udp.Close()
-		return nil, err
-	}
-	return udp, nil
-}
