@@ -2,8 +2,8 @@
 
 // pf-client —— Port Forward 隧道客户端（Windows）。
 // 以管理员身份运行，提示输入中转机（代理）地址后建立加密隧道：
-// 创建 "Port Forward" 虚拟网卡（10.66.0.2），并按服务端推送的
-// 会话 IP 列表动态维护 /32 回程路由（仅回程，不影响其它流量）。
+// 创建 "Port Forward" 虚拟网卡（10.66.0.2），并为玩家来源 IP 动态维护
+// /32 回程路由（仅回程，不影响其它流量；生命周期见 routes.go）。
 package main
 
 import (
@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,17 +29,12 @@ const (
 	tunServerIP   = "10.66.0.1"
 	tunCIDRMask   = "255.255.255.0"
 	handshakeTries = 8
-
-	// maxReturnRoutes 限制 /32 回程路由条数上限。入站包会即时触发建路由，
-	// 若遭遇源地址伪造的洪泛，没有上限会把系统路由表撑爆。
-	maxReturnRoutes = 512
 )
 
 var (
 	sessPtr atomic.Pointer[tunnel.Session]
 	peerPtr atomic.Pointer[net.UDPAddr]
-	addedMu sync.Mutex
-	added   = map[string]bool{} // 已添加回程路由的 IP
+	routes  *routeManager // /32 回程路由生命周期（见 routes.go）
 
 	// 数据面统计（每 5 秒打印，用于定位断点在隧道段还是 Windows 本地段）
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（玩家回包方向）
@@ -91,6 +85,7 @@ func main() {
 		fmt.Println(t("已为虚拟网卡添加防火墙入站放行。", "Firewall inbound allow rule added."))
 	}
 	fmt.Println(t("虚拟网卡就绪: ", "TUN ready: ") + tunClientIP)
+	routes = newRouteManager(serverAddr.IP.String())
 
 	// 后台：TUN → 隧道
 	go func() {
@@ -144,7 +139,7 @@ func main() {
 	go func() {
 		<-sig
 		fmt.Println("\n" + t("正在清理回程路由并退出…", "Cleaning up routes and exiting…"))
-		cleanupRoutes()
+		routes.cleanup()
 		syssetup.RemoveStaticNeighbor(tunName, tunServerIP)
 		syssetup.RemoveInboundRule()
 		os.Exit(0)
@@ -155,7 +150,7 @@ func main() {
 		sess, err := handshake(udp, serverAddr)
 		if err != nil {
 			fmt.Println(t("握手失败：", "Handshake failed: ") + err.Error())
-			cleanupRoutes()
+			routes.cleanup()
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -168,7 +163,7 @@ func main() {
 		}
 		sessPtr.Store(nil)
 		fmt.Println(t("30 秒无数据，重新握手…", "Idle 30s, re-handshaking…"))
-		cleanupRoutes()
+		routes.cleanup()
 	}
 }
 
@@ -218,14 +213,14 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 				statTunnelToTun.Add(1)
 				// 必须先装回程路由再写 TUN：后端回包可能在微秒内产生，
 				// 若此刻路由还不存在，回包会按默认路由从物理网卡漏出去。
-				ensureRouteForSource(plain)
+				routes.touchPacket(plain)
 				if werr := dev.WritePacket(plain); werr != nil {
 					logWriteErr(werr)
 				}
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:
 			if msg, cerr := sess.OpenCtrl(buf[:n]); cerr == nil {
-				syncRoutes(msg.IPs)
+				routes.sync(msg.IPs)
 			}
 		case n > 0 && buf[0] == tunnel.TypePing:
 			pong := make([]byte, 0, 1+24+16)
@@ -245,80 +240,6 @@ func logWriteErr(err error) {
 		return
 	}
 	fmt.Println(t("[!] 写入虚拟网卡失败（玩家入站包被丢弃）：", "[!] TUN write failed: ") + err.Error())
-}
-
-// ensureRouteForSource 在写入 TUN 之前，为入站包的源 IP 补齐 /32 回程路由。
-//
-// 服务端每 10 秒推送一次活跃会话 IP，对长连接够用，但探测器/状态查询这类
-// 「一来一回就结束」的交互等不到下一次推送：首包到达时路由还不存在，后端
-// 回包按默认路由从物理网卡发出，源地址是后端自己的公网 IP，探测方直接丢弃
-// ——表现为能进游戏但服务器列表探测超时。
-//
-// 这里做的是数据驱动的即时补齐，与服务端推送互补：推送负责收敛与删除
-//（不在活跃列表里的 IP 会在下一次 syncRoutes 被移除），这里只负责抢在
-// 回包之前把路由装上。
-func ensureRouteForSource(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 {
-		return
-	}
-	src := net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15]).String()
-
-	addedMu.Lock()
-	if added[src] || len(added) >= maxReturnRoutes {
-		addedMu.Unlock()
-		return
-	}
-	// 先占位再解锁：route add 要起子进程（几十毫秒），不能持锁，也不能让
-	// 同一 IP 的后续包重复触发。
-	added[src] = true
-	addedMu.Unlock()
-
-	if err := syssetup.AddRoute(src, tunServerIP); err != nil {
-		addedMu.Lock()
-		delete(added, src)
-		addedMu.Unlock()
-		return
-	}
-	fmt.Println(t("[+] 已添加回程路由(入站触发):", "[+] route added (inbound): ") + src)
-}
-
-// syncRoutes 按服务端推送的全量活跃会话 IP 收敛 /32 回程路由（增补 + 清理）。
-func syncRoutes(ips []string) {
-	desired := map[string]bool{}
-	for _, ip := range ips {
-		if net.ParseIP(ip) != nil {
-			desired[ip] = true
-		}
-	}
-	addedMu.Lock()
-	defer addedMu.Unlock()
-	for ip := range added {
-		if !desired[ip] {
-			if err := syssetup.RemoveRoute(ip); err == nil {
-				fmt.Println(t("[-] 已移除回程路由:", "[-] route removed: ") + ip)
-				delete(added, ip)
-			}
-		}
-	}
-	for ip := range desired {
-		if !added[ip] {
-			if err := syssetup.AddRoute(ip, tunServerIP); err == nil {
-				added[ip] = true
-				fmt.Println(t("[+] 已添加回程路由:", "[+] route added: ") + ip)
-			} else {
-				fmt.Println(t("[!] 回程路由添加失败:", "[!] route add failed: ") + ip)
-			}
-		}
-	}
-}
-
-func cleanupRoutes() {
-	addedMu.Lock()
-	defer addedMu.Unlock()
-	for ip := range added {
-		_ = syssetup.RemoveRoute(ip)
-		delete(added, ip)
-	}
 }
 
 // --- 交互与本地配置 ---
