@@ -42,6 +42,18 @@ func main() {
 	diag("Windows 版本：%s", windowsVersion())
 	diag("管理员权限：%v", syssetup.IsElevated())
 
+	// 单实例保护：在提权之前先探测。提权会启动新进程、旧进程退出，若把检查
+	// 放在提权之后，重复双击会先弹一次多余的 UAC 才发现自己该退出。
+	//
+	// 多实例在本程序里是硬故障：服务端只有一个会话槽位和一个 peer 地址，
+	// 多个客户端会互相抢占，peer 被反复改写，回包发到上一轮的端口——表现为
+	// 包在往返但进不去游戏。托盘化之后关窗不再退出进程，这种堆积很容易发生。
+	if instanceRunning() {
+		diag("已有实例在运行，唤起其窗口后退出")
+		activateExistingInstance()
+		return
+	}
+
 	// 未提权：请求 UAC 重启自身。
 	if !syssetup.IsElevated() && os.Getenv("PF_NO_ELEVATE") == "" {
 		diag("未提权，正在请求 UAC…")
@@ -53,6 +65,13 @@ func main() {
 			// 界面上会显示权限提示。
 			diag("UAC 提权未完成：%v（继续以受限权限运行）", err)
 		}
+	}
+
+	// 真正占用所有权。走到这里已过提权环节，句柄保留到进程结束。
+	if !claimSingleInstance() {
+		diag("占用单实例锁失败（已被其它实例抢先），退出")
+		activateExistingInstance()
+		return
 	}
 
 	if v, err := webview2Version(); err != nil || v == "" {

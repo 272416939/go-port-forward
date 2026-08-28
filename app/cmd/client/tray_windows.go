@@ -168,7 +168,7 @@ func (t *tray) notify(action uint32) {
 		UCallbackMessage: trayCallback,
 		HIcon:            t.hIcon,
 	}
-	copy(data.SzTip[:], windows.StringToUTF16("Port Forward 隧道客户端"))
+	copy(data.SzTip[:], windows.StringToUTF16(windowTitle))
 	procShellNotifyIconW.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
 }
 

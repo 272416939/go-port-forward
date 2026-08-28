@@ -41,13 +41,17 @@ const webview2Hint = "本程序界面需要 Microsoft Edge WebView2 运行时，
 	"直接下载地址：\n" +
 	"https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
+// windowTitle 同时用于创建窗口和单实例检查时按标题查找已有窗口，
+// 必须是同一个常量。
+const windowTitle = "Port Forward 隧道客户端"
+
 // runWindow 打开原生窗口并阻塞直到程序退出（关窗只是隐藏到托盘）。
 // 必须在已 LockOSThread 的 goroutine 中调用。
 func runWindow(url string, actions trayActions) error {
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug: false,
 		WindowOptions: webview2.WindowOptions{
-			Title:  "Port Forward 隧道客户端",
+			Title:  windowTitle,
 			Width:  980,
 			Height: 760,
 			Center: true,
