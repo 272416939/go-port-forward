@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -206,5 +208,63 @@ func TestCountIgnoresMalformedPackets(t *testing.T) {
 	}
 	if len(m.states) != 0 {
 		t.Errorf("畸形包产生了 %d 条状态，期望 0", len(m.states))
+	}
+}
+
+// 嵌入的图标必须是多尺寸未压缩 DIB：CreateIconFromResourceEx 不认 PNG 压缩的
+// ICO 条目，而 PIL/在线转换工具默认就会输出 PNG 条目——换图标时极易踩到，
+// 表现是窗口和托盘静默地没有图标。
+func TestEmbeddedIconIsUncompressedDIB(t *testing.T) {
+	ico, err := assetFS.ReadFile("assets/icon.ico")
+	if err != nil {
+		t.Fatalf("读取嵌入图标: %v", err)
+	}
+	if got := binary.LittleEndian.Uint16(ico[2:4]); got != 1 {
+		t.Fatalf("ICO type = %d, 期望 1（图标）", got)
+	}
+	count := int(binary.LittleEndian.Uint16(ico[4:6]))
+	if count < 2 {
+		t.Fatalf("只有 %d 个尺寸，期望至少 16/32 两档", count)
+	}
+
+	sizes := map[int]bool{}
+	for i := 0; i < count; i++ {
+		e := ico[icoDirHeader+icoDirEntry*i:]
+		w := int(e[0])
+		if w == 0 {
+			w = 256
+		}
+		sizes[w] = true
+
+		off := binary.LittleEndian.Uint32(e[12:])
+		if head := ico[off : off+4]; !bytes.Equal(head, []byte{0x28, 0, 0, 0}) {
+			t.Errorf("%dx%d 条目不是未压缩 DIB（头 %x），CreateIconFromResourceEx 会失败", w, w, head)
+		}
+	}
+	for _, want := range []int{16, 32} {
+		if !sizes[want] {
+			t.Errorf("缺少 %dx%d 尺寸（标题栏用 32、托盘用 16）", want, want)
+		}
+	}
+}
+
+// iconFromICO 必须挑最贴合目标尺寸的条目，否则把 16 放大到 32 会明显发虚。
+func TestIconPicksClosestSize(t *testing.T) {
+	ico, err := assetFS.ReadFile("assets/icon.ico")
+	if err != nil {
+		t.Fatalf("读取嵌入图标: %v", err)
+	}
+	for _, size := range []int{16, 32, 48} {
+		h, err := iconFromICO(ico, size)
+		if err != nil {
+			t.Errorf("iconFromICO(%d): %v", size, err)
+			continue
+		}
+		if h == 0 {
+			t.Errorf("iconFromICO(%d) 返回空句柄", size)
+		}
+	}
+	if _, err := iconFromICO([]byte{0, 0, 1, 0}, 16); err == nil {
+		t.Error("截断数据应报错而不是崩溃")
 	}
 }

@@ -132,17 +132,15 @@ func installTray(hwnd windows.HWND, iconICO []byte, actions trayActions) error {
 	t := &tray{hwnd: hwnd, actions: actions}
 	activeTray = t
 
-	if h, err := iconFromICO(iconICO, 32, 32); err == nil {
-		t.hIcon = h
-		// 顺带修掉标题栏的通用图标：go-webview2 默认分支的 LoadImageW 调用
-		// 少传了参数，必然失败，所以窗口一直没有图标。
+	// 标题栏用大图标，托盘用小图标——尺寸取错会明显发虚。
+	// 顺带修掉 go-webview2 默认图标的问题：它 default 分支的 LoadImageW
+	// 少传了参数，调用必然失败，所以窗口一直没有图标。
+	if h, err := iconFromICO(iconICO, 32); err == nil {
 		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconBig, uintptr(h))
 	}
-	if h, err := iconFromICO(iconICO, 16, 16); err == nil {
+	if h, err := iconFromICO(iconICO, 16); err == nil {
 		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconSmall, uintptr(h))
-		if t.hIcon == 0 {
-			t.hIcon = h
-		}
+		t.hIcon = h // 托盘图标按小图标尺寸绘制
 	}
 
 	msg, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(
