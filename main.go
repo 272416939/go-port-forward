@@ -84,10 +84,28 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	if err := app.Stop(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "stop: %v\n", err)
+	// 关停要有兜底：任何一处清理卡住（外部命令挂起、阻塞读没被唤醒等）都不该
+	// 让进程停不下来。超时或再按一次 Ctrl+C 都直接退出。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := app.Stop(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "stop: %v\n", err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-quit:
+		_, _ = fmt.Fprintln(os.Stderr, "收到第二次中断信号，强制退出。")
+		os.Exit(1)
+	case <-time.After(shutdownTimeout):
+		_, _ = fmt.Fprintf(os.Stderr, "关停超过 %s 未完成，强制退出。\n", shutdownTimeout)
+		os.Exit(1)
 	}
 }
+
+// shutdownTimeout 是整个关停流程的硬上限。比内部各步骤的超时之和略宽即可。
+const shutdownTimeout = 15 * time.Second
 
 // application wires all subsystems together and implements svc.Runner.
 type application struct {

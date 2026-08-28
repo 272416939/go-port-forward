@@ -108,12 +108,29 @@ func Start(cfg Config, sessionIPs SessionIPsFunc) (*Server, error) {
 }
 
 // Stop 停止服务端并释放 TUN/UDP。
+//
+// 关闭顺序不能改：两个泵 goroutine 分别阻塞在 udpConn.ReadFromUDP 与
+// dev.ReadPacket 上，只在拿到一个包之后才会去看 stop 通道。所以必须先关掉
+// socket 与设备让阻塞读带错误返回，再等 goroutine 退出——反过来（先等再关）
+// 会在没有流量时永久卡死，表现为 Ctrl+C 后进程不退出。
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
-		<-s.done
-		_ = s.udp.Close()
-		_ = s.dev.Close()
+		if s.udp != nil {
+			_ = s.udp.Close()
+		}
+		if s.dev != nil {
+			_ = s.dev.Close()
+		}
+
+		// 即便如此也不无条件等待：读循环若卡在别处，宁可放它随进程退出，
+		// 也不能让整个程序停不下来。
+		select {
+		case <-s.done:
+		case <-time.After(3 * time.Second):
+			logger.S.Warnw("隧道读循环未在 3 秒内退出，跳过等待")
+		}
+
 		if s.cfg.NAT {
 			teardownReturnPath(s.cfg.TunName)
 		}

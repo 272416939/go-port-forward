@@ -3,9 +3,11 @@
 package tunnelapp
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // 回程标记与专用路由表：把从 TUN 进来的包（Windows 后端发给玩家的回包）
@@ -13,10 +15,18 @@ import (
 const (
 	returnMark  = "0x7947"
 	returnTable = "7947"
+	// cmdTimeout 是每条外部命令的上限。这些命令跑在启动与关停路径上，
+	// 一旦 iptables 等待 xtables 锁挂住，整个进程就停不下来。
+	cmdTimeout = 5 * time.Second
 )
 
 func run(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("%s %s: 超过 %s 未返回", name, strings.Join(args, " "), cmdTimeout)
+	}
 	if err != nil {
 		return string(out), fmt.Errorf("%s %s: %w — %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
