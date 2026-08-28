@@ -41,8 +41,7 @@ var (
 	// 数据面统计（每 5 秒打印，用于定位断点在隧道段还是 Windows 本地段）
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（玩家回包方向）
 	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
-
-	serverIP net.IP // 中转机公网地址：回包源改写目标（10.66.0.2 → serverIP）
+	lastWriteErr    atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
 )
 
 func main() {
@@ -60,9 +59,6 @@ func main() {
 	if err != nil {
 		fatal("地址无效 | invalid address: %v", err)
 	}
-	if ra, rerr := net.ResolveIPAddr("ip4", serverAddr.IP.String()); rerr == nil {
-		serverIP = ra.IP
-	}
 
 	udp, err := net.DialUDP("udp", nil, serverAddr)
 	if err != nil {
@@ -78,10 +74,10 @@ func main() {
 	if err := syssetup.ConfigureInterface(tunName, tunClientIP, tunCIDRMask); err != nil {
 		fatal("配置虚拟网卡地址失败: %v", err)
 	}
-	// wintun 无 ARP 应答：网关 10.66.0.1 的邻居解析永远失败，回包全部
-	// 滞留。添加静态邻居（MAC 任意，wintun 发送侧只取 IP 包）绕过解析。
+	// 静态邻居：wintun 是三层设备，Windows 对它不做 ARP，这一项只是
+	// 省掉边缘场景下的一次解析，失败不影响隧道。
 	if err := syssetup.AddStaticNeighbor(tunName, tunServerIP, "aa-bb-cc-dd-ee-ff"); err != nil {
-		fmt.Println(t("[!] 静态邻居添加失败（回包可能无法发出）：", "[!] static neighbor failed: ") + err.Error())
+		fmt.Println(t("[!] 静态邻居添加失败（可忽略）：", "[!] static neighbor failed (ignorable): ") + err.Error())
 	}
 	// Windows 防火墙默认阻止新网卡（公用网络）的入站流量——玩家包会被
 	// 静默丢弃。自动添加仅限本虚拟网卡的入站放行规则，退出时移除。
@@ -94,11 +90,14 @@ func main() {
 
 	// 后台：TUN → 隧道
 	go func() {
-		buf := make([]byte, 1500+tunnet.Offset)
+		buf := make([]byte, 1500)
 		for {
 			n, err := dev.ReadPacket(buf)
 			if err != nil {
 				return
+			}
+			if n == 0 {
+				continue
 			}
 			if s := sessPtr.Load(); s != nil {
 				pkt := make([]byte, n)
@@ -193,12 +192,6 @@ func handshake(udp *net.UDPConn, server *net.UDPAddr) (*tunnel.Session, error) {
 		}
 		_ = udp.SetReadDeadline(time.Time{})
 		shared := tunnel.ECDHShared(&accept.Eph, priv)
-		if serverIP == nil {
-			if ra, rerr := net.ResolveIPAddr("ip4", server.IP.String()); rerr == nil {
-				serverIP = ra.IP
-				fmt.Println(t("服务器公网地址（回包源改写目标）：", "Server public IP (rewrite target): ") + serverIP.String())
-			}
-		}
 		return tunnel.NewSession(tunnel.DeriveSessionKey(shared, []byte(defaultPSK))), nil
 	}
 	return nil, fmt.Errorf("服务端无应答（检查地址/端口/防火墙）")
@@ -219,8 +212,9 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 		case n > 0 && buf[0] == tunnel.TypeData:
 			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
 				statTunnelToTun.Add(1)
-				rewriteSource(plain)
-				_ = dev.WritePacket(plain)
+				if werr := dev.WritePacket(plain); werr != nil {
+					logWriteErr(werr)
+				}
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:
 			if msg, cerr := sess.OpenCtrl(buf[:n]); cerr == nil {
@@ -233,6 +227,17 @@ func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server 
 			_, _ = udp.Write(pong)
 		}
 	}
+}
+
+// logWriteErr 限频打印写 TUN 失败（每 5 秒最多一条）。
+// 数据面写失败若静默丢弃，故障只表现为「隧道已建立但进不去世界」，无从排查。
+func logWriteErr(err error) {
+	now := time.Now().Unix()
+	last := lastWriteErr.Load()
+	if now-last < 5 || !lastWriteErr.CompareAndSwap(last, now) {
+		return
+	}
+	fmt.Println(t("[!] 写入虚拟网卡失败（玩家入站包被丢弃）：", "[!] TUN write failed: ") + err.Error())
 }
 
 // syncRoutes 按服务端推送的全量 IP 列表增删 /32 回程路由。

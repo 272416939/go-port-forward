@@ -1,5 +1,5 @@
 // Package tunnelapp 内置隧道服务端：为 Windows 端 pf-client 提供加密隧道
-// 与回程路径（TUN + MASQUERADE），并周期把 go-port-forward 活跃会话的
+// 与回程路径（TUN + 策略路由本机投递），并周期把 go-port-forward 活跃会话的
 // 来源 IP 推送给客户端维护 /32 回程路由。开启 tunnel.enabled 后随主程序
 // 常驻，无需单独的 pf-server 进程。
 package tunnelapp
@@ -24,7 +24,7 @@ type Config struct {
 	PSK     string `mapstructure:"psk"`     // 留空使用与客户端一致的内置默认
 	TunName string `mapstructure:"tun_name"`
 	TunAddr string `mapstructure:"tun_addr"` // 如 "10.66.0.1/24"
-	NAT     bool   `mapstructure:"nat"`      // ip_forward + MASQUERADE + FORWARD 放行
+	NAT     bool   `mapstructure:"nat"`      // 自动配置回程路径（ip_forward + 策略路由本机投递 + 放行）
 }
 
 // Defaults 填充零值配置。
@@ -44,14 +44,15 @@ const defaultPSK = "pfapp-default-psk-v1" // 与客户端内置默认一致
 
 // Server 是运行中的隧道服务端实例。
 type Server struct {
-	cfg       Config
-	udp       *net.UDPConn
-	dev       *tunnet.Device
-	sessPtr   atomic.Pointer[tunnel.Session]
-	peerValue atomic.Value // *net.UDPAddr
-	stop      chan struct{}
-	stopOnce  sync.Once
-	done      chan struct{}
+	cfg          Config
+	udp          *net.UDPConn
+	dev          *tunnet.Device
+	sessPtr      atomic.Pointer[tunnel.Session]
+	peerValue    atomic.Value // *net.UDPAddr
+	lastWriteErr atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
+	stop         chan struct{}
+	stopOnce     sync.Once
+	done         chan struct{}
 }
 
 // SessionIPsFunc 返回当前活跃会话的来源 IP 去重列表。
@@ -74,9 +75,9 @@ func Start(cfg Config, sessionIPs SessionIPsFunc) (*Server, error) {
 		return nil, fmt.Errorf("配置 TUN 地址失败: %w", err)
 	}
 	if cfg.NAT {
-		if err := setupNAT(cfg.TunName, tunCIDR(cfg.TunAddr)); err != nil {
+		if err := setupReturnPath(cfg.TunName); err != nil {
 			dev.Close()
-			return nil, fmt.Errorf("配置 NAT/转发失败: %w", err)
+			return nil, fmt.Errorf("配置回程路径失败: %w", err)
 		}
 	}
 	udp, err := net.ListenPacket("udp", cfg.Listen)
@@ -111,6 +112,9 @@ func (s *Server) Stop() {
 		<-s.done
 		_ = s.udp.Close()
 		_ = s.dev.Close()
+		if s.cfg.NAT {
+			teardownReturnPath(s.cfg.TunName)
+		}
 	})
 }
 
@@ -179,15 +183,28 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn, psk []byte) {
 		case sess != nil:
 			plain, oerr := sess.OpenData(pkt)
 			if oerr == nil {
-				_ = dev.WritePacket(plain)
+				if werr := dev.WritePacket(plain); werr != nil {
+					s.logWriteErr(werr)
+				}
 			}
 		}
 	}
 }
 
+// logWriteErr 限频记录写 TUN 失败（每 5 秒最多一条）。
+// 数据面写失败若静默丢弃，故障表现为「隧道通、业务不通」且毫无线索。
+func (s *Server) logWriteErr(err error) {
+	now := time.Now().Unix()
+	last := s.lastWriteErr.Load()
+	if now-last < 5 || !s.lastWriteErr.CompareAndSwap(last, now) {
+		return
+	}
+	logger.S.Warnw("写入 TUN 失败（玩家入站包被丢弃）", "err", err)
+}
+
 // pumpTunToClient TUN → 客户端 泵。
 func (s *Server) pumpTunToClient(dev *tunnet.Device, udpConn *net.UDPConn) {
-	buf := make([]byte, 1500+tunnet.Offset)
+	buf := make([]byte, 1500)
 	for {
 		select {
 		case <-s.stop:
@@ -263,13 +280,4 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 			}
 		}
 	}
-}
-
-// tunCIDR 从 "10.66.0.1/24" 提取网段。
-func tunCIDR(addr string) string {
-	_, ipnet, err := net.ParseCIDR(addr)
-	if err != nil {
-		return "10.66.0.0/24"
-	}
-	return ipnet.String()
 }

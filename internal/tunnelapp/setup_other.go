@@ -9,6 +9,8 @@ func configureInterface(ifaceName, cidr string) error {
 	return errors.New("tunnelapp: 隧道服务端仅支持 Linux | tunnel server requires Linux")
 }
 
-func setupNAT(tunName, tunCIDR string) error {
+func setupReturnPath(tunName string) error {
 	return errors.New("tunnelapp: 隧道服务端仅支持 Linux | tunnel server requires Linux")
 }
+
+func teardownReturnPath(tunName string) {}
