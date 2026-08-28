@@ -44,6 +44,9 @@ func defaultOutInterface() (string, error) {
 // setupNAT 启用 IP 转发、放行 TUN 转发、并对隧道网段做 MASQUERADE（幂等）。
 // FORWARD 放行至关重要：云镜像普遍默认 DROP FORWARD，缺失会导致
 // “隧道通但业务不通”（回包被内核静默丢弃）。
+//
+// 注意：iptables 的 -t <table> 必须位于 -A/-C 等命令之前，否则报
+// Bad argument 'nat'。
 func setupNAT(tunName, tunCIDR string) error {
 	if _, err := run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		return err
@@ -52,20 +55,20 @@ func setupNAT(tunName, tunCIDR string) error {
 	if err != nil {
 		return err
 	}
-	ensure := func(args ...string) error {
-		check := append([]string{"-C"}, args...)
+	ensure := func(table string, ruleSpec ...string) error {
+		check := append([]string{"-t", table, "-C"}, ruleSpec...)
 		if _, cerr := run("iptables", check...); cerr == nil {
-			return nil
+			return nil // 规则已存在 | rule already present
 		}
-		add := append([]string{"-A"}, args...)
+		add := append([]string{"-t", table, "-A"}, ruleSpec...)
 		_, aerr := run("iptables", add...)
 		return aerr
 	}
-	if err := ensure("-t", "nat", "POSTROUTING", "-s", tunCIDR, "-o", iface, "-j", "MASQUERADE"); err != nil {
+	if err := ensure("nat", "POSTROUTING", "-s", tunCIDR, "-o", iface, "-j", "MASQUERADE"); err != nil {
 		return err
 	}
-	if err := ensure("FORWARD", "-i", tunName, "-j", "ACCEPT"); err != nil {
+	if err := ensure("filter", "FORWARD", "-i", tunName, "-j", "ACCEPT"); err != nil {
 		return err
 	}
-	return ensure("FORWARD", "-o", tunName, "-j", "ACCEPT")
+	return ensure("filter", "FORWARD", "-o", tunName, "-j", "ACCEPT")
 }
