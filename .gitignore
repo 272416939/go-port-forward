@@ -438,3 +438,8 @@ gen
 
 # 本地集成测试（不发布）| Local-only integration tests (not published)
 test/
+
+# 隧道组件构建产物 | tunnel component build artifacts
+app/bin/
+app/server
+app/pf-client.exe
