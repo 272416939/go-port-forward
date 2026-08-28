@@ -1,258 +1,104 @@
 //go:build windows
 
-// pf-client —— Port Forward 隧道客户端（Windows）。
-// 以管理员身份运行，提示输入中转机（代理）地址后建立加密隧道：
-// 创建 "Port Forward" 虚拟网卡（10.66.0.2），并为玩家来源 IP 动态维护
-// /32 回程路由（仅回程，不影响其它流量；生命周期见 routes.go）。
+// pf-client —— Port Forward 隧道客户端（Windows，图形界面）。
+//
+// 界面用本机浏览器承载：程序在 127.0.0.1 的随机端口起一个带一次性 token
+// 的本地服务，然后打开默认浏览器。这样不必引入 GUI 工具链或 WebView2 运行时，
+// 单个 exe（加 wintun.dll）即可分发。
+//
+// 隧道本身需要管理员权限（虚拟网卡、路由表、防火墙规则），未提权时会主动
+// 触发一次 UAC 重启自身。
 package main
 
 import (
 	"fmt"
-	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"pfapp/internal/syssetup"
-	"go-port-forward/pkg/tunnet"
-	"go-port-forward/pkg/tunnel"
 )
 
 const (
-	defaultPSK    = "pfapp-default-psk-v1" // 与服务端配置保持一致，可修改
-	tunName       = "Port Forward"
-	tunClientIP   = "10.66.0.2"
-	tunServerIP   = "10.66.0.1"
-	tunCIDRMask   = "255.255.255.0"
+	defaultPSK     = "pfapp-default-psk-v1" // 与服务端配置保持一致，可修改
+	tunName        = "Port Forward"
+	tunClientIP    = "10.66.0.2"
+	tunServerIP    = "10.66.0.1"
+	tunCIDRMask    = "255.255.255.0"
 	handshakeTries = 8
 )
 
-var (
-	sessPtr atomic.Pointer[tunnel.Session]
-	peerPtr atomic.Pointer[net.UDPAddr]
-	routes  *routeManager // /32 回程路由生命周期（见 routes.go）
-
-	// 数据面统计（每 5 秒打印，用于定位断点在隧道段还是 Windows 本地段）
-	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（玩家回包方向）
-	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
-	lastWriteErr    atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
-)
-
 func main() {
-	fmt.Println("════════ Port Forward 隧道客户端（Windows）════════")
-	fmt.Println(t("请以管理员身份运行本程序（虚拟网卡与路由需要管理员权限）。", "Run as Administrator."))
-
-	addr := promptWithDefault("Port Forward 代理地址 (IP:端口)", loadLastAddr())
-	if !strings.Contains(addr, ":") {
-		addr = addr + ":7947"
-	}
-	saveLastAddr(addr)
-	fmt.Println(t("连接目标：", "Target: ") + addr)
-
-	serverAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		fatal("地址无效 | invalid address: %v", err)
-	}
-
-	udp, err := net.DialUDP("udp", nil, serverAddr)
-	if err != nil {
-		fatal("创建 UDP socket 失败: %v", err)
-	}
-	defer udp.Close()
-
-	dev, err := tunnet.Open(tunName, 1400)
-	if err != nil {
-		fatal("%v", err)
-	}
-	defer dev.Close()
-	if err := syssetup.ConfigureInterface(tunName, tunClientIP, tunCIDRMask); err != nil {
-		fatal("配置虚拟网卡地址失败: %v", err)
-	}
-	// 静态邻居：wintun 是三层设备，Windows 对它不做 ARP，这一项只是
-	// 省掉边缘场景下的一次解析，失败不影响隧道。
-	if err := syssetup.AddStaticNeighbor(tunName, tunServerIP, "aa-bb-cc-dd-ee-ff"); err != nil {
-		fmt.Println(t("[!] 静态邻居添加失败（可忽略）：", "[!] static neighbor failed (ignorable): ") + err.Error())
-	}
-	// Windows 防火墙默认阻止新网卡（公用网络）的入站流量——玩家包会被
-	// 静默丢弃。自动添加仅限本虚拟网卡的入站放行规则，退出时移除。
-	if err := syssetup.AllowInboundOnInterface(tunName); err != nil {
-		fmt.Println(t("[!] 防火墙放行失败（玩家流量可能被拦截）：", "[!] firewall allow failed: ") + err.Error())
-	} else {
-		fmt.Println(t("已为虚拟网卡添加防火墙入站放行。", "Firewall inbound allow rule added."))
-	}
-	fmt.Println(t("虚拟网卡就绪: ", "TUN ready: ") + tunClientIP)
-	routes = newRouteManager(serverAddr.IP.String())
-
-	// 后台：TUN → 隧道
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, err := dev.ReadPacket(buf)
-			if err != nil {
-				return
-			}
-			if n == 0 {
-				continue
-			}
-			if s := sessPtr.Load(); s != nil {
-				pkt := make([]byte, n)
-				copy(pkt, buf[:n])
-				statTunToTunnel.Add(1)
-				if _, werr := udp.Write(s.SealData(pkt)); werr != nil {
-					return
-				}
-			}
+	// 未提权：请求 UAC 重启自身。用户拒绝时（1223）静默退出，界面仍可打开
+	// 但会显示权限提示，避免用户以为程序崩了。
+	if !syssetup.IsElevated() && os.Getenv("PF_NO_ELEVATE") == "" {
+		if err := syssetup.RelaunchElevated(); err == nil {
+			return
 		}
-	}()
+	}
 
-	// 后台：数据面统计（隧道建立后每 5 秒一行）
-	go func() {
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-		for range tick.C {
-			if sessPtr.Load() == nil {
-				continue
-			}
-			ti, to := statTunToTunnel.Load(), statTunnelToTun.Load()
-			fmt.Printf("%s", fmt.Sprintf(t("[流量] 回程(TUN→隧道) %d 包 | 入站(隧道→TUN) %d 包\n", "[traffic] return(TUN->tunnel) %d pkts | inbound(tunnel->TUN) %d pkts\n"), ti, to))
+	eng := NewEngine()
+	url, quit, err := startUI(eng)
+	if err != nil {
+		alert("启动失败", err.Error())
+		os.Exit(1)
+	}
+	eng.logf("界面已就绪：%s", url)
+	// 从终端启动时打印入口地址（GUI 模式无控制台，写入静默失败）；
+	// 浏览器没能自动弹出时用户也能手工打开。
+	fmt.Println("界面地址：" + url)
+
+	if !syssetup.IsElevated() {
+		eng.logf("[!] 当前未以管理员身份运行，无法建立隧道。")
+	}
+
+	openBrowser(url)
+
+	// 自动连接上次使用的地址，省掉重复输入。
+	if last := loadLastAddr(); last != "" && syssetup.IsElevated() {
+		eng.logf("正在连接上次使用的地址：%s", last)
+		if err := eng.Start(last); err != nil {
+			eng.logf("自动连接失败：%v", err)
 		}
-	}()
+	}
 
-	// 后台：心跳
-	go func() {
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-		for range tick.C {
-			if s := sessPtr.Load(); s != nil {
-				_, _ = udp.Write(s.SealPing())
-			}
-		}
-	}()
-
-	// Ctrl+C 清理路由
+	// 退出路径有两条：界面上的「退出程序」按钮，或 Ctrl+C / 系统终止信号。
+	// 两者都要走 Stop()，否则 /32 路由和防火墙规则会残留在系统里。
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sig
-		fmt.Println("\n" + t("正在清理回程路由并退出…", "Cleaning up routes and exiting…"))
-		routes.cleanup()
-		syssetup.RemoveStaticNeighbor(tunName, tunServerIP)
-		syssetup.RemoveInboundRule()
-		os.Exit(0)
-	}()
-
-	// 主循环：握手 → 泵；空闲超时自动重握手
-	for {
-		sess, err := handshake(udp, serverAddr)
-		if err != nil {
-			fmt.Println(t("握手失败：", "Handshake failed: ") + err.Error())
-			routes.cleanup()
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		sessPtr.Store(sess)
-		peerPtr.Store(serverAddr)
-		fmt.Println(t("✔ 隧道已建立。按 Ctrl+C 退出。", "✔ Tunnel established. Ctrl+C to exit."))
-
-		if err := pumpUDP(udp, dev, sess, serverAddr); err != nil {
-			fmt.Println(t("隧道中断：", "Tunnel broken: ") + err.Error())
-		}
-		sessPtr.Store(nil)
-		fmt.Println(t("30 秒无数据，重新握手…", "Idle 30s, re-handshaking…"))
-		routes.cleanup()
+	select {
+	case <-sig:
+	case <-quit:
 	}
+	eng.Stop()
+	// 给 defer 中的系统命令（route delete / 防火墙规则移除）留出执行时间。
+	time.Sleep(300 * time.Millisecond)
 }
 
-// handshake 循环发送 Hello 直到收到 Accept。
-func handshake(udp *net.UDPConn, server *net.UDPAddr) (*tunnel.Session, error) {
-	for attempt := 1; attempt <= handshakeTries; attempt++ {
-		hello, priv, err := tunnel.NewClientHello([]byte(defaultPSK))
-		if err != nil {
-			return nil, err
-		}
-		if _, err := udp.Write(hello.Marshal()); err != nil {
-			return nil, err
-		}
-		buf := make([]byte, tunnel.MaxPacket+64)
-		_ = udp.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		n, err := udp.Read(buf)
-		if err != nil {
-			fmt.Printf(t("  等待服务端应答 (%d/%d)…\n", "  waiting for server (%d/%d)…\n"), attempt, handshakeTries)
-			continue
-		}
-
-		accept, err := tunnel.ParseServerAccept([]byte(defaultPSK), buf[:n], hello.Eph)
-		if err != nil {
-			return nil, fmt.Errorf("%v（请核对服务端 PSK 配置）", err)
-		}
-		_ = udp.SetReadDeadline(time.Time{})
-		shared := tunnel.ECDHShared(&accept.Eph, priv)
-		return tunnel.NewSession(tunnel.DeriveSessionKey(shared, []byte(defaultPSK))), nil
-	}
-	return nil, fmt.Errorf("服务端无应答（检查地址/端口/防火墙）")
+// openBrowser 用系统默认浏览器打开界面。
+// rundll32 比 `cmd /c start` 稳妥：不会因 URL 中的 & 被 cmd 解析而截断。
+func openBrowser(url string) {
+	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }
 
-// pumpUDP 收隧道包：Data→写 TUN，Ctrl→同步回程路由，Ping→Pong。
-// 30 秒无任何入站包返回错误触发重握手。
-func pumpUDP(udp *net.UDPConn, dev *tunnet.Device, sess *tunnel.Session, server *net.UDPAddr) error {
-	buf := make([]byte, tunnel.MaxPacket+64)
-	_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
-	for {
-		n, err := udp.Read(buf)
-		if err != nil {
-			return err // 超时或错误 → 外层重握手
-		}
-		_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
-		switch {
-		case n > 0 && buf[0] == tunnel.TypeData:
-			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
-				statTunnelToTun.Add(1)
-				// 必须先装回程路由再写 TUN：后端回包可能在微秒内产生，
-				// 若此刻路由还不存在，回包会按默认路由从物理网卡漏出去。
-				routes.touchPacket(plain)
-				if werr := dev.WritePacket(plain); werr != nil {
-					logWriteErr(werr)
-				}
-			}
-		case n > 0 && buf[0] == tunnel.TypeCtrl:
-			if msg, cerr := sess.OpenCtrl(buf[:n]); cerr == nil {
-				routes.sync(msg.IPs)
-			}
-		case n > 0 && buf[0] == tunnel.TypePing:
-			pong := make([]byte, 0, 1+24+16)
-			pong = append(pong, tunnel.TypePong)
-			pong = append(pong, sess.Seal(nil)...)
-			_, _ = udp.Write(pong)
-		}
-	}
+// alert 弹出一个原生消息框（此时界面还没起来，只能走系统对话框）。
+func alert(title, msg string) {
+	_ = exec.Command("mshta", fmt.Sprintf(
+		`javascript:alert("%s\n\n%s");close()`,
+		escapeJS(title), escapeJS(msg))).Run()
 }
 
-// logWriteErr 限频打印写 TUN 失败（每 5 秒最多一条）。
-// 数据面写失败若静默丢弃，故障只表现为「隧道已建立但进不去世界」，无从排查。
-func logWriteErr(err error) {
-	now := time.Now().Unix()
-	last := lastWriteErr.Load()
-	if now-last < 5 || !lastWriteErr.CompareAndSwap(last, now) {
-		return
-	}
-	fmt.Println(t("[!] 写入虚拟网卡失败（玩家入站包被丢弃）：", "[!] TUN write failed: ") + err.Error())
+func escapeJS(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return strings.ReplaceAll(s, "\n", `\n`)
 }
 
-// --- 交互与本地配置 ---
-
-func t(zh, en string) string { return zh } // 控制台客户端当前仅中文提示
-
-func fatal(f string, a ...any) {
-	fmt.Printf("错误: "+f+"\n", a...)
-	fmt.Println(t("按回车退出…", "Press Enter to exit…"))
-	var s string
-	_, _ = fmt.Scanln(&s)
-	os.Exit(1)
-}
+// --- 本地配置：记住上次使用的中转机地址 ---
 
 func confPath() string {
 	exe, err := os.Executable()
@@ -272,27 +118,4 @@ func loadLastAddr() string {
 
 func saveLastAddr(addr string) {
 	_ = os.WriteFile(confPath(), []byte(strings.TrimSpace(addr)), 0o644)
-}
-
-func promptWithDefault(label, last string) string {
-	if last != "" {
-		fmt.Printf("%s（回车 = %s）：", label, last)
-	} else {
-		fmt.Printf("%s：", label)
-	}
-	var line string
-	_, _ = fmt.Scanln(&line)
-	line = strings.TrimSpace(line)
-	if line == "" {
-		if last == "" {
-			fmt.Println("必须输入地址 | address is required")
-			os.Exit(1)
-		}
-		return last
-	}
-	if _, _, err := net.SplitHostPort(line); err != nil {
-		fmt.Println("地址格式应为 IP:端口 | expected IP:port")
-		os.Exit(1)
-	}
-	return line
 }

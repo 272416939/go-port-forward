@@ -7,14 +7,16 @@ cd "$(dirname "$0")"
 
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 OUT="bin"
-LDFLAGS="-s -w"
+# -H=windowsgui：不分配控制台窗口。界面由本机浏览器承载，留一个空白 cmd
+# 窗口只会让用户以为程序卡住。
+LDFLAGS="-s -w -H=windowsgui"
 
 log() { echo -e "\033[1;36m==>\033[0m $*"; }
 
 build_server() {
     log "Building pf-server (linux/amd64)..."
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-        go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/pf-server" ./cmd/server
+        go build -trimpath -ldflags "-s -w" -o "$OUT/pf-server" ./cmd/server
     log "Done: $OUT/pf-server"
 }
 

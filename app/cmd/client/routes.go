@@ -19,8 +19,8 @@ package main
 //     「已空闲超过宽限期」，并且交给后台 worker（删除从不影响时延）。
 
 import (
-	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -51,16 +51,30 @@ type routeManager struct {
 	// relayIP 是中转机地址。绝不能为它安装回程路由——那会把隧道自己的
 	// UDP 流量导进 TUN 形成环路，整条隧道立刻断掉。
 	relayIP string
+	logf    func(string, ...any)
 }
 
-func newRouteManager(relayIP string) *routeManager {
+func newRouteManager(relayIP string, logf func(string, ...any)) *routeManager {
 	m := &routeManager{
 		states:   make(map[string]*routeState),
 		removals: make(chan string, removeQueue),
 		relayIP:  relayIP,
+		logf:     logf,
 	}
 	go m.removeWorker()
 	return m
+}
+
+// list 返回当前已安装的回程路由（供 UI 展示），按 IP 排序保证顺序稳定。
+func (m *routeManager) list() []string {
+	m.mu.Lock()
+	out := make([]string, 0, len(m.states))
+	for ip := range m.states {
+		out = append(out, ip)
+	}
+	m.mu.Unlock()
+	sort.Strings(out)
+	return out
 }
 
 // eligible 判断该地址是否可以安装 /32 回程路由。只接受公网单播 IPv4：
@@ -113,10 +127,10 @@ func (m *routeManager) ensure(ip string) {
 		m.mu.Lock()
 		delete(m.states, ip) // 安装失败，下一个包会重试
 		m.mu.Unlock()
-		fmt.Println(t("[!] 回程路由添加失败:", "[!] route add failed: ") + ip)
+		m.logf("[!] 回程路由添加失败：%s", ip)
 		return
 	}
-	fmt.Println(t("[+] 回程路由已添加:", "[+] route added: ") + ip)
+	m.logf("[+] 回程路由已添加：%s", ip)
 }
 
 // sync 处理服务端推送的活跃会话 IP 全量列表：确认这些 IP 活跃（顺带补齐
@@ -169,7 +183,7 @@ func (m *routeManager) removeWorker() {
 		m.mu.Unlock()
 
 		_ = syssetup.RemoveRoute(ip)
-		fmt.Println(t("[-] 回程路由已移除(空闲):", "[-] route removed (idle): ") + ip)
+		m.logf("[-] 回程路由已移除（空闲）：%s", ip)
 	}
 }
 
