@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"pfapp/internal/syssetup"
-	"pfapp/internal/tunnet"
-	"pfapp/internal/tunnel"
+	"go-port-forward/pkg/tunnet"
+	"go-port-forward/pkg/tunnel"
 )
 
 const (
@@ -203,14 +203,19 @@ func syncRoutes(ips []string) {
 	defer addedMu.Unlock()
 	for ip := range added {
 		if !desired[ip] {
-			_ = syssetup.RemoveRoute(ip)
-			delete(added, ip)
+			if err := syssetup.RemoveRoute(ip); err == nil {
+				fmt.Println(t("[-] 已移除回程路由:", "[-] route removed: ") + ip)
+				delete(added, ip)
+			}
 		}
 	}
 	for ip := range desired {
 		if !added[ip] {
 			if err := syssetup.AddRoute(ip, tunServerIP); err == nil {
 				added[ip] = true
+				fmt.Println(t("[+] 已添加回程路由:", "[+] route added: ") + ip)
+			} else {
+				fmt.Println(t("[!] 回程路由添加失败:", "[!] route add failed: ") + ip)
 			}
 		}
 	}

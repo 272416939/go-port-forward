@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # app/build.sh — 隧道组件构建脚本（产物输出到 app/bin/）
-# Usage: bash app/build.sh [all|server|client]
+# Usage: bash app/build.sh [client]
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -29,12 +29,10 @@ build_client() {
 }
 
 mkdir -p "$OUT"
-target="${1:-all}"
+target="${1:-client}"
 case "$target" in
-    server) build_server ;;
     client) build_client ;;
-    all)    build_server; build_client ;;
-    *) echo "usage: $0 [all|server|client]"; exit 1 ;;
+    *) echo "usage: $0 [client]"; exit 1 ;;
 esac
 
 log "版本: $VERSION；产物在 app/$OUT/"

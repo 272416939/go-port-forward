@@ -16,6 +16,17 @@ type AppConfig struct {
 	Log     LogConfig     `mapstructure:"log"`
 	Forward ForwardConfig `mapstructure:"forward"`
 	Pool    PoolConfig    `mapstructure:"pool"`
+	Tunnel  TunnelConfig  `mapstructure:"tunnel"`
+}
+
+// TunnelConfig holds the built-in tunnel server (for Windows pf-client peers).
+type TunnelConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Listen  string `mapstructure:"listen"`  // UDP listen, default ":7947"
+	PSK     string `mapstructure:"psk"`     // empty = built-in default (matches pf-client)
+	TunName string `mapstructure:"tun_name"`
+	TunAddr string `mapstructure:"tun_addr"` // e.g. "10.66.0.1/24"
+	NAT     bool   `mapstructure:"nat"`      // ip_forward + MASQUERADE + FORWARD accept
 }
 
 // WebConfig holds web server configuration.
@@ -125,6 +136,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("forward.udp_timeout", 30)
 	v.SetDefault("forward.dial_timeout", 10)
 	v.SetDefault("forward.connlog_max_entries", 2000)
+
+	v.SetDefault("tunnel.enabled", false)
+	v.SetDefault("tunnel.listen", ":7947")
+	v.SetDefault("tunnel.psk", "")
+	v.SetDefault("tunnel.tun_name", "pftun0")
+	v.SetDefault("tunnel.tun_addr", "10.66.0.1/24")
+	v.SetDefault("tunnel.nat", true)
 
 	// GC defaults
 	v.SetDefault("gc.enabled", true)

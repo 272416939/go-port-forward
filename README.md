@@ -434,6 +434,16 @@ Windows 机器的其它上网/RDP 流量、以及“通过后端公网 IP 直接
 - 透明模式与 PROXY 协议透传互斥（二选一）；两者都保留，按拓扑任选。
 - 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
 - Windows 端需要管理员权限（wintun 驱动 + 路由管理）。
+- 服务端已内置隧道（`tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward/MASQUERADE/FORWARD 放行），**无需单独的 pf-server 进程**。
+
+### 排查清单 | Troubleshooting
+
+| 现象 | 检查 |
+|------|------|
+| pf-client 一直握手失败 | 中转机 `tunnel.enabled` 是否开启、UDP 7947 是否放行、psk 是否与服务端一致 |
+| 隧道已建立但业务不通 | 中转机 `ping 10.66.0.2`；客户端控制台是否打印 `[+] 已添加回程路由: <玩家IP>`（发包后 10 秒内） |
+| 规则开启透明模式变红 | 非 Linux 或非 root 运行（需 root 或给进程 CAP_NET_ADMIN） |
+| 会话通但无回包 | 中转机 `iptables -t nat -L POSTROUTING` 应有隧道网段 MASQUERADE；FORWARD 链应放行 TUN 接口 |
 
 ## 🔌 REST API
 
