@@ -78,6 +78,11 @@ func main() {
 	if err := syssetup.ConfigureInterface(tunName, tunClientIP, tunCIDRMask); err != nil {
 		fatal("配置虚拟网卡地址失败: %v", err)
 	}
+	// wintun 无 ARP 应答：网关 10.66.0.1 的邻居解析永远失败，回包全部
+	// 滞留。添加静态邻居（MAC 任意，wintun 发送侧只取 IP 包）绕过解析。
+	if err := syssetup.AddStaticNeighbor(tunName, tunServerIP, "aa-bb-cc-dd-ee-ff"); err != nil {
+		fmt.Println(t("[!] 静态邻居添加失败（回包可能无法发出）：", "[!] static neighbor failed: ") + err.Error())
+	}
 	// Windows 防火墙默认阻止新网卡（公用网络）的入站流量——玩家包会被
 	// 静默丢弃。自动添加仅限本虚拟网卡的入站放行规则，退出时移除。
 	if err := syssetup.AllowInboundOnInterface(tunName); err != nil {
@@ -137,6 +142,7 @@ func main() {
 		<-sig
 		fmt.Println("\n" + t("正在清理回程路由并退出…", "Cleaning up routes and exiting…"))
 		cleanupRoutes()
+		syssetup.RemoveStaticNeighbor(tunName, tunServerIP)
 		syssetup.RemoveInboundRule()
 		os.Exit(0)
 	}()
