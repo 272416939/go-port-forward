@@ -212,7 +212,15 @@ func (f *UDPForwarder) forward(srcAddr *net.UDPAddr, data []byte) {
 		}
 	}
 
-	n, _ := sess.upstream.Write(payload)
+	// 非透明路径为已连接 socket（用 Write）；透明路径为按源绑定的未连接
+	// socket（用 WriteToUDP 指定目标）。Windows 上 connected socket 调
+	// WriteToUDP 会静默失败，必须按模式分流。
+	var n int
+	if f.rule.Transparent {
+		n, _ = sess.upstream.WriteToUDP(payload, f.targetAddr)
+	} else {
+		n, _ = sess.upstream.Write(payload)
+	}
 	if sess.sinfo != nil {
 		sess.sinfo.bytesIn.Add(int64(n))
 	}
@@ -363,7 +371,13 @@ func (f *UDPForwarder) dialUpstream(srcAddr *net.UDPAddr) (*net.UDPConn, error) 
 	if err != nil {
 		return nil, err
 	}
-	return dialUDPConnected(pc, f.targetAddr)
+	udp, ok := pc.(*net.UDPConn)
+	if !ok {
+		pc.Close()
+		return nil, fmt.Errorf("透明模式：上游 socket 类型异常 | unexpected packet conn type")
+	}
+	// 不调用 Connect（部分平台不可用）；发送统一走 WriteToUDP 指定目标
+	return udp, nil
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
