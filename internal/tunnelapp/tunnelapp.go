@@ -7,6 +7,8 @@ package tunnelapp
 import (
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -166,11 +168,18 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn, psk []byte) {
 			if hello, herr := tunnel.ParseClientHello(psk, pkt); herr == nil {
 				accept, priv, _ := tunnel.NewServerAccept(psk, hello.Eph)
 				if _, werr := udpConn.WriteToUDP(accept.Marshal(), from); werr == nil {
+					prev := s.peer()
 					shared := tunnel.ECDHShared(&hello.Eph, priv)
 					sess := tunnel.NewSession(tunnel.DeriveSessionKey(shared, psk))
 					s.sessPtr.Store(sess)
 					s.peerValue.Store(from)
-					logger.S.Infow("隧道客户端重新接入", "src", from)
+					// 空闲 30 秒会触发客户端自动重握手，同一来源的重连是
+					// 常态，只在来源变化时记 info（换机器/换 NAT 端口才值得注意）。
+					if prev == nil || prev.String() != from.String() {
+						logger.S.Infow("隧道客户端重新接入", "src", from)
+					} else {
+						logger.S.Debugw("隧道客户端重新握手", "src", from)
+					}
 				}
 			}
 		case sess.IsPing(pkt):
@@ -254,9 +263,14 @@ func (s *Server) heartbeat(udpConn *net.UDPConn) {
 }
 
 // pushSessionIPs 周期把活跃会话来源 IP 推给客户端（回程路由同步）。
+//
+// 推送每 10 秒一次且内容通常不变，逐次打 info 只会把日志刷满、把真正有用的
+// 信息挤出屏幕。所以只在 IP 集合发生变化时记一条 info（这才是运维需要知道的
+// 状态变更），逐次推送降到 debug。
 func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn) {
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
+	var lastSig string
 	for {
 		select {
 		case <-s.stop:
@@ -275,9 +289,24 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 			if err != nil {
 				continue
 			}
-			if _, err := udpConn.WriteToUDP(wire, addr); err == nil {
-				logger.S.Infow("回程路由 IP 已推送", "count", len(ips))
+			if _, err := udpConn.WriteToUDP(wire, addr); err != nil {
+				continue
+			}
+			if sig := sessionIPsSignature(ips); sig != lastSig {
+				lastSig = sig
+				logger.S.Infow("回程路由 IP 变更", "count", len(ips), "ips", ips)
+			} else {
+				logger.S.Debugw("回程路由 IP 已推送", "count", len(ips))
 			}
 		}
 	}
+}
+
+// sessionIPsSignature 生成与顺序无关的集合指纹，用于判断内容是否变化。
+// 会话来源于 map 遍历，顺序本身不稳定，不排序会把同一集合误判为变更。
+func sessionIPsSignature(ips []string) string {
+	sorted := make([]string, len(ips))
+	copy(sorted, ips)
+	sort.Strings(sorted)
+	return strings.Join(sorted, ",")
 }
