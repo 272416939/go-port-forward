@@ -78,6 +78,13 @@ func main() {
 	if err := syssetup.ConfigureInterface(tunName, tunClientIP, tunCIDRMask); err != nil {
 		fatal("配置虚拟网卡地址失败: %v", err)
 	}
+	// Windows 防火墙默认阻止新网卡（公用网络）的入站流量——玩家包会被
+	// 静默丢弃。自动添加仅限本虚拟网卡的入站放行规则，退出时移除。
+	if err := syssetup.AllowInboundOnInterface(tunName); err != nil {
+		fmt.Println(t("[!] 防火墙放行失败（玩家流量可能被拦截）：", "[!] firewall allow failed: ") + err.Error())
+	} else {
+		fmt.Println(t("已为虚拟网卡添加防火墙入站放行。", "Firewall inbound allow rule added."))
+	}
 	fmt.Println(t("虚拟网卡就绪: ", "TUN ready: ") + tunClientIP)
 
 	// 后台：TUN → 隧道
@@ -130,6 +137,7 @@ func main() {
 		<-sig
 		fmt.Println("\n" + t("正在清理回程路由并退出…", "Cleaning up routes and exiting…"))
 		cleanupRoutes()
+		syssetup.RemoveInboundRule()
 		os.Exit(0)
 	}()
 
