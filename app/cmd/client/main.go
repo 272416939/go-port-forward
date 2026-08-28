@@ -8,12 +8,14 @@
 //
 // 隧道本身需要管理员权限（虚拟网卡、路由表、防火墙规则），未提权时会主动
 // 触发一次 UAC 重启自身。
+//
+// GUI 程序没有控制台，启动期任何失败在用户看来都是"双击没反应"。因此每个
+// 关键步骤都写进 exe 同目录的 pf-client.log，失败一律用原生 MessageBox 报出来
+//（见 diag_windows.go）。
 package main
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,25 +36,38 @@ func main() {
 	// WebView2 的消息循环必须固定在创建它的 OS 线程上。
 	runtime.LockOSThread()
 
-	// 未提权：请求 UAC 重启自身。用户拒绝时窗口照常打开，但会显示权限提示，
-	// 避免用户以为程序没反应。
+	openStartupLog()
+	defer closeStartupLog()
+	diag("可执行文件：%s", exePath())
+	diag("Windows 版本：%s", windowsVersion())
+	diag("管理员权限：%v", syssetup.IsElevated())
+
+	// 未提权：请求 UAC 重启自身。
 	if !syssetup.IsElevated() && os.Getenv("PF_NO_ELEVATE") == "" {
+		diag("未提权，正在请求 UAC…")
 		if err := syssetup.RelaunchElevated(); err == nil {
+			diag("已启动提权实例，本进程退出")
 			return
+		} else {
+			// 用户点了「否」，或系统禁用了 UAC 提权。继续以受限权限打开界面，
+			// 界面上会显示权限提示。
+			diag("UAC 提权未完成：%v（继续以受限权限运行）", err)
 		}
 	}
 
-	if !webview2Available() {
-		alert("缺少运行时组件", webview2Hint)
-		os.Exit(1)
+	if v, err := webview2Version(); err != nil || v == "" {
+		diag("WebView2 运行时检测失败：version=%q err=%v", v, err)
+		fatalBox("缺少运行时组件", webview2Hint)
+	} else {
+		diag("WebView2 运行时版本：%s", v)
 	}
 
 	eng := NewEngine()
 	url, quit, err := startUI(eng)
 	if err != nil {
-		alert("启动失败", err.Error())
-		os.Exit(1)
+		fatalBox("启动失败", err.Error())
 	}
+	diag("本地界面服务已就绪：%s", url)
 
 	if !syssetup.IsElevated() {
 		eng.logf("[!] 当前未以管理员身份运行，无法建立隧道。")
@@ -73,27 +88,27 @@ func main() {
 	}()
 
 	// 阻塞直到程序退出（关窗只是收进托盘）；随后清理路由与防火墙规则。
-	err = runWindow(url, trayActions{
-		Disconnect: eng.Stop,
-		Quit:       quitApp,
-	})
-	if err != nil {
-		alert("界面异常", err.Error())
+	diag("正在创建主窗口…")
+	if err := runWindow(url, trayActions{Disconnect: eng.Stop, Quit: quitApp}); err != nil {
+		diag("主窗口创建失败：%v", err)
+		fatalBox("界面异常", err.Error())
 	}
+	diag("窗口已关闭，正在清理…")
 	eng.Stop()
+	diag("已退出")
 }
 
-// alert 弹出一个原生消息框（窗口尚未就绪时只能走系统对话框）。
-func alert(title, msg string) {
-	_ = exec.Command("mshta", fmt.Sprintf(
-		`javascript:alert("%s\n\n%s");close()`,
-		escapeJS(title), escapeJS(msg))).Run()
+func exePath() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "(未知)"
 }
 
-func escapeJS(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return strings.ReplaceAll(s, "\n", `\n`)
+// windowsVersion 返回可读的系统版本（诊断用：WebView2 的可用性与系统版本相关）。
+func windowsVersion() string {
+	major, minor, build := rtlGetNtVersionNumbers()
+	return fmtVersion(major, minor, build)
 }
 
 // --- 本地配置：记住上次使用的中转机地址 ---

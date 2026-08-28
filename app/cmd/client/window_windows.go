@@ -28,15 +28,18 @@ var assetFS embed.FS
 // current 是当前窗口，供后台 goroutine 请求关闭。
 var current atomic.Value // webview2.WebView
 
-// webview2Available 报告系统是否装有 WebView2 Runtime。
-func webview2Available() bool {
-	v, err := webviewloader.GetInstalledVersion()
-	return err == nil && v != ""
+// webview2Version 返回已安装的 WebView2 运行时版本；未安装时返回空字符串。
+func webview2Version() (string, error) {
+	return webviewloader.GetInstalledVersion()
 }
 
-const webview2Hint = "本程序界面需要 Microsoft Edge WebView2 运行时。\n\n" +
-	"请访问以下地址下载「常青版独立安装程序」后重试：\n" +
-	"https://developer.microsoft.com/microsoft-edge/webview2/"
+const webview2Hint = "本程序界面需要 Microsoft Edge WebView2 运行时，当前系统未安装。\n\n" +
+	"Windows Server 2019 / 2016 以及部分精简版 Windows 10 不预装它，需要手动安装：\n\n" +
+	"1. 打开 https://developer.microsoft.com/microsoft-edge/webview2/\n" +
+	"2. 下载「常青版独立安装程序」（Evergreen Standalone Installer，x64）\n" +
+	"3. 安装完成后重新运行本程序\n\n" +
+	"直接下载地址：\n" +
+	"https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 // runWindow 打开原生窗口并阻塞直到程序退出（关窗只是隐藏到托盘）。
 // 必须在已 LockOSThread 的 goroutine 中调用。

@@ -43,6 +43,7 @@ var (
 	procRegisterWindowMessageW = user32.NewProc("RegisterWindowMessageW")
 	procIsWindowVisible        = user32.NewProc("IsWindowVisible")
 	procCreateIconFromResEx    = user32.NewProc("CreateIconFromResourceEx")
+	procMessageBoxW            = user32.NewProc("MessageBoxW")
 	procShellNotifyIconW       = shell32.NewProc("Shell_NotifyIconW")
 	procGetModuleHandleW       = kernel32.NewProc("GetModuleHandleW")
 )

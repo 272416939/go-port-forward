@@ -447,3 +447,6 @@ app/pf-client.exe
 # 配置（缺 -H=windowsgui，会多弹一个控制台窗口），别让它进仓库或被误发。
 app/client.exe
 app/cmd/client/client.exe
+# 客户端运行时产物（启动诊断日志、上次使用的地址）
+pf-client.log
+pf-client.conf

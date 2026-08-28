@@ -422,6 +422,7 @@ The **Active Sessions** panel lists all current client sessions (protocol / sour
 3. **后端机（Windows）**：双击 `pf-client.exe` → 自动请求管理员权限 → 打开图形界面 →
    填中转机地址（IP:7947，会记住，下次自动连接）→ 自动创建虚拟网卡（10.66.0.2）
    并按会话动态维护回程路由。关闭窗口收进右下角托盘继续运行，托盘菜单可退出。
+   **首次在 Windows Server 2019/2016 上使用需先装 WebView2 运行时**（见下方注意事项）。
 4. **go-port-forward**：添加/编辑规则，目标地址填 **10.66.0.2**（客户端虚拟 IP），开启 **透明模式** 开关。
    仅 Linux+root 可用；Windows 上该开关的规则会启动失败并给出明确原因（fail-closed）。
 
@@ -442,13 +443,17 @@ Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接�
 - 透明模式**仅支持 UDP 规则**（TCP 的回包无法送达透明 socket），协议含 TCP 时开关会被拒绝；UDP 场景（如基岩版 19132/58618）完全覆盖。
 - 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
 - Windows 端需要管理员权限（wintun 驱动 + 路由管理），未提权时程序会主动弹 UAC。
-- 客户端界面由系统自带的 Edge WebView2 渲染；Win11 与近年更新过的 Win10 均已预装，缺失时程序会给出下载指引。
+- 客户端界面由系统自带的 Edge WebView2 渲染。Win11 与近年更新过的 Win10 均已预装，但
+  **Windows Server 2019 / 2016 与部分精简版 Windows 10 不带**，需先安装「常青版独立安装
+  程序」（<https://go.microsoft.com/fwlink/p/?LinkId=2124703>）；缺失时程序会弹窗说明。
+  启动异常时看 exe 同目录的 `pf-client.log`（记录系统版本、提权状态、WebView2 版本与各步骤结果）。
 - 服务端 `tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward + 策略路由 + FORWARD/INPUT 放行，**不使用 MASQUERADE**（透明模式下正向首包走 OUTPUT 不匹配 NAT，conntrack 会判定整流不改写）。
 
 ### 排查清单 | Troubleshooting
 
 | 现象 | 检查 |
 |------|------|
+| pf-client 双击没反应 | 看 exe 同目录 `pf-client.log`；最常见是缺 WebView2 运行时（Server 2019/2016 不预装） |
 | pf-client 一直握手失败 | 中转机 `tunnel.enabled` 是否开启、UDP 7947 是否放行、psk 是否与服务端一致 |
 | 隧道已建立但业务不通 | 客户端界面「活跃玩家流量」是否出现玩家 IP，上下行字节是否同时增长；只有一个方向说明回程路由或策略路由有问题 |
 | 规则开启透明模式变红 | 非 Linux 或非 root 运行（需 root 或给进程 CAP_NET_ADMIN） |
