@@ -13,8 +13,9 @@ import (
 
 // 握手域分隔标签，避免不同方向的 MAC 互挪。版本后缀让新旧端天然互不认证。
 var (
-	helloDomain  = []byte("pfapp-hello-v2")
-	acceptDomain = []byte("pfapp-accept-v2")
+	helloDomain  = []byte("pfapp-hello-v3")
+	acceptDomain = []byte("pfapp-accept-v3")
+	rejectDomain = []byte("pfapp-reject-v3")
 )
 
 // 握手时间戳容忍窗口（防重放 + 容忍时钟偏差）。
@@ -22,9 +23,11 @@ const helloMaxAge = 10 * time.Minute
 
 // 报文长度（含 1 字节类型前缀）。
 const (
-	helloLen   = 1 + 1 + UIDSize + 32 + 8 + 32 // 90
-	acceptLen  = 1 + 1 + 32 + 4 + 1 + 4 + 32   // 75
-	helloLenV1 = 1 + 32 + 8 + 32               // 73，仅用于识别旧客户端
+	helloLen   = 1 + 1 + UIDSize + FingerprintSize + 32 + 8 + 32 // 122
+	acceptLen  = 1 + 1 + 32 + 4 + 1 + 4 + 32                     // 75
+	rejectLen  = 1 + 1 + 1 + 32                                  // 35
+	helloLenV1 = 1 + 32 + 8 + 32                                 // 73，仅用于识别旧客户端
+	helloLenV2 = 1 + 1 + UIDSize + 32 + 8 + 32                   // 90，同上
 )
 
 // macPSK 计算 HMAC-SHA256(secret, domain || parts...)。
@@ -37,20 +40,25 @@ func macPSK(secret []byte, domain []byte, parts ...[]byte) [32]byte {
 	return [32]byte(mac.Sum(nil))
 }
 
-// ClientHello 客户端握手包（明文传输，per-user secret HMAC 认证）。
+// ClientHello 客户端握手包（明文传输，per-code secret HMAC 认证）。
 //
-// UID 明文传输是必要的：服务端要先知道对端声称是谁，才能取出该用户的密钥去
-// 验证 MAC。声称本身不构成认证——MAC 验证失败即拒绝。
+// UID 明文传输是必要的：服务端要先知道对端声称是哪个访问码，才能取出对应的
+// 密钥去验证 MAC。声称本身不构成认证——MAC 验证失败即拒绝。
+//
+// Device 是客户端的设备指纹（machineid 派生）。它进 MAC，所以中间人改不了；
+// 但它由客户端自报，服务端只能保证「同一个访问码后续必须来自同一指纹」，
+// 不能保证指纹对应真实硬件。
 type ClientHello struct {
-	UID UID      // 隧道用户 ID
-	Eph [32]byte // 客户端临时 X25519 公钥
-	TS  uint64   // 发起时间（unix 秒）
-	MAC [32]byte
+	UID    UID                   // 访问码 ID
+	Device [FingerprintSize]byte // 设备指纹
+	Eph    [32]byte              // 客户端临时 X25519 公钥
+	TS     uint64                // 发起时间（unix 秒）
+	MAC    [32]byte
 }
 
 // NewClientHello 生成客户端握手包，返回客户端临时私钥（用于派生会话密钥）。
-func NewClientHello(secret []byte, uid UID) (*ClientHello, *[32]byte, error) {
-	h := &ClientHello{UID: uid, TS: uint64(time.Now().Unix())}
+func NewClientHello(secret []byte, uid UID, device [FingerprintSize]byte) (*ClientHello, *[32]byte, error) {
+	h := &ClientHello{UID: uid, Device: device, TS: uint64(time.Now().Unix())}
 	pub, priv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -62,30 +70,31 @@ func NewClientHello(secret []byte, uid UID) (*ClientHello, *[32]byte, error) {
 
 func (h *ClientHello) mac(secret []byte) [32]byte {
 	return macPSK(secret, helloDomain,
-		[]byte{Version}, h.UID[:], h.Eph[:], u64be(h.TS))
+		[]byte{Version}, h.UID[:], h.Device[:], h.Eph[:], u64be(h.TS))
 }
 
-// Marshal 序列化为 UDP 载荷：[0x01]ver||uid||eph||ts||mac。
+// Marshal 序列化为 UDP 载荷：[0x01]ver||uid||device||eph||ts||mac。
 func (h *ClientHello) Marshal() []byte {
 	out := make([]byte, 0, helloLen)
 	out = append(out, TypeHello, Version)
 	out = append(out, h.UID[:]...)
+	out = append(out, h.Device[:]...)
 	out = append(out, h.Eph[:]...)
 	out = append(out, u64be(h.TS)...)
 	out = append(out, h.MAC[:]...)
 	return out
 }
 
-// PeekHello 只做长度与版本检查并取出声称的用户 ID，不做任何认证。
-// 服务端用它决定去查哪个用户的密钥，随后必须调用 ParseClientHello 验证。
+// PeekHello 只做长度与版本检查并取出声称的访问码 ID，不做任何认证。
+// 服务端用它决定去查哪个访问码的密钥，随后必须调用 ParseClientHello 验证。
 func PeekHello(b []byte) (UID, error) {
 	var uid UID
 	if len(b) < 1 || b[0] != TypeHello {
 		return uid, ErrBadPacket
 	}
-	// 长度先行：v1 Hello 的第 2 字节是临时公钥的一部分（随机值），
+	// 长度先行：旧版 Hello 的版本字节位置落在临时公钥（v1）或长度不足（v2），
 	// 直接读版本字节会把旧包误判成任意版本。
-	if len(b) == helloLenV1 {
+	if len(b) == helloLenV1 || len(b) == helloLenV2 {
 		return uid, ErrOldVersion
 	}
 	if len(b) < helloLen {
@@ -106,6 +115,8 @@ func ParseClientHello(secret, b []byte) (*ClientHello, error) {
 	}
 	h := &ClientHello{UID: uid}
 	off := 2 + UIDSize
+	copy(h.Device[:], b[off:off+FingerprintSize])
+	off += FingerprintSize
 	copy(h.Eph[:], b[off:off+32])
 	off += 32
 	h.TS = binary.BigEndian.Uint64(b[off : off+8])
@@ -123,9 +134,9 @@ func ParseClientHello(secret, b []byte) (*ClientHello, error) {
 	return h, nil
 }
 
-// ServerAccept 服务端握手应答（明文传输，per-user secret HMAC 认证）。
+// ServerAccept 服务端握手应答（明文传输，per-code secret HMAC 认证）。
 //
-// TunIP/Prefix/Gateway 是服务端为该用户分配的隧道内地址，全部纳入 MAC——
+// TunIP/Prefix/Gateway 是服务端为该访问码分配的隧道内地址，全部纳入 MAC——
 // 否则中间人可以把客户端的隧道地址改成别人的，绕过服务端的隔离检查。
 type ServerAccept struct {
 	Eph     [32]byte // 服务端临时 X25519 公钥
@@ -213,6 +224,60 @@ func ParseServerAccept(secret, b []byte, clientEph [32]byte) (*ServerAccept, err
 		return nil, ErrBadPacket
 	}
 	return a, nil
+}
+
+// ServerReject 是服务端明确拒绝握手的应答。
+//
+// 为什么需要它：在此之前服务端拒绝握手一律静默丢包，客户端只能报「服务端
+// 无应答」。设备绑定上线后最常见的失败（换了台电脑）会显示成一个指向错误
+// 方向的提示，用户会去查防火墙和端口。
+//
+// 安全约束：**只在 MAC 校验通过之后才发送**。这样它只会发给确实持有密钥的
+// 对端，不构成反射放大源（35 字节应答 < 122 字节请求）。访问码查不到时仍然
+// 静默——那种情况下没有密钥可用来签名，能签的只有攻击者想让我们签的东西。
+type ServerReject struct {
+	Reason RejectReason
+	MAC    [32]byte
+}
+
+// NewServerReject 生成拒绝应答。
+func NewServerReject(secret []byte, clientEph [32]byte, reason RejectReason) *ServerReject {
+	r := &ServerReject{Reason: reason}
+	r.MAC = r.mac(secret, clientEph)
+	return r
+}
+
+func (r *ServerReject) mac(secret []byte, clientEph [32]byte) [32]byte {
+	return macPSK(secret, rejectDomain,
+		[]byte{Version}, []byte{byte(r.Reason)}, clientEph[:])
+}
+
+// Marshal 序列化为 UDP 载荷：[0x07]ver||reason||mac。
+func (r *ServerReject) Marshal() []byte {
+	out := make([]byte, 0, rejectLen)
+	out = append(out, TypeReject, Version, byte(r.Reason))
+	out = append(out, r.MAC[:]...)
+	return out
+}
+
+// ParseServerReject 解析并校验拒绝应答。
+//
+// 必须验 MAC：不验的话任何人都能伪造一个 Reject 让客户端停止重连——那是一个
+// 单包就能生效的拒绝服务。
+func ParseServerReject(secret, b []byte, clientEph [32]byte) (*ServerReject, error) {
+	if len(b) < rejectLen || b[0] != TypeReject {
+		return nil, ErrBadPacket
+	}
+	if b[1] != Version {
+		return nil, ErrOldVersion
+	}
+	r := &ServerReject{Reason: RejectReason(b[2])}
+	copy(r.MAC[:], b[3:3+32])
+	want := r.mac(secret, clientEph)
+	if !hmac.Equal(want[:], r.MAC[:]) {
+		return nil, ErrAuth
+	}
+	return r, nil
 }
 
 func u64be(v uint64) []byte {

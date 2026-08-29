@@ -4,7 +4,7 @@ package main
 
 // 客户端本地配置。
 //
-// 原先 pf-client.conf 就是一行裸地址。多用户之后客户端必须携带身份（用户 ID
+// 原先 pf-client.conf 就是一行裸地址。多用户之后客户端必须携带身份（访问码 ID
 // 与隧道密钥），一行文本装不下，改成 YAML。
 //
 // 迁移：旧格式那一行地址本身是合法的 YAML 标量，所以解析成 mapping 失败并不
@@ -26,20 +26,29 @@ import (
 // clientConfig 是落盘的客户端配置。
 type clientConfig struct {
 	Addr   string `yaml:"addr"`    // 中转机地址（host 或 host:port）
-	UserID string `yaml:"user_id"` // 隧道用户 ID
+	CodeID string `yaml:"code_id"` // 访问码 ID
 	Secret string `yaml:"secret"`  // 隧道密钥（base64）
+
+	// LegacyUserID 读取上一版写下的 user_id 字段。服务端迁移时访问码 ID 沿用了
+	// 原用户 ID，所以旧值直接可用——不兼容这一步会让升级后的用户被迫重新粘贴
+	// 接入码。
+	LegacyUserID string `yaml:"user_id,omitempty"`
 }
 
 // complete 报告凭据是否齐备（可以发起握手）。
 func (c clientConfig) complete() bool {
-	return c.Addr != "" && c.UserID != "" && c.Secret != ""
+	return c.Addr != "" && c.CodeID != "" && c.Secret != ""
 }
 
-// normalized 返回补全默认端口后的副本。
+// normalized 返回补全默认端口、并把旧字段收敛到新字段后的副本。
 func (c clientConfig) normalized() clientConfig {
 	c.Addr = withDefaultPort(strings.TrimSpace(c.Addr))
-	c.UserID = strings.TrimSpace(c.UserID)
+	c.CodeID = strings.TrimSpace(c.CodeID)
 	c.Secret = strings.TrimSpace(c.Secret)
+	if c.CodeID == "" {
+		c.CodeID = strings.TrimSpace(c.LegacyUserID)
+	}
+	c.LegacyUserID = ""
 	return c
 }
 
@@ -83,10 +92,10 @@ func parseConfigBytes(raw []byte) clientConfig {
 
 	var cfg clientConfig
 	if err := yaml.Unmarshal(raw, &cfg); err == nil &&
-		(cfg.Addr != "" || cfg.UserID != "" || cfg.Secret != "") {
+		(cfg.Addr != "" || cfg.CodeID != "" || cfg.Secret != "" || cfg.LegacyUserID != "") {
 		return cfg.normalized()
 	}
-	// 旧版格式：整个文件就是一行中转机地址。它本身是合法的 YAML 标量，
+	// 更旧的格式：整个文件就是一行中转机地址。它本身是合法的 YAML 标量，
 	// 所以"解析成 mapping 失败"不代表文件损坏——不兼容这一步会让升级后
 	// 用户保存的地址凭空消失。
 	if !strings.ContainsAny(text, "\r\n") {
@@ -115,16 +124,16 @@ func saveConfig(cfg clientConfig) {
 
 // parseConnectInput 把用户在界面里输入的内容解析成配置。
 //
-// 接受两种形态：完整接入码（一次粘贴含地址、用户 ID、密钥），或手工分别填写
+// 接受两种形态：完整接入码（一次粘贴含地址、访问码 ID、密钥），或手工分别填写
 // 三个字段。接入码优先——那是正常路径，手工填写是接入码丢了之后的兜底。
-func parseConnectInput(code, addr, userID, secret string) (clientConfig, error) {
+func parseConnectInput(code, addr, codeID, secret string) (clientConfig, error) {
 	code = strings.TrimSpace(code)
 	if code != "" {
 		c, err := accesscode.Decode(code)
 		if err != nil {
 			return clientConfig{}, err
 		}
-		out := clientConfig{Addr: c.Addr, UserID: c.UserID, Secret: c.Secret}
+		out := clientConfig{Addr: c.Addr, CodeID: c.CodeID, Secret: c.Secret}
 		// 手工填的地址可以覆盖接入码里的：接入码由服务端生成，若管理员没配
 		// tunnel.public_addr，里面的地址可能是内网的或不可达的。
 		if a := strings.TrimSpace(addr); a != "" {
@@ -135,14 +144,14 @@ func parseConnectInput(code, addr, userID, secret string) (clientConfig, error) 
 
 	out := clientConfig{
 		Addr:   strings.TrimSpace(addr),
-		UserID: strings.TrimSpace(userID),
+		CodeID: strings.TrimSpace(codeID),
 		Secret: strings.TrimSpace(secret),
 	}
 	if out.Addr == "" {
 		return clientConfig{}, fmt.Errorf("请填写中转机地址")
 	}
-	if out.UserID == "" || out.Secret == "" {
-		return clientConfig{}, fmt.Errorf("请粘贴接入码，或同时填写用户 ID 与隧道密钥（可在面板的用户管理中获取）")
+	if out.CodeID == "" || out.Secret == "" {
+		return clientConfig{}, fmt.Errorf("请粘贴接入码，或同时填写访问码 ID 与隧道密钥（可在面板的「我的访问码」中获取）")
 	}
 	return out.normalized(), nil
 }

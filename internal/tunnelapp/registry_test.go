@@ -23,21 +23,33 @@ func udpAddr(t *testing.T, s string) *net.UDPAddr {
 	return a
 }
 
-// 多用户的核心保证：用户 A 握手不得影响用户 B 的会话。
-// 单会话时代 A 接入就会覆盖唯一槽位，B 的密钥立即失效且它自己不知道。
-func TestRegistryIsolatesUsers(t *testing.T) {
+// mkPS 造一个测试会话：codeID 决定槽位，userID 决定并发隧道计数的归属。
+func mkPS(t *testing.T, codeID, codeName, userID, userName string, tunIP netip.Addr, addr string) *peerSession {
+	t.Helper()
+	ident := Identity{
+		CodeID: codeID, CodeName: codeName,
+		UserID: userID, UserName: userName,
+		TunIP: tunIP,
+	}
+	return newPeerSession(ident, testSession(), udpAddr(t, addr))
+}
+
+// 多访问码的核心保证：一个访问码握手不得影响另一个访问码的会话——即使它们
+// 属于同一个用户。单会话时代 A 接入就会覆盖唯一槽位，B 的密钥立即失效且它
+// 自己不知道。
+func TestRegistryIsolatesCodes(t *testing.T) {
 	r := newRegistry()
-	a := newPeerSession("uid-a", "alice", netip.MustParseAddr("10.66.0.2"), testSession(), udpAddr(t, "203.0.113.5:1000"))
-	b := newPeerSession("uid-b", "bob", netip.MustParseAddr("10.66.0.3"), testSession(), udpAddr(t, "203.0.113.6:1001"))
+	a := mkPS(t, "code-a", "a", "u-alice", "alice", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
+	b := mkPS(t, "code-b", "b", "u-alice", "alice", netip.MustParseAddr("10.66.0.3"), "203.0.113.6:1001")
 
 	if prev := r.upsert(a); prev != nil {
 		t.Fatal("首次 upsert 不应返回旧会话")
 	}
 	if prev := r.upsert(b); prev != nil {
-		t.Fatal("另一个用户的 upsert 不应返回旧会话")
+		t.Fatal("同一用户另一个访问码的 upsert 不应返回旧会话")
 	}
 	if r.count() != 2 {
-		t.Fatalf("count = %d, want 2", r.count())
+		t.Fatalf("count = %d, want 2（同一用户的两个访问码必须并存）", r.count())
 	}
 	if got := r.byAddress(udpAddr(t, "203.0.113.5:1000")); got != a {
 		t.Fatal("A 的地址索引被破坏")
@@ -50,15 +62,44 @@ func TestRegistryIsolatesUsers(t *testing.T) {
 	}
 }
 
-// 同一用户重握手（常见于 NAT 端口漂移）必须替换自己的槽位，并且不留下
+// 并发隧道上限的数据源：按用户统计在线数。同一用户的多个访问码各计一个。
+func TestCountByUser(t *testing.T) {
+	r := newRegistry()
+	r.upsert(mkPS(t, "code-a", "a", "u-alice", "alice", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000"))
+	r.upsert(mkPS(t, "code-b", "b", "u-alice", "alice", netip.MustParseAddr("10.66.0.3"), "203.0.113.6:1001"))
+	r.upsert(mkPS(t, "code-c", "c", "u-bob", "bob", netip.MustParseAddr("10.66.0.4"), "203.0.113.7:1002"))
+
+	if got := r.countByUser("u-alice"); got != 2 {
+		t.Fatalf("alice 在线数 = %d, want 2", got)
+	}
+	if got := r.countByUser("u-bob"); got != 1 {
+		t.Fatalf("bob 在线数 = %d, want 1", got)
+	}
+	if got := r.countByUser("nobody"); got != 0 {
+		t.Fatalf("未知用户在线数 = %d, want 0", got)
+	}
+}
+
+func TestRegistryOnline(t *testing.T) {
+	r := newRegistry()
+	r.upsert(mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000"))
+	if !r.online("code-a") {
+		t.Fatal("code-a 应显示在线")
+	}
+	if r.online("code-z") {
+		t.Fatal("未知访问码不应显示在线")
+	}
+}
+
+// 同一访问码重握手（常见于 NAT 端口漂移）必须替换自己的槽位，并且不留下
 // 指向旧密钥的僵尸地址索引——旧索引会让服务端拿废弃会话去解密新包。
-func TestRegistryReplacesSameUserAndDropsStaleAddr(t *testing.T) {
+func TestRegistryReplacesSameCodeAndDropsStaleAddr(t *testing.T) {
 	r := newRegistry()
 	tunIP := netip.MustParseAddr("10.66.0.2")
-	old := newPeerSession("uid-a", "alice", tunIP, testSession(), udpAddr(t, "203.0.113.5:1000"))
+	old := mkPS(t, "code-a", "a", "u1", "u", tunIP, "203.0.113.5:1000")
 	r.upsert(old)
 
-	fresh := newPeerSession("uid-a", "alice", tunIP, testSession(), udpAddr(t, "203.0.113.5:2000"))
+	fresh := mkPS(t, "code-a", "a", "u1", "u", tunIP, "203.0.113.5:2000")
 	prev := r.upsert(fresh)
 	if prev != old {
 		t.Fatal("重握手应返回被取代的旧会话")
@@ -77,15 +118,15 @@ func TestRegistryReplacesSameUserAndDropsStaleAddr(t *testing.T) {
 	}
 }
 
-// 一个用户重握手时另一个用户必须毫发无损。
+// 一个访问码重握手时另一个访问码必须毫发无损。
 func TestRegistryRehandshakeDoesNotEvictOthers(t *testing.T) {
 	r := newRegistry()
-	a := newPeerSession("uid-a", "alice", netip.MustParseAddr("10.66.0.2"), testSession(), udpAddr(t, "203.0.113.5:1000"))
-	b := newPeerSession("uid-b", "bob", netip.MustParseAddr("10.66.0.3"), testSession(), udpAddr(t, "203.0.113.6:1001"))
+	a := mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
+	b := mkPS(t, "code-b", "b", "u2", "v", netip.MustParseAddr("10.66.0.3"), "203.0.113.6:1001")
 	r.upsert(a)
 	r.upsert(b)
 
-	r.upsert(newPeerSession("uid-a", "alice", netip.MustParseAddr("10.66.0.2"), testSession(), udpAddr(t, "203.0.113.5:3000")))
+	r.upsert(mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:3000"))
 
 	if got := r.byAddress(udpAddr(t, "203.0.113.6:1001")); got != b {
 		t.Fatal("B 的会话被 A 的重握手挤掉了")
@@ -95,11 +136,34 @@ func TestRegistryRehandshakeDoesNotEvictOthers(t *testing.T) {
 	}
 }
 
+// 解绑设备时要能精确踢掉那个访问码的会话，且不影响其它会话。
+func TestRegistryEvictCode(t *testing.T) {
+	r := newRegistry()
+	a := mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
+	b := mkPS(t, "code-b", "b", "u1", "u", netip.MustParseAddr("10.66.0.3"), "203.0.113.6:1001")
+	r.upsert(a)
+	r.upsert(b)
+
+	if r.evict("code-nothing") != nil {
+		t.Fatal("踢不存在的会话应返回 nil")
+	}
+	if got := r.evict("code-a"); got != a {
+		t.Fatal("应返回被踢掉的会话")
+	}
+	if r.count() != 1 || r.byTunnelIP(netip.MustParseAddr("10.66.0.3")) != b {
+		t.Fatal("踢掉 code-a 影响了 code-b")
+	}
+	// 再踢一次是空操作（幂等）。
+	if r.evict("code-a") != nil {
+		t.Fatal("重复踢应是空操作")
+	}
+}
+
 // 空闲回收：只有时间能删除会话，且必须同时清掉三个索引。
 func TestRegistryReapIdle(t *testing.T) {
 	r := newRegistry()
 	tunIP := netip.MustParseAddr("10.66.0.2")
-	ps := newPeerSession("uid-a", "alice", tunIP, testSession(), udpAddr(t, "203.0.113.5:1000"))
+	ps := mkPS(t, "code-a", "a", "u1", "u", tunIP, "203.0.113.5:1000")
 	r.upsert(ps)
 
 	now := time.Now()
@@ -120,7 +184,7 @@ func TestRegistryReapIdle(t *testing.T) {
 // touch 之后不应再被回收（收到任何有效包即视为活跃）。
 func TestRegistryTouchKeepsAlive(t *testing.T) {
 	r := newRegistry()
-	ps := newPeerSession("uid-a", "alice", netip.MustParseAddr("10.66.0.2"), testSession(), udpAddr(t, "203.0.113.5:1000"))
+	ps := mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
 	r.upsert(ps)
 	ps.lastSeen.Store(time.Now().Add(-10 * time.Minute).Unix())
 	ps.touch()
@@ -134,9 +198,9 @@ func TestRegistryTouchKeepsAlive(t *testing.T) {
 func TestReapIgnoresReplacedSession(t *testing.T) {
 	r := newRegistry()
 	tunIP := netip.MustParseAddr("10.66.0.2")
-	old := newPeerSession("uid-a", "alice", tunIP, testSession(), udpAddr(t, "203.0.113.5:1000"))
+	old := mkPS(t, "code-a", "a", "u1", "u", tunIP, "203.0.113.5:1000")
 	r.upsert(old)
-	fresh := newPeerSession("uid-a", "alice", tunIP, testSession(), udpAddr(t, "203.0.113.5:2000"))
+	fresh := mkPS(t, "code-a", "a", "u1", "u", tunIP, "203.0.113.5:2000")
 	r.upsert(fresh)
 
 	// 旧对象空闲很久，但它已被替换、不在表里。
@@ -153,11 +217,22 @@ func TestReapIgnoresReplacedSession(t *testing.T) {
 // 直接存进会话表会让已保存的 peer 地址被下一个包篡改。
 func TestPeerSessionClonesAddr(t *testing.T) {
 	shared := udpAddr(t, "203.0.113.5:1000")
-	ps := newPeerSession("uid-a", "alice", netip.MustParseAddr("10.66.0.2"), testSession(), shared)
+	ps := mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
 	shared.IP = net.ParseIP("198.51.100.9")
 	shared.Port = 65000
 	if ps.addr.String() != "203.0.113.5:1000" {
 		t.Fatalf("会话地址被外部修改污染：%v", ps.addr)
+	}
+}
+
+// 落盘活跃时间的限频：60 秒内只放行一次，否则每个包都会触发一次 bbolt 写。
+func TestPeerSessionPersistTouchThrottle(t *testing.T) {
+	ps := mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:1000")
+	if !ps.shouldPersistTouch(60) {
+		t.Fatal("首次应放行")
+	}
+	if ps.shouldPersistTouch(60) {
+		t.Fatal("60 秒内第二次应被限频")
 	}
 }
 
@@ -182,34 +257,34 @@ func TestIPHeaderHelpers(t *testing.T) {
 	}
 }
 
-// 推送指纹按用户各记一份：A 的 IP 集合变化不应让 B 被误判为「已变更」。
-func TestPushSigPerUser(t *testing.T) {
+// 推送指纹按访问码各记一份：A 的 IP 集合变化不应让 B 被误判为「已变更」。
+func TestPushSigPerCode(t *testing.T) {
 	s := &Server{pushSigs: make(map[string]string)}
-	if !s.recordPushSig("uid-a", "1.1.1.1") {
+	if !s.recordPushSig("code-a", "1.1.1.1") {
 		t.Fatal("首次记录应判为变化")
 	}
-	if s.recordPushSig("uid-a", "1.1.1.1") {
+	if s.recordPushSig("code-a", "1.1.1.1") {
 		t.Fatal("相同指纹应判为未变化")
 	}
-	if !s.recordPushSig("uid-b", "1.1.1.1") {
-		t.Fatal("另一个用户的首次记录应判为变化")
+	if !s.recordPushSig("code-b", "1.1.1.1") {
+		t.Fatal("另一个访问码的首次记录应判为变化")
 	}
-	if s.recordPushSig("uid-a", "1.1.1.1") {
+	if s.recordPushSig("code-a", "1.1.1.1") {
 		t.Fatal("B 的记录不应影响 A 的判定")
 	}
 	// 重握手后必须重推：新会话对端的路由表是空的。
-	s.forgetPushSig("uid-a")
-	if !s.recordPushSig("uid-a", "1.1.1.1") {
+	s.forgetPushSig("code-a")
+	if !s.recordPushSig("code-a", "1.1.1.1") {
 		t.Fatal("重握手后应重新判为变化")
 	}
 }
 
 func TestParseTunAddr(t *testing.T) {
-	pool, gw, err := parseTunAddr("10.66.0.1/24")
+	pool, gw, err := parseTunAddr("10.66.0.1/16")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pool.String() != "10.66.0.0/24" || gw != netip.MustParseAddr("10.66.0.1") {
+	if pool.String() != "10.66.0.0/16" || gw != netip.MustParseAddr("10.66.0.1") {
 		t.Fatalf("pool=%v gw=%v", pool, gw)
 	}
 	if !pool.Contains(netip.MustParseAddr("10.66.0.200")) {

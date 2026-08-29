@@ -50,9 +50,13 @@ type Engine struct {
 	state   State
 	conf    clientConfig // 当前/上次使用的连接凭据
 	lastErr string
-	since   time.Time // 进入 connected 的时刻
-	cancel  context.CancelFunc
-	done    chan struct{} // 上一次 run 完全退出的信号
+	// terminal 标记「上一次失败需要人工介入」（设备不匹配、访问码停用等）。
+	// 置位后不再自动重连——继续重试只会刷日志，并把真正的原因埋在一堆
+	// 「握手失败」里。
+	terminal bool
+	since    time.Time // 进入 connected 的时刻
+	cancel   context.CancelFunc
+	done     chan struct{} // 上一次 run 完全退出的信号
 
 	logs   *logRing
 	routes atomic.Pointer[routeManager]
@@ -88,9 +92,11 @@ func NewEngine() *Engine {
 type Snapshot struct {
 	State     State        `json:"state"`
 	Addr      string       `json:"addr"`
-	UserID    string       `json:"user_id"`
+	CodeID    string       `json:"code_id"`
 	HasCred   bool         `json:"has_cred"`
 	LastError string       `json:"last_error"`
+	Terminal  bool         `json:"terminal"`
+	Device    string       `json:"device"`
 	Elevated  bool         `json:"elevated"`
 	TunIP     string       `json:"tun_ip"`
 	Gateway   string       `json:"gateway"`
@@ -109,9 +115,11 @@ func (e *Engine) Snapshot() Snapshot {
 	s := Snapshot{
 		State:     e.state,
 		Addr:      conf.Addr,
-		UserID:    conf.UserID,
+		CodeID:    conf.CodeID,
 		HasCred:   conf.complete(),
 		LastError: e.lastErr,
+		Terminal:  e.terminal,
+		Device:    deviceLabel(),
 		Elevated:  syssetup.IsElevated(),
 		PktUp:     e.statTunToTunnel.Load(),
 		PktDown:   e.statTunnelToTun.Load(),
@@ -150,6 +158,19 @@ func (e *Engine) setState(st State, errMsg string) {
 	} else {
 		e.since = time.Time{}
 	}
+	if st != StateError {
+		e.terminal = false
+	}
+	e.mu.Unlock()
+}
+
+// setTerminal 置为「需要人工介入」的错误态：不再自动重连。
+func (e *Engine) setTerminal(errMsg string) {
+	e.mu.Lock()
+	e.state = StateError
+	e.lastErr = errMsg
+	e.terminal = true
+	e.since = time.Time{}
 	e.mu.Unlock()
 }
 
@@ -158,6 +179,12 @@ func (e *Engine) Start(conf clientConfig) error {
 	if !syssetup.IsElevated() {
 		return fmt.Errorf("需要管理员权限：虚拟网卡与路由无法配置")
 	}
+	if _, err := deviceFingerprint(); err != nil {
+		// 设备指纹是握手的必要输入（服务端要靠它绑定客户端）。取不到就直接
+		// 报错，而不是带一个零值指纹去握手——那会绑定出一个所有机器都相同的
+		// "空指纹"，把设备绑定变成一个假功能。
+		return err
+	}
 	conf = conf.normalized()
 	if !conf.complete() {
 		return fmt.Errorf("缺少接入凭据，请粘贴接入码")
@@ -165,8 +192,8 @@ func (e *Engine) Start(conf clientConfig) error {
 	if _, _, err := net.SplitHostPort(conf.Addr); err != nil {
 		return fmt.Errorf("地址格式应为 IP:端口")
 	}
-	if _, err := tunnel.ParseUID(conf.UserID); err != nil {
-		return fmt.Errorf("接入码中的用户 ID 无效")
+	if _, err := tunnel.ParseUID(conf.CodeID); err != nil {
+		return fmt.Errorf("接入码中的访问码 ID 无效")
 	}
 
 	e.mu.Lock()

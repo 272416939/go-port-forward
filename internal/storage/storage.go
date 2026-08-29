@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
 	"go-port-forward/pkg/serializer/json"
 	"net/netip"
@@ -33,15 +34,40 @@ type Store interface {
 	ListConnLogs(limit int) ([]*models.ConnLogEntry, error)
 	TrimConnLogs(maxEntries int) (int, error)
 
-	// Users (web accounts + tunnel identities)
+	// Users (web accounts)
 	ListUsers() ([]*models.User, error)
 	GetUser(id string) (*models.User, error)
 	GetUserByName(name string) (*models.User, error)
-	// CreateUser 在同一写事务内查重并分配隧道地址（见 user.go 的说明）。
-	CreateUser(u *models.User, pool netip.Prefix, gateway netip.Addr) error
+	CreateUser(u *models.User) error
 	SaveUser(u *models.User) error
 	DeleteUser(id string) error
 	CountUsers() (int, error)
+
+	// Global settings (singleton)
+	Settings() (models.Settings, error)
+	SaveSettings(cfg models.Settings) error
+
+	// User groups (quota carriers)
+	ListGroups() ([]*models.UserGroup, error)
+	GetGroup(id string) (*models.UserGroup, error)
+	SaveGroup(g *models.UserGroup) error
+	DeleteGroup(id string) error
+	CountGroupMembers() (map[string]int, error)
+
+	// Access codes (tunnel identities)
+	ListAccessCodes() ([]*models.AccessCode, error)
+	ListAccessCodesByUser(userID string) ([]*models.AccessCode, error)
+	GetAccessCode(id string) (*models.AccessCode, error)
+	// CreateAccessCode 在同一写事务内检查配额并分配隧道地址（见 accesscode.go）。
+	CreateAccessCode(c *models.AccessCode, pool netip.Prefix, gateway netip.Addr, maxCodes int) error
+	SaveAccessCode(c *models.AccessCode) error
+	DeleteAccessCode(id string) error
+	DeleteAccessCodesByUser(userID string) (int, error)
+	CountAccessCodesByUser(userID string) (int, error)
+	// BindAccessCodeDevice 登记设备指纹；已绑定到别的设备时返回 ErrDeviceMismatch。
+	BindAccessCodeDevice(id, fingerprint, label string, at time.Time, addr string) error
+	UnbindAccessCodeDevice(id string) (string, error)
+	TouchAccessCode(id string, at time.Time, addr string) error
 
 	Close() error
 }
@@ -58,7 +84,10 @@ func Open(path string) (Store, error) {
 	}
 	// Ensure buckets exist
 	if err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{rulesBucket, aclBucket, connLogsBucket, usersBucket} {
+		for _, b := range [][]byte{
+			rulesBucket, aclBucket, connLogsBucket, usersBucket,
+			settingsBucket, groupsBucket, codesBucket,
+		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -67,6 +96,20 @@ func Open(path string) (Store, error) {
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// 数据模型迁移：bucket 建好之后立刻跑，晚于此处的任何读取都可能看到
+	// 半新半旧的记录。
+	res, err := migrate(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: migrate: %w", err)
+	}
+	if res.changed() {
+		// logger 可能尚未初始化（测试里直接调 Open），迁移日志不该成为新故障点。
+		if logger.S != nil {
+			logger.S.Infow("数据模型已迁移 | data model migrated",
+				"from", res.From, "to", res.To, "groups", res.Groups, "access_codes", res.AccessCodes)
+		}
 	}
 	return &boltStore{db: db}, nil
 }

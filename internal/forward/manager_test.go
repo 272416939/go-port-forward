@@ -445,19 +445,51 @@ func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error         
 func (s *countingStore) ListConnLogs(limit int) ([]*models.ConnLogEntry, error) { return nil, nil }
 func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)               { return 0, nil }
 
-// --- User stubs required by the extended Store interface ---
+// --- User / group / access code stubs required by the extended Store interface ---
 
-func (s *countingStore) ListUsers() ([]*models.User, error)        { return nil, nil }
-func (s *countingStore) GetUser(id string) (*models.User, error)   { return nil, storage.ErrUserNotFound }
+func (s *countingStore) ListUsers() ([]*models.User, error)      { return nil, nil }
+func (s *countingStore) GetUser(id string) (*models.User, error) { return nil, storage.ErrUserNotFound }
 func (s *countingStore) GetUserByName(n string) (*models.User, error) {
 	return nil, storage.ErrUserNotFound
 }
-func (s *countingStore) CreateUser(u *models.User, pool netip.Prefix, gw netip.Addr) error {
+func (s *countingStore) CreateUser(u *models.User) error { return nil }
+func (s *countingStore) SaveUser(u *models.User) error   { return nil }
+func (s *countingStore) DeleteUser(id string) error      { return nil }
+func (s *countingStore) CountUsers() (int, error)        { return 0, nil }
+
+func (s *countingStore) Settings() (models.Settings, error)       { return models.DefaultSettings(), nil }
+func (s *countingStore) SaveSettings(cfg models.Settings) error   { return nil }
+func (s *countingStore) ListGroups() ([]*models.UserGroup, error) { return nil, nil }
+func (s *countingStore) GetGroup(id string) (*models.UserGroup, error) {
+	return nil, storage.ErrGroupNotFound
+}
+func (s *countingStore) SaveGroup(g *models.UserGroup) error        { return nil }
+func (s *countingStore) DeleteGroup(id string) error                { return nil }
+func (s *countingStore) CountGroupMembers() (map[string]int, error) { return nil, nil }
+
+func (s *countingStore) ListAccessCodes() ([]*models.AccessCode, error) { return nil, nil }
+func (s *countingStore) ListAccessCodesByUser(userID string) ([]*models.AccessCode, error) {
+	return nil, nil
+}
+func (s *countingStore) GetAccessCode(id string) (*models.AccessCode, error) {
+	return nil, storage.ErrCodeNotFound
+}
+func (s *countingStore) CreateAccessCode(c *models.AccessCode, pool netip.Prefix, gw netip.Addr, maxCodes int) error {
 	return nil
 }
-func (s *countingStore) SaveUser(u *models.User) error { return nil }
-func (s *countingStore) DeleteUser(id string) error    { return nil }
-func (s *countingStore) CountUsers() (int, error)      { return 0, nil }
+func (s *countingStore) SaveAccessCode(c *models.AccessCode) error { return nil }
+func (s *countingStore) DeleteAccessCode(id string) error          { return nil }
+func (s *countingStore) DeleteAccessCodesByUser(userID string) (int, error) {
+	return 0, nil
+}
+func (s *countingStore) CountAccessCodesByUser(userID string) (int, error) { return 0, nil }
+func (s *countingStore) BindAccessCodeDevice(id, fingerprint, label string, at time.Time, addr string) error {
+	return nil
+}
+func (s *countingStore) UnbindAccessCodeDevice(id string) (string, error) { return "", nil }
+func (s *countingStore) TouchAccessCode(id string, at time.Time, addr string) error {
+	return nil
+}
 
 func (s *countingStore) listCalls() int {
 	s.mu.Lock()

@@ -13,77 +13,57 @@ const (
 	RoleUser  = "user"
 )
 
-// User 同时是 Web 登录账号与隧道用户。
+// User 是 Web 登录账号。
 //
-// 两种身份合并成一个对象是刻意的：如果 Web 账号与隧道凭据各自一套模型，
-// 「谁的规则能指向谁的隧道」就会变成一个需要额外维护的关联表，而这正是
-// 隔离最容易出错的地方。
+// 隧道身份不在这里：一个用户可以有多个访问码（AccessCode），每个访问码才是
+// 一份独立的隧道凭据与地址。用户上只留「他是谁」与「他属于哪个组」，配额
+// 一律由组解析（见 ResolveQuota）——配额挂在用户上时，改套餐要逐个用户去改。
 //
-// PasswordHash 与 TunnelSecret 都带 json:"-"：本结构体既用于 bbolt 持久化
-// （pkg/serializer/json 会尊重 tag），也直接作为 API 响应体，标签一旦漏了
-// 密钥就会从 REST 接口泄漏出去。持久化改用 userRecord（见 storage/user.go）。
+// PasswordHash 带 json:"-"：本结构体既用于 bbolt 持久化（pkg/serializer/json
+// 会尊重 tag），也直接作为 API 响应体，标签一旦漏了密码哈希就会从 REST 接口
+// 泄漏出去。持久化改用 userRecord（见 storage/user.go）。
 type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	ID       string `json:"id"` // uuid，同时是隧道协议里的用户 ID
+	ID       string `json:"id"` // uuid
 	Username string `json:"username"`
-	Role     string `json:"role"`  // admin | user
-	TunIP    string `json:"tun_ip"` // 分配到的隧道内地址（规则的目标地址指向它）
+	Role     string `json:"role"`     // admin | user
+	GroupID  string `json:"group_id"` // 所属用户组；空值表示未分组（配额取全局默认）
 	Comment  string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"-"` // bcrypt
-	TunnelSecret string `json:"-"` // 32 字节随机的 base64；必须可逆存储（服务端要用它验 MAC 并派生会话密钥）
-
-	PortRangeStart int `json:"port_range_start"` // 该用户可用的监听端口区间（含）
-	PortRangeEnd   int `json:"port_range_end"`
-	MaxRules       int `json:"max_rules"` // 规则数上限；0 表示不限
 
 	Disabled           bool `json:"disabled"`
 	MustChangePassword bool `json:"must_change_password"`
+
+	// 运行时字段，不持久化
+	GroupName       string `json:"group_name,omitempty"`
+	AccessCodeCount int    `json:"access_code_count,omitempty"`
+	TunnelOnline    int    `json:"tunnel_online,omitempty"`
 }
 
 // IsAdmin 报告是否为管理员。
 func (u *User) IsAdmin() bool { return u != nil && u.Role == RoleAdmin }
 
-// PortAllowed 报告某监听端口是否在该用户的配额区间内。
-// 管理员不受区间限制；普通用户未配置区间等于没有可用端口（fail-closed）。
-func (u *User) PortAllowed(port int) bool {
-	if u == nil {
-		return false
-	}
-	if u.IsAdmin() {
-		return true
-	}
-	if u.PortRangeStart <= 0 || u.PortRangeEnd <= 0 {
-		return false
-	}
-	return port >= u.PortRangeStart && port <= u.PortRangeEnd
-}
-
 // CreateUserRequest 是创建用户的 API 请求。
 //
-// TunIP 不在请求里：隧道地址由服务端在存储事务内分配，让调用方指定会引入
-// 撞号与「指定了别人地址」两种问题。
+// 没有配额字段：配额由所属组决定。GroupID 留空时取全局设置里的默认组。
 type CreateUserRequest struct {
-	Username       string `json:"username"`
-	Password       string `json:"password"`
-	Role           string `json:"role"`
-	Comment        string `json:"comment"`
-	PortRangeStart int    `json:"port_range_start"`
-	PortRangeEnd   int    `json:"port_range_end"`
-	MaxRules       int    `json:"max_rules"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+	GroupID  string `json:"group_id"`
+	Comment  string `json:"comment"`
 }
 
 // UpdateUserRequest 是更新用户的 API 请求（指针字段表示"未提供即不改"）。
 type UpdateUserRequest struct {
-	Password       *string `json:"password"`
-	Role           *string `json:"role"`
-	Comment        *string `json:"comment"`
-	PortRangeStart *int    `json:"port_range_start"`
-	PortRangeEnd   *int    `json:"port_range_end"`
-	MaxRules       *int    `json:"max_rules"`
-	Disabled       *bool   `json:"disabled"`
+	Password *string `json:"password"`
+	Role     *string `json:"role"`
+	GroupID  *string `json:"group_id"`
+	Comment  *string `json:"comment"`
+	Disabled *bool   `json:"disabled"`
 }
 
 // LoginRequest 是登录请求。
@@ -98,20 +78,22 @@ type ChangePasswordRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
-// CurrentUser 是 /api/auth/me 的响应：当前身份与其边界。
+// CurrentUser 是 /api/auth/me 的响应：当前身份与其有效配额。
+//
+// 配额连来源一起返回：用户看到「上限 3」时要能知道这是组给的还是全局默认，
+// 否则只能来问管理员。
 type CurrentUser struct {
 	ID                 string `json:"id"`
 	Username           string `json:"username"`
 	Role               string `json:"role"`
-	TunIP              string `json:"tun_ip"`
-	PortRangeStart     int    `json:"port_range_start"`
-	PortRangeEnd       int    `json:"port_range_end"`
-	MaxRules           int    `json:"max_rules"`
+	GroupID            string `json:"group_id,omitempty"`
+	GroupName          string `json:"group_name,omitempty"`
+	Quota              Quota  `json:"quota"`
 	MustChangePassword bool   `json:"must_change_password"`
 }
 
-// View 生成当前身份视图。
-func (u *User) View() CurrentUser {
+// View 生成当前身份视图。quota 由调用方解析后传入（models 层不访问存储）。
+func (u *User) View(quota Quota) CurrentUser {
 	if u == nil {
 		return CurrentUser{}
 	}
@@ -119,21 +101,11 @@ func (u *User) View() CurrentUser {
 		ID:                 u.ID,
 		Username:           u.Username,
 		Role:               u.Role,
-		TunIP:              u.TunIP,
-		PortRangeStart:     u.PortRangeStart,
-		PortRangeEnd:       u.PortRangeEnd,
-		MaxRules:           u.MaxRules,
+		GroupID:            u.GroupID,
+		GroupName:          quota.GroupName,
+		Quota:              quota,
 		MustChangePassword: u.MustChangePassword,
 	}
-}
-
-// UserAccessCode 是「取接入码」接口的响应。
-type UserAccessCode struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	Addr     string `json:"addr"`
-	Secret   string `json:"secret"`
-	Code     string `json:"code"`
 }
 
 // MinPasswordLength 是密码最小长度。
@@ -188,6 +160,7 @@ func ValidateCreateUserRequest(req *CreateUserRequest) error {
 	}
 	req.Username = NormalizeUsername(req.Username)
 	req.Comment = strings.TrimSpace(req.Comment)
+	req.GroupID = strings.TrimSpace(req.GroupID)
 	if err := ValidateUsername(req.Username); err != nil {
 		return err
 	}
@@ -199,12 +172,6 @@ func ValidateCreateUserRequest(req *CreateUserRequest) error {
 		return err
 	}
 	req.Role = role
-	if err := ValidatePortRange(req.PortRangeStart, req.PortRangeEnd); err != nil {
-		return err
-	}
-	if req.MaxRules < 0 {
-		return fmt.Errorf("规则数上限不能为负 | max_rules must not be negative")
-	}
 	return nil
 }
 

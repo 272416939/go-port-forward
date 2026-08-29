@@ -21,19 +21,22 @@ import (
 const Prefix = "pf1."
 
 // Code 是接入码承载的内容。
+// CodeID 的 json 键沿用 "u"：格式没变（仍是三个字段），语义从「用户 ID」变成
+// 「访问码 ID」。迁移时访问码 ID 沿用了原用户 ID，所以已经发出去的接入码在
+// 升级后依然指向同一条隧道，用户不必重新配置客户端。
 type Code struct {
 	Addr   string `json:"h"` // 中转机地址（host 或 host:port）
-	UserID string `json:"u"` // 隧道用户 ID（uuid 文本）
+	CodeID string `json:"u"` // 访问码 ID（uuid 文本）
 	Secret string `json:"k"` // 隧道密钥（标准 base64）
 }
 
 // Encode 生成接入码文本。
 func Encode(c Code) (string, error) {
 	c.Addr = strings.TrimSpace(c.Addr)
-	c.UserID = strings.TrimSpace(c.UserID)
+	c.CodeID = strings.TrimSpace(c.CodeID)
 	c.Secret = strings.TrimSpace(c.Secret)
-	if c.Addr == "" || c.UserID == "" || c.Secret == "" {
-		return "", fmt.Errorf("accesscode: 地址、用户 ID 与密钥都不能为空 | addr, user id and secret are all required")
+	if c.Addr == "" || c.CodeID == "" || c.Secret == "" {
+		return "", fmt.Errorf("accesscode: 地址、访问码 ID 与密钥都不能为空 | addr, code id and secret are all required")
 	}
 	raw, err := json.Marshal(c)
 	if err != nil {
@@ -72,9 +75,9 @@ func Decode(s string) (Code, error) {
 		return c, fmt.Errorf("accesscode: 接入码已损坏 | access code is corrupted")
 	}
 	c.Addr = strings.TrimSpace(c.Addr)
-	c.UserID = strings.TrimSpace(c.UserID)
+	c.CodeID = strings.TrimSpace(c.CodeID)
 	c.Secret = strings.TrimSpace(c.Secret)
-	if c.Addr == "" || c.UserID == "" || c.Secret == "" {
+	if c.Addr == "" || c.CodeID == "" || c.Secret == "" {
 		return c, fmt.Errorf("accesscode: 接入码内容不完整 | access code is incomplete")
 	}
 	return c, nil

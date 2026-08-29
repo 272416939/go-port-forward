@@ -6,7 +6,7 @@ import (
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
-	in := Code{Addr: "124.221.181.159:7947", UserID: "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9", Secret: "c2VjcmV0LWtleS1iYXNlNjQ="}
+	in := Code{Addr: "124.221.181.159:7947", CodeID: "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9", Secret: "c2VjcmV0LWtleS1iYXNlNjQ="}
 	s, err := Encode(in)
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 // 用户从网页复制接入码时经常带上换行或首尾空格，拒绝它们只会制造无谓的支持工单。
 func TestDecodeToleratesWhitespace(t *testing.T) {
-	s, err := Encode(Code{Addr: "1.2.3.4", UserID: "u", Secret: "k"})
+	s, err := Encode(Code{Addr: "1.2.3.4", CodeID: "u", Secret: "k"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestDecodeRejectsBadInput(t *testing.T) {
 
 func TestDecodeRejectsIncompletePayload(t *testing.T) {
 	// 手工构造缺少密钥的载荷。
-	s, err := Encode(Code{Addr: "1.2.3.4", UserID: "u", Secret: "k"})
+	s, err := Encode(Code{Addr: "1.2.3.4", CodeID: "u", Secret: "k"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestDecodeRejectsIncompletePayload(t *testing.T) {
 }
 
 func TestEncodeRejectsEmptyFields(t *testing.T) {
-	if _, err := Encode(Code{Addr: "1.2.3.4", UserID: "u"}); err == nil {
+	if _, err := Encode(Code{Addr: "1.2.3.4", CodeID: "u"}); err == nil {
 		t.Fatal("缺密钥必须报错")
 	}
 }

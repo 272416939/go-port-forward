@@ -36,7 +36,7 @@ func loadFrom(t *testing.T, path string) clientConfig {
 func TestParseConfigYAML(t *testing.T) {
 	p := writeConf(t, "addr: 1.2.3.4:7947\nuser_id: 3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9\nsecret: c2VjcmV0\n")
 	got := loadFrom(t, p)
-	if got.Addr != "1.2.3.4:7947" || got.UserID != "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9" || got.Secret != "c2VjcmV0" {
+	if got.Addr != "1.2.3.4:7947" || got.CodeID != "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9" || got.Secret != "c2VjcmV0" {
 		t.Fatalf("解析结果 = %+v", got)
 	}
 	if !got.complete() {
@@ -80,7 +80,7 @@ func TestParseConfigEmptyAndGarbage(t *testing.T) {
 
 func TestParseConnectInputFromAccessCode(t *testing.T) {
 	code, err := accesscode.Encode(accesscode.Code{
-		Addr: "203.0.113.9:7947", UserID: "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9", Secret: "c2VjcmV0",
+		Addr: "203.0.113.9:7947", CodeID: "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9", Secret: "c2VjcmV0",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestParseConnectInputFromAccessCode(t *testing.T) {
 // 手工填的地址要能覆盖接入码里的：服务端没配 tunnel.public_addr 时，
 // 接入码里的地址可能是内网的或不可达的。
 func TestParseConnectInputAddrOverridesCode(t *testing.T) {
-	code, _ := accesscode.Encode(accesscode.Code{Addr: "10.0.0.5", UserID: "u", Secret: "k"})
+	code, _ := accesscode.Encode(accesscode.Code{Addr: "10.0.0.5", CodeID: "u", Secret: "k"})
 	got, err := parseConnectInput(code, "203.0.113.9:7947", "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestParseConnectInputAddrOverridesCode(t *testing.T) {
 	if got.Addr != "203.0.113.9:7947" {
 		t.Fatalf("手工地址未覆盖接入码：%q", got.Addr)
 	}
-	if got.UserID != "u" || got.Secret != "k" {
+	if got.CodeID != "u" || got.Secret != "k" {
 		t.Fatalf("凭据被覆盖了：%+v", got)
 	}
 }
@@ -153,7 +153,7 @@ func TestWithDefaultPort(t *testing.T) {
 
 // saveConfig 写出的内容必须能被 loadConfig 读回来（往返一致）。
 func TestSaveLoadRoundTrip(t *testing.T) {
-	in := clientConfig{Addr: "203.0.113.9:7947", UserID: "uid-1", Secret: "c2VjcmV0"}
+	in := clientConfig{Addr: "203.0.113.9:7947", CodeID: "code-1", Secret: "c2VjcmV0"}
 	data, err := marshalConfig(in)
 	if err != nil {
 		t.Fatal(err)

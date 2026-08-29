@@ -26,14 +26,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// tenantFixture 是一套完整的多租户环境：两个普通用户 + 一个管理员。
+// tenantFixture 是一套完整的多租户环境：两个普通用户（各一组各一码）+ 一个管理员。
 type tenantFixture struct {
-	h       *handler
-	svc     *users.Service
-	alice   *models.User
-	bob     *models.User
-	admin   *models.User
-	cleanup func()
+	h         *handler
+	svc       *users.Service
+	admin     *models.User
+	alice     *models.User
+	bob       *models.User
+	aliceCode *models.AccessCode
+	bobCode   *models.AccessCode
+	groups    map[string]*models.UserGroup // 用户名 → 所属组
+	cleanup   func()
 }
 
 func newTenantFixture(t *testing.T) *tenantFixture {
@@ -57,10 +60,26 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	mk := func(name, role string, start, end, maxRules int) *models.User {
+	cfg, _ := svc.Settings()
+	// 收紧全局端口区间，让「组区间越界」可以被测到。
+	cfg.PortRangeStart, cfg.PortRangeEnd = 20000, 29999
+	if err := store.SaveSettings(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	mkGroup := func(name string, start, end int) *models.UserGroup {
+		g, cerr := svc.CreateGroup(&models.CreateGroupRequest{Name: name, PortRangeStart: start, PortRangeEnd: end})
+		if cerr != nil {
+			t.Fatalf("create group %s: %v", name, cerr)
+		}
+		return g
+	}
+	gAlice := mkGroup("alice-g", 20000, 20099)
+	gBob := mkGroup("bob-g", 21000, 21099)
+
+	mk := func(name, role, groupID string) *models.User {
 		u, cerr := svc.Create(&models.CreateUserRequest{
-			Username: name, Password: "password123", Role: role,
-			PortRangeStart: start, PortRangeEnd: end, MaxRules: maxRules,
+			Username: name, Password: "password123", Role: role, GroupID: groupID,
 		})
 		if cerr != nil {
 			t.Fatalf("create %s: %v", name, cerr)
@@ -68,12 +87,26 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 		return u
 	}
 	f := &tenantFixture{
-		h:     &handler{mgr: mgr, users: svc, sessions: sessions},
-		svc:   svc,
-		admin: mk("admin", models.RoleAdmin, 0, 0, 0),
-		alice: mk("alice", models.RoleUser, 20000, 20099, 2),
-		bob:   mk("bob", models.RoleUser, 21000, 21099, 2),
+		h:      &handler{mgr: mgr, users: svc, sessions: sessions},
+		svc:    svc,
+		admin:  mk("admin", models.RoleAdmin, ""),
+		groups: map[string]*models.UserGroup{},
 	}
+	f.alice = mk("alice", models.RoleUser, gAlice.ID)
+	f.bob = mk("bob", models.RoleUser, gBob.ID)
+	f.groups[f.alice.Username] = gAlice
+	f.groups[f.bob.Username] = gBob
+
+	mkCode := func(u *models.User) *models.AccessCode {
+		c, cerr := svc.CreateAccessCode(u, &models.CreateAccessCodeRequest{Name: u.Username + "-code"})
+		if cerr != nil {
+			t.Fatalf("create access code for %s: %v", u.Username, cerr)
+		}
+		return c
+	}
+	f.aliceCode = mkCode(f.alice)
+	f.bobCode = mkCode(f.bob)
+
 	f.cleanup = func() {
 		mgr.Shutdown()
 		_ = store.Close()
@@ -82,26 +115,22 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 }
 
 // seedRule 直接经 manager 建一条归属于 owner 的规则（跳过 handler 校验）。
-func (f *tenantFixture) seedRule(t *testing.T, owner *models.User, port int) *models.ForwardRule {
+func (f *tenantFixture) seedRule(t *testing.T, owner *models.User, code *models.AccessCode, port int) *models.ForwardRule {
 	t.Helper()
-	r, err := f.mgrAdd(owner, port)
-	if err != nil {
-		t.Fatalf("seed rule: %v", err)
-	}
-	return r
-}
-
-func (f *tenantFixture) mgrAdd(owner *models.User, port int) (*models.ForwardRule, error) {
-	return f.h.mgr.AddRule(&models.CreateRuleRequest{
+	r, err := f.h.mgr.AddRule(&models.CreateRuleRequest{
 		Name:       owner.Username + "-rule",
 		ListenAddr: "127.0.0.1",
 		ListenPort: port,
 		Protocol:   models.ProtocolUDP,
-		TargetAddr: owner.TunIP,
+		TargetAddr: code.TunIP,
 		TargetPort: 19132,
 		UserID:     owner.ID,
 		Enabled:    false,
 	})
+	if err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+	return r
 }
 
 func asUser(r *http.Request, u *models.User) *http.Request {
@@ -116,8 +145,8 @@ func postJSON(path, body string, u *models.User) *http.Request {
 func TestListRulesScopedToOwner(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	f.seedRule(t, f.alice, 20001)
-	f.seedRule(t, f.bob, 21001)
+	f.seedRule(t, f.alice, f.aliceCode, 20001)
+	f.seedRule(t, f.bob, f.bobCode, 21001)
 
 	rec := httptest.NewRecorder()
 	f.h.listRules(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/rules", nil), f.alice))
@@ -142,7 +171,7 @@ func TestListRulesScopedToOwner(t *testing.T) {
 func TestGetOthersRuleReturns404(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	bobRule := f.seedRule(t, f.bob, 21002)
+	bobRule := f.seedRule(t, f.bob, f.bobCode, 21002)
 
 	req := asUser(httptest.NewRequest(http.MethodGet, "/api/rules/"+bobRule.ID, nil), f.alice)
 	req.SetPathValue("id", bobRule.ID)
@@ -156,7 +185,7 @@ func TestGetOthersRuleReturns404(t *testing.T) {
 func TestUpdateAndDeleteOthersRuleBlocked(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	bobRule := f.seedRule(t, f.bob, 21003)
+	bobRule := f.seedRule(t, f.bob, f.bobCode, 21003)
 
 	req := asUser(httptest.NewRequest(http.MethodPut, "/api/rules/"+bobRule.ID, strings.NewReader(`{"name":"hijacked"}`)), f.alice)
 	req.SetPathValue("id", bobRule.ID)
@@ -198,8 +227,9 @@ func TestCreateRuleRejectsPortOutsideQuota(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
 
+	// alice 的组区间是 20000-20099，bob 的区间是 21000-21099。
 	body := `{"name":"oob","listen_addr":"127.0.0.1","listen_port":21050,"protocol":"udp","target_addr":"` +
-		f.alice.TunIP + `","target_port":19132}`
+		f.aliceCode.TunIP + `","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusBadRequest {
@@ -210,7 +240,7 @@ func TestCreateRuleRejectsPortOutsideQuota(t *testing.T) {
 	}
 }
 
-// 目标地址必须锁定为本人的隧道地址。不限制的话普通用户可以建一条指向
+// 目标地址必须锁定为自己访问码的隧道地址。不限制的话普通用户可以建一条指向
 // 127.0.0.1:22 或内网任意主机的转发，把中转机变成跳板。
 func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 	f := newTenantFixture(t)
@@ -219,7 +249,7 @@ func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 	cases := map[string]string{
 		"回环":     "127.0.0.1",
 		"内网主机":   "192.168.1.10",
-		"别人的隧道": f.bob.TunIP,
+		"别人的隧道": f.bobCode.TunIP,
 	}
 	port := 20010
 	for name, target := range cases {
@@ -233,13 +263,33 @@ func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 		port++
 	}
 
-	// 自己的隧道地址可以。
+	// 自己的访问码地址可以。
 	body := `{"name":"ok","listen_addr":"127.0.0.1","listen_port":20020,"protocol":"udp","target_addr":"` +
-		f.alice.TunIP + `","target_port":19132}`
+		f.aliceCode.TunIP + `","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("自己的隧道地址应被接受，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 没有访问码的用户 fail-closed：不能让规则指向一个不存在的隧道。
+func TestUserWithoutAccessCodeCannotCreate(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+	carol, err := f.svc.Create(&models.CreateUserRequest{Username: "carol", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"name":"nope","listen_addr":"127.0.0.1","listen_port":20030,"protocol":"udp","target_addr":"10.66.0.200","target_port":19132}`
+	rec := httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, carol))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "访问码") {
+		t.Fatalf("错误信息应指向「先建访问码」：%s", rec.Body.String())
 	}
 }
 
@@ -248,8 +298,8 @@ func TestCreateRuleForcesOwnership(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
 
-	body := `{"name":"forged","listen_addr":"127.0.0.1","listen_port":20030,"protocol":"udp","target_addr":"` +
-		f.alice.TunIP + `","target_port":19132,"user_id":"` + f.bob.ID + `"}`
+	body := `{"name":"forged","listen_addr":"127.0.0.1","listen_port":20040,"protocol":"udp","target_addr":"` +
+		f.aliceCode.TunIP + `","target_port":19132,"user_id":"` + f.bob.ID + `"}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusCreated {
@@ -270,7 +320,7 @@ func TestCreateRuleForcesOwnership(t *testing.T) {
 func TestUpdateRuleCannotTransferOwnership(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	rule := f.seedRule(t, f.alice, 20040)
+	rule := f.seedRule(t, f.alice, f.aliceCode, 20050)
 
 	for _, target := range []string{f.bob.ID, ""} {
 		req := asUser(httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID,
@@ -284,36 +334,24 @@ func TestUpdateRuleCannotTransferOwnership(t *testing.T) {
 	}
 }
 
+// 规则数上限取组配额（这里走全局默认 10，建满即拒）。
 func TestRuleQuotaEnforced(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	f.seedRule(t, f.alice, 20050)
-	f.seedRule(t, f.alice, 20051)
 
-	body := `{"name":"third","listen_addr":"127.0.0.1","listen_port":20052,"protocol":"udp","target_addr":"` +
-		f.alice.TunIP + `","target_port":19132}`
+	cfg, _ := f.svc.Settings()
+	if cfg.MaxRulesPerUser <= 0 {
+		t.Skip("全局规则上限未配置")
+	}
+	for i := 0; i < cfg.MaxRulesPerUser; i++ {
+		f.seedRule(t, f.alice, f.aliceCode, 20060+i)
+	}
+	body := `{"name":"one-more","listen_addr":"127.0.0.1","listen_port":20099,"protocol":"udp","target_addr":"` +
+		f.aliceCode.TunIP + `","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("超配额应被拒，status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// 未分配端口区间的账号 fail-closed：不能因为"没配"就等于"随便用"。
-func TestUserWithoutPortRangeCannotCreate(t *testing.T) {
-	f := newTenantFixture(t)
-	defer f.cleanup()
-	carol, err := f.svc.Create(&models.CreateUserRequest{Username: "carol", Password: "password123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := `{"name":"nope","listen_addr":"127.0.0.1","listen_port":22000,"protocol":"udp","target_addr":"` +
-		carol.TunIP + `","target_port":19132}`
-	rec := httptest.NewRecorder()
-	f.h.createRule(rec, postJSON("/api/rules", body, carol))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("未分配区间应被拒，status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -347,8 +385,8 @@ func TestAdminRejectsUnknownOwner(t *testing.T) {
 func TestDashboardScoped(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	f.seedRule(t, f.alice, 20060)
-	f.seedRule(t, f.bob, 21060)
+	f.seedRule(t, f.alice, f.aliceCode, 20070)
+	f.seedRule(t, f.bob, f.bobCode, 21070)
 
 	rec := httptest.NewRecorder()
 	f.h.dashboard(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/dashboard", nil), f.alice))
@@ -371,7 +409,7 @@ func TestDashboardScoped(t *testing.T) {
 func TestDeleteUserWithRulesRejected(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
-	f.seedRule(t, f.alice, 20070)
+	f.seedRule(t, f.alice, f.aliceCode, 20080)
 
 	req := asUser(httptest.NewRequest(http.MethodDelete, "/api/users/"+f.alice.ID, nil), f.admin)
 	req.SetPathValue("id", f.alice.ID)
@@ -423,20 +461,185 @@ func TestSessionsAndLogsScoped(t *testing.T) {
 	}
 }
 
-// 接入码接口返回的凭据能直接被客户端使用。
-func TestAccessCodeEndpoint(t *testing.T) {
+// 用户列表绝不能泄漏密码哈希。models.User 上的 json:"-" 是这条保证的唯一实现。
+func TestUserListHidesSecrets(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
 
-	req := asUser(httptest.NewRequest(http.MethodGet, "/api/users/"+f.alice.ID+"/access-code", nil), f.admin)
-	req.SetPathValue("id", f.alice.ID)
 	rec := httptest.NewRecorder()
-	f.h.userAccessCode(rec, req)
+	f.h.listUsers(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil), f.admin))
+	body := rec.Body.String()
+	for _, leak := range []string{"password_hash", "tunnel_secret", "device_fingerprint", "secret"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("用户列表泄漏了敏感字段 %s：%s", leak, body)
+		}
+	}
+	if !strings.Contains(body, "alice") || !strings.Contains(body, `"access_code_count"`) {
+		t.Fatalf("用户列表内容异常：%s", body)
+	}
+}
+
+// --- 访问码越权矩阵 ---
+
+// 普通用户看自己的访问码列表；列表里绝不能出现密钥或完整指纹。
+func TestAccessCodeListScoped(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	rec := httptest.NewRecorder()
+	f.h.listAccessCodes(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/access-codes", nil), f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, f.aliceCode.TunIP) {
+		t.Fatalf("alice 看不到自己的访问码：%s", body)
+	}
+	if strings.Contains(body, f.bobCode.TunIP) {
+		t.Fatalf("alice 看到了 bob 的访问码：%s", body)
+	}
+	for _, leak := range []string{f.aliceCode.Secret, f.aliceCode.DeviceFingerprint} {
+		if leak != "" && strings.Contains(body, leak) {
+			t.Fatal("访问码列表泄漏了密钥/完整指纹")
+		}
+	}
+
+	// 管理员可查全部。
+	rec = httptest.NewRecorder()
+	f.h.listAccessCodes(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/access-codes", nil), f.admin))
+	body = rec.Body.String()
+	if !strings.Contains(body, f.aliceCode.TunIP) || !strings.Contains(body, f.bobCode.TunIP) {
+		t.Fatalf("管理员应看到全部访问码：%s", body)
+	}
+}
+
+// 操作别人的访问码一律 404：改、删、取接入码、重新生成、解绑全部如此。
+func TestOthersAccessCodeOperationsBlocked(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	op := func(name, method, suffix, body string) int {
+		req := asUser(httptest.NewRequest(method, "/api/access-codes/"+f.bobCode.ID+suffix, strings.NewReader(body)), f.alice)
+		req.SetPathValue("id", f.bobCode.ID)
+		rec := httptest.NewRecorder()
+		switch method {
+		case http.MethodPut:
+			f.h.updateAccessCode(rec, req)
+		case http.MethodDelete:
+			f.h.deleteAccessCode(rec, req)
+		case http.MethodGet:
+			f.h.accessCodeText(rec, req)
+		case http.MethodPost:
+			if strings.HasSuffix(suffix, "/unbind") {
+				f.h.unbindAccessCode(rec, req)
+			} else {
+				f.h.regenerateAccessCode(rec, req)
+			}
+		}
+		return rec.Code
+	}
+
+	cases := []struct {
+		name   string
+		method string
+		suffix string
+		body   string
+	}{
+		{"改名", http.MethodPut, "", `{"name":"hijacked"}`},
+		{"删除", http.MethodDelete, "", ""},
+		{"取接入码", http.MethodGet, "/code", ""},
+		{"重新生成", http.MethodPost, "/regenerate", ""},
+		{"解绑", http.MethodPost, "/unbind", ""},
+	}
+	for _, c := range cases {
+		if got := op(c.name, c.method, c.suffix, c.body); got != http.StatusNotFound {
+			t.Fatalf("%s bob 的访问码 = %d, want 404", c.name, got)
+		}
+	}
+	// bob 的密钥与绑定没有被动过。
+	after, err := f.svc.GetAccessCode(f.bobCode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Secret != f.bobCode.Secret || after.DeviceFingerprint != f.bobCode.DeviceFingerprint {
+		t.Fatal("bob 的访问码被越权改动了")
+	}
+}
+
+// 普通用户不能借 ?user_id= 建到别人名下。
+func TestCreateAccessCodeIgnoresForeignUserScope(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	body := `{"name":"forged","user_id":"` + f.bob.ID + `"}`
+	rec := httptest.NewRecorder()
+	f.h.createAccessCode(rec, postJSON("/api/access-codes", body, f.alice))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data models.AccessCode `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.UserID != f.alice.ID {
+		t.Fatalf("归属应被强制为 alice，实际 %s", resp.Data.UserID)
+	}
+}
+
+// 管理员可以 ?user_id= 为他人建码，且必须是真实存在的用户。
+func TestAdminCreatesAccessCodeForUser(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	body := `{"name":"admin-made","user_id":"` + f.bob.ID + `"}`
+	rec := httptest.NewRecorder()
+	f.h.createAccessCode(rec, postJSON("/api/access-codes", body, f.admin))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	f.h.createAccessCode(rec, postJSON("/api/access-codes", `{"name":"x","user_id":"no-such"}`, f.admin))
+	// 用户不存在按既有约定映射 404（确认某个 ID 存在本身就是信息泄漏）。
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("为不存在的用户建码应被拒，status = %d", rec.Code)
+	}
+}
+
+// 删除仍被规则引用的访问码要 409，而不是留下一条指向死地址的规则。
+func TestDeleteAccessCodeWithRulesRejected(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+	f.seedRule(t, f.alice, f.aliceCode, 20090)
+
+	req := asUser(httptest.NewRequest(http.MethodDelete, "/api/access-codes/"+f.aliceCode.ID, nil), f.alice)
+	req.SetPathValue("id", f.aliceCode.ID)
+	rec := httptest.NewRecorder()
+	f.h.deleteAccessCode(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := f.svc.GetAccessCode(f.aliceCode.ID); err != nil {
+		t.Fatal("访问码不应被删除")
+	}
+}
+
+// 取接入码接口返回的凭据能直接被客户端使用。
+func TestAccessCodeTextEndpoint(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	req := asUser(httptest.NewRequest(http.MethodGet, "/api/access-codes/"+f.aliceCode.ID+"/code", nil), f.alice)
+	req.SetPathValue("id", f.aliceCode.ID)
+	rec := httptest.NewRecorder()
+	f.h.accessCodeText(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Data models.UserAccessCode `json:"data"`
+		Data models.AccessCodeView `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -446,22 +649,22 @@ func TestAccessCodeEndpoint(t *testing.T) {
 	}
 }
 
-// 用户列表绝不能泄漏密码哈希与隧道密钥。models.User 上那两个 json:"-"
-// 是这条保证的唯一实现，一旦被误删就是静默泄漏。
-func TestUserListHidesSecrets(t *testing.T) {
+// 修改自身密码后 /api/auth/me 应带上有效配额与来源。
+func TestMeCarriesQuotaWithSource(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
 
 	rec := httptest.NewRecorder()
-	f.h.listUsers(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/users", nil), f.admin))
+	f.h.me(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/auth/me", nil), f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
 	body := rec.Body.String()
-	if strings.Contains(body, "password_hash") || strings.Contains(body, "tunnel_secret") {
-		t.Fatalf("用户列表泄漏了敏感字段：%s", body)
+	if !strings.Contains(body, `"quota"`) || !strings.Contains(body, `"port_source"`) {
+		t.Fatalf("me 应返回配额与来源：%s", body)
 	}
-	if strings.Contains(body, f.alice.TunnelSecret) {
-		t.Fatal("用户列表泄漏了隧道密钥原文")
-	}
-	if !strings.Contains(body, "alice") || !strings.Contains(body, `"rule_count"`) {
-		t.Fatalf("用户列表内容异常：%s", body)
+	if !strings.Contains(body, `"port_source":"group"`) || !strings.Contains(body, `"port_range_start":20000`) ||
+		!strings.Contains(body, `"port_range_end":20099`) || !strings.Contains(body, `"group_name":"alice-g"`) {
+		t.Fatalf("配额应来自 alice 的组：%s", body)
 	}
 }

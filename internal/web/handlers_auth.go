@@ -38,7 +38,7 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	h.sessions.SetCookie(w, token)
 	logger.S.Infow("用户已登录 | user logged in", "username", u.Username, "role", u.Role, "remote", r.RemoteAddr)
-	ok(w, u.View())
+	h.writeIdentity(w, u)
 }
 
 func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +55,21 @@ func (h *handler) me(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	ok(w, me.View())
+	h.writeIdentity(w, me)
+}
+
+// writeIdentity 输出当前身份与其有效配额。
+//
+// 配额连来源一起给前端：用户看到「访问码上限 3」时要能知道这是组给的还是全局
+// 默认，否则只能来问管理员。
+func (h *handler) writeIdentity(w http.ResponseWriter, u *models.User) {
+	quota, err := h.users.EffectiveQuota(u)
+	if err != nil {
+		// 配额解析失败不该让人登不进来（组被手工删掉之类），退化成不限。
+		logger.S.Warnw("解析用户配额失败 | failed to resolve quota", "user", u.Username, "err", err)
+		quota = models.Quota{}
+	}
+	ok(w, u.View(quota))
 }
 
 func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {

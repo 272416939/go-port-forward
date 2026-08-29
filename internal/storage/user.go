@@ -25,9 +25,12 @@ var (
 
 // userRecord 是用户的持久化形态。
 //
-// models.User 的 PasswordHash/TunnelSecret 带 json:"-"（它同时是 API 响应
-// 结构体），直接落盘会把密钥写成空串。所以持久化走这个独立结构体——一处标签
+// models.User 的 PasswordHash 带 json:"-"（它同时是 API 响应结构体），直接
+// 复用它落盘会把密码哈希写成空串。所以持久化走这个独立结构体——一处标签
 // 服务两个用途必然出错，把两个用途拆开。
+//
+// 隧道相关字段（TunIP/TunnelSecret）与配额字段已下移到 AccessCode 与
+// UserGroup；这里保留它们的 json tag 只为读取旧数据做迁移（见 migrate.go）。
 type userRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -35,37 +38,39 @@ type userRecord struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
-	TunIP    string `json:"tun_ip"`
+	GroupID  string `json:"group_id,omitempty"`
 	Comment  string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"password_hash"`
-	TunnelSecret string `json:"tunnel_secret"`
-
-	PortRangeStart int `json:"port_range_start"`
-	PortRangeEnd   int `json:"port_range_end"`
-	MaxRules       int `json:"max_rules"`
 
 	Disabled           bool `json:"disabled"`
 	MustChangePassword bool `json:"must_change_password"`
+
+	// --- 仅供迁移读取的旧字段（v1 模型），迁移后不再写入 ---
+	LegacyTunIP          string `json:"tun_ip,omitempty"`
+	LegacyTunnelSecret   string `json:"tunnel_secret,omitempty"`
+	LegacyPortRangeStart int    `json:"port_range_start,omitempty"`
+	LegacyPortRangeEnd   int    `json:"port_range_end,omitempty"`
+	LegacyMaxRules       int    `json:"max_rules,omitempty"`
 }
 
 func toRecord(u *models.User) *userRecord {
 	return &userRecord{
 		CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
-		ID: u.ID, Username: u.Username, Role: u.Role, TunIP: u.TunIP, Comment: u.Comment,
-		PasswordHash: u.PasswordHash, TunnelSecret: u.TunnelSecret,
-		PortRangeStart: u.PortRangeStart, PortRangeEnd: u.PortRangeEnd, MaxRules: u.MaxRules,
-		Disabled: u.Disabled, MustChangePassword: u.MustChangePassword,
+		ID: u.ID, Username: u.Username, Role: u.Role, GroupID: u.GroupID, Comment: u.Comment,
+		PasswordHash:       u.PasswordHash,
+		Disabled:           u.Disabled,
+		MustChangePassword: u.MustChangePassword,
 	}
 }
 
 func (r *userRecord) toModel() *models.User {
 	return &models.User{
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-		ID: r.ID, Username: r.Username, Role: r.Role, TunIP: r.TunIP, Comment: r.Comment,
-		PasswordHash: r.PasswordHash, TunnelSecret: r.TunnelSecret,
-		PortRangeStart: r.PortRangeStart, PortRangeEnd: r.PortRangeEnd, MaxRules: r.MaxRules,
-		Disabled: r.Disabled, MustChangePassword: r.MustChangePassword,
+		ID: r.ID, Username: r.Username, Role: r.Role, GroupID: r.GroupID, Comment: r.Comment,
+		PasswordHash:       r.PasswordHash,
+		Disabled:           r.Disabled,
+		MustChangePassword: r.MustChangePassword,
 	}
 }
 
@@ -134,21 +139,16 @@ func (s *boltStore) GetUserByName(name string) (*models.User, error) {
 	return out, nil
 }
 
-// CreateUser 在单个写事务内完成「用户名查重 + 隧道地址分配 + 落盘」。
+// CreateUser 在单个写事务内完成「用户名查重 + 落盘」。
 //
-// 三步必须同事务：地址分配依赖"当前已占用哪些地址"这个读结果，若读与写分处
-// 两个事务，两个并发的创建请求会读到同一份占用集合并分到同一个地址——而重复
-// 的隧道地址会让出向包路由到错误的会话，是静默的串号故障。
-//
-// prefix 网段来自 tunnel.tun_addr；gateway 是服务端自身的隧道地址，跳过不分配。
-func (s *boltStore) CreateUser(u *models.User, pool netip.Prefix, gateway netip.Addr) error {
+// 隧道地址不再在这里分配——它已下移到 AccessCode（见 CreateAccessCode）。
+func (s *boltStore) CreateUser(u *models.User) error {
 	if u.ID == "" {
 		return fmt.Errorf("storage: user id is required")
 	}
 	wantName := models.NormalizeUsername(u.Username)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(usersBucket)
-		used := map[netip.Addr]struct{}{}
 		dup := false
 		if err := b.ForEach(func(_, v []byte) error {
 			var r userRecord
@@ -158,9 +158,6 @@ func (s *boltStore) CreateUser(u *models.User, pool netip.Prefix, gateway netip.
 			if models.NormalizeUsername(r.Username) == wantName {
 				dup = true
 			}
-			if addr, ok := models.ParseTunIP(r.TunIP); ok {
-				used[addr] = struct{}{}
-			}
 			return nil
 		}); err != nil {
 			return err
@@ -169,13 +166,6 @@ func (s *boltStore) CreateUser(u *models.User, pool netip.Prefix, gateway netip.
 			return fmt.Errorf("%w: %s", ErrUserExists, u.Username)
 		}
 
-		if u.TunIP == "" {
-			addr, err := allocTunIP(pool, gateway, used)
-			if err != nil {
-				return err
-			}
-			u.TunIP = addr.String()
-		}
 		now := time.Now()
 		if u.CreatedAt.IsZero() {
 			u.CreatedAt = now
@@ -190,7 +180,7 @@ func (s *boltStore) CreateUser(u *models.User, pool netip.Prefix, gateway netip.
 	})
 }
 
-// SaveUser 覆盖写入已存在的用户（不做地址分配，不改 CreatedAt）。
+// SaveUser 覆盖写入已存在的用户（不改 CreatedAt）。
 func (s *boltStore) SaveUser(u *models.User) error {
 	if u.ID == "" {
 		return fmt.Errorf("storage: user id is required")
@@ -255,8 +245,8 @@ func (s *boltStore) CountUsers() (int, error) {
 
 // allocTunIP 在网段内取最小的未占用地址。
 //
-// 跳过网络号、广播地址与网关。/24 提供 253 个位置；顺序分配（而非随机）让
-// 运维能在路由表与抓包里直观对上人。
+// 跳过网络号、广播地址与网关。/24 提供 253 个位置、/16 提供约 6.5 万个；
+// 顺序分配（而非随机）让运维能在路由表与抓包里直观对上人。
 func allocTunIP(pool netip.Prefix, gateway netip.Addr, used map[netip.Addr]struct{}) (netip.Addr, error) {
 	if !pool.IsValid() || !pool.Addr().Is4() {
 		return netip.Addr{}, fmt.Errorf("storage: 无效的隧道网段 %v | invalid tunnel prefix", pool)
@@ -275,7 +265,10 @@ func allocTunIP(pool netip.Prefix, gateway netip.Addr, used map[netip.Addr]struc
 		}
 		return addr, nil
 	}
-	return netip.Addr{}, fmt.Errorf("%w: %s", ErrTunPoolFull, pool)
+	// 地址池耗尽时直接给出可操作的建议：每个访问码占一个地址，/24 只有 253
+	// 个位置，很容易在几十个用户时撞上。
+	return netip.Addr{}, fmt.Errorf("%w: %s（请把 config.yaml 的 tunnel.tun_addr 换成更大的网段，如 10.66.0.1/16）| enlarge tunnel.tun_addr",
+		ErrTunPoolFull, pool)
 }
 
 // lastAddr 返回网段内的最后一个地址（IPv4 广播地址）。

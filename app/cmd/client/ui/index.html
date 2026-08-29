@@ -37,7 +37,7 @@
         <input id="code" type="text" placeholder="粘贴以 pf1. 开头的接入码" spellcheck="false"
                autocomplete="off">
       </label>
-      <p class="hint">接入码由管理员在服务端面板的「用户管理」里生成，一次粘贴即包含地址与凭据。粘贴后会自动记住，下次打开直接连接。</p>
+      <p class="hint">接入码在服务端面板的「我的访问码」里创建，一次粘贴即包含地址与凭据。粘贴后会自动记住，下次打开直接连接。<strong>每个访问码只能绑定一台设备</strong>，换机器请先在面板上解绑。</p>
 
       <details id="manualBox">
         <summary>没有接入码？手动填写</summary>
@@ -47,13 +47,13 @@
                  autocomplete="off" inputmode="url">
         </label>
         <label class="field">
-          <span>用户 ID</span>
-          <input id="userId" type="text" placeholder="面板用户管理里的用户 ID" spellcheck="false"
+          <span>访问码 ID</span>
+          <input id="codeId" type="text" placeholder="面板「我的访问码」里的 ID" spellcheck="false"
                  autocomplete="off">
         </label>
         <label class="field">
           <span>隧道密钥</span>
-          <input id="secret" type="password" placeholder="面板用户管理里的密钥" spellcheck="false"
+          <input id="secret" type="password" placeholder="面板「我的访问码」里的密钥" spellcheck="false"
                  autocomplete="off">
         </label>
         <p class="hint">省略端口时默认使用 7947。三项都填对才能建立隧道。</p>
@@ -70,7 +70,8 @@
     <section class="card">
       <h2>运行状态</h2>
       <dl class="stats">
-        <div><dt>当前身份</dt><dd id="identity">—</dd></div>
+        <div><dt>访问码</dt><dd id="identity">—</dd></div>
+        <div><dt>本机设备指纹</dt><dd id="device">—</dd></div>
         <div><dt>虚拟网卡</dt><dd id="tunIP">—</dd></div>
         <div><dt>已连接时长</dt><dd id="uptime">—</dd></div>
         <div>

@@ -272,7 +272,8 @@ tunnel:
   enabled: false            # 内置隧道服务端（配合 pf-client）| Built-in tunnel server
   listen: ":7947"           # 隧道 UDP 监听 | Tunnel UDP listen
   tun_name: pftun0          # TUN 设备名 | TUN device name
-  tun_addr: 10.66.0.1/24    # 服务端隧道地址 + 客户端地址池 | Server address + client pool
+  tun_addr: 10.66.0.1/16    # 服务端隧道地址 + 访问码地址池 | Server address + code pool
+  # /16 提供约 6.5 万个地址：每个访问码占一个，/24 的 253 个位置在几十个用户时就会耗尽
   public_addr: ""           # 写进接入码的中转机地址，如 1.2.3.4:7947 | Relay address embedded in access codes
   nat: true                 # 自动配置回程路径 | Auto-configure the return path
 
@@ -291,12 +292,20 @@ gc:
 
 ## 👥 多用户与账号 | Multi-user & Accounts
 
-一个用户同时是 **面板账号** 与 **隧道身份**。他登录后只能看到自己的转发规则，
-隧道也只接受用他的接入码建立的连接——两种身份合并成一个对象，是为了避免
-「谁的规则能指向谁的隧道」变成一张需要单独维护的关联表。
+面板账号（User）与隧道身份（AccessCode）是两个实体：**一个用户可以有多个访问码，
+每个访问码是一条独立隧道**——独立的隧道内地址、独立的密钥、绑定一台设备。
+用户登录后只能看到自己的转发规则；隧道只接受用某个访问码的接入码建立的连接。
 
-A user is both a **panel account** and a **tunnel identity**: they only see their own
-forwarding rules, and the tunnel only accepts connections made with their access code.
+```
+全局设置 Settings（配额天花板）
+   └─ 用户组 UserGroup（配额载体）
+        └─ 用户 User（登录账号，归属某组）
+             └─ 访问码 AccessCode（隧道身份，绑定一台设备）
+```
+
+A panel account (User) and a tunnel identity (AccessCode) are separate entities: **one
+user can own multiple access codes, each being an independent tunnel** — its own tunnel
+address, its own key, bound to one device.
 
 ### 首次启动 | First Run
 
@@ -311,30 +320,66 @@ On first run an `admin` account is created with a random password, written both 
 startup log and to `admin-credentials.txt` (mode 0600) next to the executable. You must
 change it on first login; delete the file afterwards.
 
+### 配额：全局设置与用户组 | Quotas: Global Settings & Groups
+
+管理员在「全局设置」里配置**全站天花板**：全局端口区间、每人访问码上限、每人
+并发隧道上限、每人规则上限。「用户组」是配额的载体——建组时填各项配额，
+用户只需归属到某个组。
+
+- 组某项配额填 **0** 表示取全局默认；全局也为 0 表示不限。
+- 组的区间与上限**不能突破全局设置**（保存时校验）；收紧全局设置时若已有组
+  越界会被拒绝并列出冲突的组名。
+- 「我的账号」页会显示当前有效配额及其来源（组 / 全局默认），用户不必来问
+  「为什么是这个数」。
+- 配额严格以组为准：给个别用户特殊待遇请为他建一个专属组，而不是在用户上
+  塞配额字段。
+
+Quotas have two layers: **Global Settings** (the ceiling — global port range, per-user
+code/tunnel/rule limits) and **User Groups** (the carrier — each group holds concrete
+quotas). A group value of 0 falls back to global; global 0 means unlimited. Group quotas
+may not exceed the ceiling; tightening the ceiling is refused while any group would
+breach it. Quota origins are surfaced in the account page.
+
+### 访问码与设备绑定 | Access Codes & Device Binding
+
+用户在「我的访问码」里**自助**创建访问码（管理员也可以在用户视角代建），
+数量受组配额约束。创建后点「接入码」复制整串凭据——`pf1.` 开头的字符串，
+内含中转机地址、访问码 ID 与隧道密钥，粘贴进 pf-client 即可连接。
+
+**每个访问码绑定一台设备**：首次握手成功时自动登记设备指纹，之后其它设备
+一律拒绝。换机器时在面板上点「解绑」（会立即断开当前在线隧道），再到新机器
+上连接即可。密钥泄漏时用「重新生成密钥」，旧接入码与在线隧道立即失效。
+
+设备指纹派生自操作系统的机器标识（Windows 上是注册表 MachineGuid）。它的强度
+要如实说明：**本地管理员可以改写它**；用同一镜像克隆出来的机器（云上批量开
+的 Windows 没跑 sysprep）指纹相同。它防的是「把接入码转发给朋友」这类随手
+滥用，不是防有动机的攻击者。
+
+Access codes are **self-service**: users create them (within their group quota), copy
+the `pf1.` code, paste it into pf-client. **Each code binds to one device** — the
+fingerprint is registered on first successful handshake and other devices are rejected.
+Unbind from the panel (this immediately disconnects the bound tunnel) before moving to a
+new machine. The fingerprint derives from the OS machine ID (MachineGuid on Windows);
+it can be rewritten by a local administrator and cloned images share one fingerprint —
+it stops casual sharing, not a motivated attacker.
+
 ### 权限边界 | Permissions
 
 | 能力 Capability | 管理员 Admin | 普通用户 User |
 |---|---|---|
 | 转发规则增删改查 CRUD on rules | 全部规则 All | 仅自己名下 Own only |
-| 监听端口 Listen port | 不限 Unlimited | 必须落在分配的端口区间内 Within the assigned range |
-| 转发目标 Target address | 任意主机 Any host | **只能是自己的隧道地址** Own tunnel address only |
-| 规则数量 Rule count | 不限 Unlimited | 受 `max_rules` 约束 Bounded by `max_rules` |
+| 监听端口 Listen port | 不限 Unlimited | 必须落在组配额区间内 Within the group's range |
+| 转发目标 Target address | 任意主机 Any host | **只能是自己某个访问码的隧道地址** One of their own access code addresses |
+| 规则 / 访问码数量 Rule & code count | 不限 Unlimited | 受组配额约束 Bounded by group quotas |
+| 并发隧道数 Concurrent tunnels | 不限 Unlimited | 受组配额约束 Bounded by group quota |
+| 访问码管理（建/删/解绑/重置） | 为任何人 ✅ | 仅自己的 Own only |
 | 活跃会话 / 连接日志 Sessions & logs | 全站 All | 仅自己规则上的 Own rules only |
-| IP 黑白名单 / 运行诊断 / WSL 导入 | ✅ | ❌ |
+| IP 黑白名单 / 运行诊断 / WSL 导入 / 用户组 / 全局设置 | ✅ | ❌ |
 | 用户管理 User management | ✅ | ❌ |
 
-普通用户的转发目标被锁定为自己的隧道地址不是形式主义：不限制的话，他可以建一条
-指向 `127.0.0.1:22` 或内网任意主机的转发，把中转机变成一个对外开放的跳板。
-
-### 接入码 | Access Codes
-
-管理员在「用户管理」里创建用户后，界面会直接给出该用户的**接入码**——一个
-`pf1.` 开头的字符串，内含中转机地址、用户 ID 与隧道密钥。用户把它粘贴进
-pf-client 的输入框即可连接，不必手抄 44 字符的 base64 密钥。
-
-接入码等同于密码，请通过可信渠道下发。密钥泄漏时用「重新生成密钥」按钮，
-旧接入码立即失效。若 `tunnel.public_addr` 未配置，接入码里的地址会取自你访问
-面板时用的主机名——从 `localhost` 访问面板时无法推断，此时接口会明确报错。
+普通用户的转发目标被锁定为自己的访问码地址不是形式主义：不限制的话，他可以
+建一条指向 `127.0.0.1:22` 或内网任意主机的转发，把中转机变成一个对外开放的
+跳板。删除仍被规则引用的访问码会被拒绝（409），避免留下指向死地址的规则。
 
 ### 安全提示 | Security Notes
 

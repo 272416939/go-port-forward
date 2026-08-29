@@ -214,9 +214,11 @@ type Server struct {
 }
 
 // TunnelStatus 暴露隧道服务端的在线状态（避免 web 直接依赖 tunnelapp）。
+//
+// 在线判定已下移到 users.Service（它需要把访问码与在线状态拼在一起），这里
+// 只留一个总数给诊断页。
 type TunnelStatus interface {
 	PeerCount() int
-	PeerUserIDs() []string
 }
 
 // New creates a configured Server.
@@ -291,8 +293,23 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users", s.adminOnly(h.createUser))
 	mux.HandleFunc("PUT /api/users/{id}", s.adminOnly(h.updateUser))
 	mux.HandleFunc("DELETE /api/users/{id}", s.adminOnly(h.deleteUser))
-	mux.HandleFunc("GET /api/users/{id}/access-code", s.adminOnly(h.userAccessCode))
-	mux.HandleFunc("POST /api/users/{id}/regenerate-secret", s.adminOnly(h.regenerateSecret))
+
+	// 访问码：登录即可，作用域默认为自己；管理员可带 ?user_id= 管理他人。
+	mux.HandleFunc("GET /api/access-codes", s.authed(h.listAccessCodes))
+	mux.HandleFunc("POST /api/access-codes", s.authed(h.createAccessCode))
+	mux.HandleFunc("PUT /api/access-codes/{id}", s.authed(h.updateAccessCode))
+	mux.HandleFunc("DELETE /api/access-codes/{id}", s.authed(h.deleteAccessCode))
+	mux.HandleFunc("GET /api/access-codes/{id}/code", s.authed(h.accessCodeText))
+	mux.HandleFunc("POST /api/access-codes/{id}/regenerate", s.authed(h.regenerateAccessCode))
+	mux.HandleFunc("POST /api/access-codes/{id}/unbind", s.authed(h.unbindAccessCode))
+
+	// 用户组与全局设置（仅管理员）
+	mux.HandleFunc("GET /api/groups", s.adminOnly(h.listGroups))
+	mux.HandleFunc("POST /api/groups", s.adminOnly(h.createGroup))
+	mux.HandleFunc("PUT /api/groups/{id}", s.adminOnly(h.updateGroup))
+	mux.HandleFunc("DELETE /api/groups/{id}", s.adminOnly(h.deleteGroup))
+	mux.HandleFunc("GET /api/settings", s.adminOnly(h.getSettings))
+	mux.HandleFunc("PUT /api/settings", s.adminOnly(h.updateSettings))
 
 	// 诊断与系统级操作（仅管理员）
 	mux.HandleFunc("GET /api/diagnostics", s.adminOnly(h.diagnostics))

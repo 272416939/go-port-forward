@@ -16,12 +16,17 @@ const BootstrapAdminName = "admin"
 // credentialsFileName 是初始密码的落盘位置（与可执行文件同目录）。
 const credentialsFileName = "admin-credentials.txt"
 
-// Bootstrap 在用户表为空时创建初始管理员。
+// Bootstrap 在用户表为空时创建初始管理员，并确保默认用户组存在。
 //
 // 初始密码同时写日志与一个 0600 文件：日志可能被轮转或采集走，文件可能被
 // 运维忽略，两条路都留着才不至于把人锁在门外。返回明文密码供调用方展示。
 // MustChangePassword 强制首次登录改密——初始密码在磁盘上留过痕，不能长用。
 func (s *Service) Bootstrap() (created bool, username, password string, err error) {
+	// 默认组要先于用户存在：新建用户会落到它。迁移逻辑已经建过，这里是兜底。
+	if _, gerr := s.ensureDefaultGroup(); gerr != nil {
+		return false, "", "", gerr
+	}
+
 	n, err := s.store.CountUsers()
 	if err != nil {
 		return false, "", "", err

@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -27,9 +28,14 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 		e.fail("地址无法解析：%v", err)
 		return
 	}
-	uid, err := tunnel.ParseUID(conf.UserID)
+	uid, err := tunnel.ParseUID(conf.CodeID)
 	if err != nil {
-		e.fail("接入码中的用户 ID 无效：%v", err)
+		e.fail("接入码中的访问码 ID 无效：%v", err)
+		return
+	}
+	device, err := deviceFingerprintBytes()
+	if err != nil {
+		e.fail("%v", err)
 		return
 	}
 	secret := []byte(conf.Secret)
@@ -120,16 +126,25 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	// 主循环：握手 → 配地址 → 泵；断开后自动重握手，直到 ctx 取消。
 	for ctx.Err() == nil {
 		e.setState(StateConnecting, "")
-		sess, addressing, herr := e.handshake(ctx, udp, uid, secret)
+		sess, addressing, herr := e.handshake(ctx, udp, uid, device, secret)
 		if herr != nil {
 			if ctx.Err() != nil {
 				break
 			}
-			e.setState(StateError, herr.Error())
-			e.logf("握手失败：%v（3 秒后重试）", herr)
 			if rm := rmHolder.Load(); rm != nil {
 				rm.cleanup()
 			}
+			// 服务端明确拒绝且原因需要人工介入（换了设备、访问码被停用）时
+			// 停止重连：继续每 3 秒试一次只会刷日志，并把真正的原因埋进一串
+			// 「握手失败」里。
+			var rej *rejectedError
+			if errors.As(herr, &rej) && rej.reason.Terminal() {
+				e.setTerminal(rej.Error())
+				e.logf("✗ %v", rej)
+				break
+			}
+			e.setState(StateError, herr.Error())
+			e.logf("握手失败：%v（3 秒后重试）", herr)
 			if sleepCtx(ctx, 3*time.Second) != nil {
 				break
 			}
@@ -206,13 +221,13 @@ func (e *Engine) fail(format string, a ...any) {
 // handshake 循环发送 Hello 直到收到 Accept 或 ctx 取消，返回会话与服务端
 // 下发的隧道地址。
 func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
-	uid tunnel.UID, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
+	uid tunnel.UID, device [tunnel.FingerprintSize]byte, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
 	var none tunnelAddressing
 	for attempt := 1; attempt <= handshakeTries; attempt++ {
 		if ctx.Err() != nil {
 			return nil, none, ctx.Err()
 		}
-		hello, priv, err := tunnel.NewClientHello(secret, uid)
+		hello, priv, err := tunnel.NewClientHello(secret, uid, device)
 		if err != nil {
 			return nil, none, err
 		}
@@ -225,6 +240,16 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 		if err != nil {
 			e.logf("等待服务端应答 (%d/%d)…", attempt, handshakeTries)
 			continue
+		}
+		// 服务端明确拒绝：必须验 MAC 才采信。不验的话任何人都能伪造一个
+		// Reject 让客户端停止重连——单包就能做到的拒绝服务。
+		if n > 0 && buf[0] == tunnel.TypeReject {
+			rej, rerr := tunnel.ParseServerReject(secret, buf[:n], hello.Eph)
+			if rerr != nil {
+				e.logf("收到无法验证的拒绝应答，已忽略 (%d/%d)…", attempt, handshakeTries)
+				continue
+			}
+			return nil, none, &rejectedError{reason: rej.Reason}
 		}
 		accept, err := tunnel.ParseServerAccept(secret, buf[:n], hello.Eph)
 		if err != nil {

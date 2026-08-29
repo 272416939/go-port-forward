@@ -198,34 +198,54 @@ func (a *application) Start() error {
 
 	// 内置隧道服务端（配合 Windows pf-client，透明模式回程）
 	if cfg.Tunnel.Enabled {
-		tsrv, terr := tunnelapp.Start(tunnelapp.Config{
-			Enabled: true,
-			Listen:  cfg.Tunnel.Listen,
-			TunName: cfg.Tunnel.TunName,
-			TunAddr: cfg.Tunnel.TunAddr,
-			NAT:     cfg.Tunnel.NAT,
-		}, func(userID string) (tunnelapp.Identity, bool) {
-			// 服务端拿到的是握手包里声称的用户 ID；查到密钥后由协议层验 MAC。
-			u, gerr := usrs.Get(userID)
-			if gerr != nil {
-				return tunnelapp.Identity{}, false
-			}
-			tunIP, valid := models.ParseTunIP(u.TunIP)
-			if !valid {
-				return tunnelapp.Identity{}, false
-			}
-			return tunnelapp.Identity{
-				UserID:   u.ID,
-				UserName: u.Username,
-				Secret:   []byte(u.TunnelSecret),
-				TunIP:    tunIP,
-				Disabled: u.Disabled,
-			}, true
-		}, mgr.SessionIPsByUser)
+		tsrv, terr := tunnelapp.Start(tunnelapp.Options{
+			Config: tunnelapp.Config{
+				Enabled: true,
+				Listen:  cfg.Tunnel.Listen,
+				TunName: cfg.Tunnel.TunName,
+				TunAddr: cfg.Tunnel.TunAddr,
+				NAT:     cfg.Tunnel.NAT,
+			},
+			Identity: func(codeID string) (tunnelapp.Identity, bool) {
+				// 服务端拿到的是握手包里声称的访问码 ID；查到密钥后由协议层验 MAC。
+				ci, found := usrs.Identity(codeID)
+				if !found {
+					return tunnelapp.Identity{}, false
+				}
+				tunIP, valid := models.ParseTunIP(ci.TunIP)
+				if !valid {
+					return tunnelapp.Identity{}, false
+				}
+				return tunnelapp.Identity{
+					CodeID:       ci.CodeID,
+					CodeName:     ci.CodeName,
+					UserID:       ci.UserID,
+					UserName:     ci.UserName,
+					Secret:       []byte(ci.Secret),
+					TunIP:        tunIP,
+					CodeDisabled: ci.CodeDisabled,
+					UserDisabled: ci.UserDisabled,
+					Fingerprint:  ci.Fingerprint,
+					MaxTunnels:   ci.MaxTunnels,
+				}, true
+			},
+			Binder: usrs,
+			SessionIPs: func() map[string][]string {
+				// 「隧道地址 → 访问码」是用户服务的知识；manager 只按目标地址
+				// 分组，不需要知道访问码的存在。
+				tunIPs, err := usrs.AllTunIPs()
+				if err != nil {
+					return nil
+				}
+				return mgr.SessionIPsByCode(tunIPs)
+			},
+		})
 		if terr != nil {
 			return fmt.Errorf("tunnel server: %w", terr)
 		}
 		a.tunnelSrv = tsrv
+		// 反向注入：停用/解绑/删除访问码时用户服务要能踢掉在线隧道。
+		usrs.SetEvictor(tsrv)
 		logger.S.Infow("tunnel server started", "listen", cfg.Tunnel.Listen, "tun", cfg.Tunnel.TunName)
 	}
 

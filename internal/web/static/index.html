@@ -56,9 +56,21 @@
         <i class="bi sidebar__link-icon" :class="isAdmin ? 'bi-shield-lock' : 'bi-journal-text'"></i>
         <span class="sidebar__link-text" x-text="isAdmin ? t('访问控制','Access Control') : t('连接日志','Connection Logs')"></span>
       </a>
+      <a href="#" class="sidebar__link" @click.prevent="showCodesModal()">
+        <i class="bi bi-key sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('我的访问码','My Access Codes')"></span>
+      </a>
       <a href="#" class="sidebar__link" style="display:none" x-show="isAdmin" @click.prevent="showUsersModal()">
         <i class="bi bi-people sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('用户管理','Users')"></span>
+      </a>
+      <a href="#" class="sidebar__link" style="display:none" x-show="isAdmin" @click.prevent="showGroupsModal()">
+        <i class="bi bi-collection sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('用户组','Groups')"></span>
+      </a>
+      <a href="#" class="sidebar__link" style="display:none" x-show="isAdmin" @click.prevent="showSettingsModal()">
+        <i class="bi bi-sliders sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('全局设置','Global Settings')"></span>
       </a>
       <a href="#" class="sidebar__link" @click.prevent="showSessionsModal()">
         <i class="bi bi-arrow-left-right sidebar__link-icon"></i>
@@ -290,8 +302,16 @@
           </div>
           <div class="col-md-5">
             <label class="form-label"><span x-text="t('目标地址','Target Address')"></span> <span class="text-danger">*</span></label>
-            <input class="form-control" x-model="form.target_addr" placeholder="192.168.1.100" :readonly="!isAdmin"/>
-            <div class="form-text" x-show="!isAdmin" x-text="t('普通账号的转发目标固定为自己的隧道地址。','Your forwarding target is fixed to your own tunnel address.')"></div>
+            <!-- 普通用户：从自己的访问码里选（target_addr 是「这条规则喂给哪条隧道」的唯一真相，
+                 必须是自己某个启用中访问码的隧道地址）。管理员仍可填任意主机。 -->
+            <select class="form-select" x-model="form.target_addr" x-show="!isAdmin" style="display:none">
+              <option value="" x-text="t('— 选择访问码 —','— Select an access code —')"></option>
+              <template x-for="c in myCodes" :key="c.id">
+                <option :value="c.tun_ip" x-text="c.name + ' (' + c.tun_ip + ')'" :disabled="c.disabled"></option>
+              </template>
+            </select>
+            <input class="form-control" x-model="form.target_addr" placeholder="192.168.1.100" x-show="isAdmin" style="display:none"/>
+            <div class="form-text" x-show="!isAdmin" x-text="t('转发目标固定为你某个访问码的隧道地址。','Your target is fixed to one of your access code tunnel addresses.')"></div>
           </div>
           <div class="col-md-3">
             <label class="form-label"><span x-text="t('目标端口','Target Port')"></span> <span class="text-danger">*</span></label>
@@ -302,10 +322,10 @@
             <select class="form-select" x-model="form.user_id" @change="onOwnerChange()">
               <option value="" x-text="t('— 管理员共享规则 —','— Shared (admin) —')"></option>
               <template x-for="u in users" :key="u.id">
-                <option :value="u.id" x-text="u.username + ' · ' + (u.tun_ip || '-')"></option>
+                <option :value="u.id" x-text="u.username"></option>
               </template>
             </select>
-            <div class="form-text" x-text="t('选择用户后自动填入其隧道地址；该用户在自己的面板里只能看到自己的规则。','Selecting a user fills in their tunnel address; they only see their own rules.')"></div>
+            <div class="form-text" x-text="t('普通用户只能看到自己的规则。','Regular users only see their own rules.')"></div>
           </div>
           <div class="col-12">
             <label class="form-label" x-text="t('备注','Comment')"></label>
@@ -848,7 +868,7 @@
 </div>
 
 <!-- ============================================================
-     Users Modal（隧道用户 == Web 账号）
+     Users Modal（面板账号；配额由所属组决定）
      ============================================================ -->
 <div class="modal fade" id="usersModal" tabindex="-1" aria-labelledby="usersModalLabel">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -858,14 +878,14 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="form-text mb-3" x-text="t('一个用户同时是面板账号与隧道身份：他登录后只能看到自己的规则，隧道也只接受用他的接入码建立的连接。','A user is both a panel account and a tunnel identity: they only see their own rules, and the tunnel only accepts connections made with their access code.')"></div>
+        <div class="form-text mb-3" x-text="t('配额（端口区间、访问码数、隧道数、规则数）由所属用户组决定，在「用户组」页面调整；访问码在「我的访问码」或这里为用户代建。','Quotas (port range, code count, tunnel count, rule count) come from the user\\'s group — adjust them on the Groups page. Access codes are managed per user.')"></div>
 
         <form class="row g-2 align-items-end mb-3" @submit.prevent="saveUser()">
-          <div class="col-md-2">
+          <div class="col-md-3">
             <label class="form-label small mb-1"><span x-text="t('用户名','Username')"></span> <span class="text-danger">*</span></label>
             <input class="form-control form-control-sm" x-model="userForm.username" :placeholder="t('小写字母/数字','lowercase/digits')"/>
           </div>
-          <div class="col-md-2">
+          <div class="col-md-3">
             <label class="form-label small mb-1"><span x-text="t('密码','Password')"></span> <span class="text-danger">*</span></label>
             <input class="form-control form-control-sm" type="password" x-model="userForm.password" :placeholder="t('至少 8 位','min 8 chars')"/>
           </div>
@@ -876,17 +896,14 @@
               <option value="admin" x-text="t('管理员','Admin')"></option>
             </select>
           </div>
-          <div class="col-md-3">
-            <label class="form-label small mb-1" x-text="t('端口区间','Port Range')"></label>
-            <div class="input-group input-group-sm">
-              <input class="form-control" type="number" min="0" max="65535" x-model.number="userForm.port_range_start" placeholder="20000"/>
-              <span class="input-group-text">-</span>
-              <input class="form-control" type="number" min="0" max="65535" x-model.number="userForm.port_range_end" placeholder="20099"/>
-            </div>
-          </div>
-          <div class="col-md-1">
-            <label class="form-label small mb-1" x-text="t('规则上限','Max')"></label>
-            <input class="form-control form-control-sm" type="number" min="0" x-model.number="userForm.max_rules" placeholder="0"/>
+          <div class="col-md-2">
+            <label class="form-label small mb-1" x-text="t('用户组','Group')"></label>
+            <select class="form-select form-select-sm" x-model="userForm.group_id">
+              <option value="" x-text="t('（默认组）','(default)')"></option>
+              <template x-for="g in groups" :key="g.id">
+                <option :value="g.id" x-text="g.name"></option>
+              </template>
+            </select>
           </div>
           <div class="col-md-2">
             <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="userSaving">
@@ -894,7 +911,7 @@
             </button>
           </div>
           <div class="col-12">
-            <div class="form-text" x-text="t('端口区间限定该用户可用的监听端口，规则上限为 0 表示不限。隧道地址由服务端自动分配。','The port range limits which listen ports the user may use; 0 max rules means unlimited. The tunnel address is assigned automatically.')"></div>
+            <div class="form-text" x-text="t('管理员不受配额约束；普通用户的配额完全由所属组决定。','Admins are not quota-bound; a regular user\\'s quotas come entirely from their group.')"></div>
           </div>
         </form>
 
@@ -903,10 +920,9 @@
             <thead><tr>
               <th x-text="t('用户名','Username')"></th>
               <th x-text="t('角色','Role')"></th>
-              <th x-text="t('隧道地址','Tunnel IP')"></th>
-              <th x-text="t('隧道','Tunnel')"></th>
-              <th x-text="t('端口区间','Port Range')"></th>
-              <th x-text="t('规则数','Rules')"></th>
+              <th x-text="t('用户组','Group')"></th>
+              <th x-text="t('访问码','Codes')"></th>
+              <th x-text="t('隧道在线','Online')"></th>
               <th x-text="t('状态','Status')"></th>
               <th></th>
             </tr></thead>
@@ -915,13 +931,13 @@
                 <tr>
                   <td class="small fw-semibold" x-text="u.username"></td>
                   <td><span class="badge rounded-pill" :class="u.role==='admin' ? 'text-bg-primary' : 'text-bg-secondary'" x-text="u.role==='admin' ? t('管理员','Admin') : t('用户','User')"></span></td>
-                  <td class="font-monospace small" x-text="u.tun_ip || '-'"></td>
-                  <td><span class="badge rounded-pill" :class="u.tunnel_online ? 'text-bg-success' : 'text-bg-light text-muted'" x-text="u.tunnel_online ? t('在线','Online') : t('离线','Offline')"></span></td>
-                  <td class="font-monospace small" x-text="u.port_range_start ? (u.port_range_start + '-' + u.port_range_end) : t('未分配','none')"></td>
-                  <td class="small" x-text="u.rule_count + (u.max_rules ? ' / ' + u.max_rules : '')"></td>
+                  <td class="small" x-text="u.role==='admin' ? '—' : (u.group_name || t('默认组','default'))"></td>
+                  <td class="small" x-text="u.role==='admin' ? '—' : u.access_code_count"></td>
+                  <td><span class="badge rounded-pill" :class="u.tunnel_online ? 'text-bg-success' : 'text-bg-light text-muted'"
+                            x-text="u.role==='admin' ? '—' : (u.tunnel_online ? t('在线','Online') : t('离线','Offline'))"></span></td>
                   <td><span class="badge rounded-pill" :class="u.disabled ? 'text-bg-danger' : 'text-bg-success'" x-text="u.disabled ? t('已停用','Disabled') : t('正常','Active')"></span></td>
                   <td class="text-end text-nowrap">
-                    <button class="btn btn-sm btn-outline-primary btn-icon" @click="showAccessCode(u)" :title="t('接入码','Access code')"><i class="bi bi-key"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary btn-icon" @click="editUser(u)" :title="t('编辑','Edit')"><i class="bi bi-pencil"></i></button>
                     <button class="btn btn-sm btn-outline-secondary btn-icon" @click="toggleUserDisabled(u)" :title="u.disabled ? t('启用','Enable') : t('停用','Disable')">
                       <i class="bi" :class="u.disabled ? 'bi-play' : 'bi-pause'"></i>
                     </button>
@@ -929,30 +945,270 @@
                   </td>
                 </tr>
               </template>
-              <tr x-show="users.length===0"><td colspan="8" class="text-center text-muted small py-3" x-text="t('暂无用户','No users')"></td></tr>
+              <tr x-show="users.length===0"><td colspan="7" class="text-center text-muted small py-3" x-text="t('暂无用户','No users')"></td></tr>
             </tbody>
           </table>
         </div>
 
-        <!-- 接入码 -->
-        <div class="mt-3" x-show="accessCode.code" x-cloak>
+        <!-- 编辑用户 -->
+        <div class="mt-3 pt-3 border-top" x-show="userEdit.id" x-cloak>
+          <h6 class="mb-2"><i class="bi bi-pencil me-1"></i><span x-text="t('编辑用户','Edit User')"></span> — <span class="fw-semibold" x-text="userEdit.username"></span></h6>
+          <form class="row g-2 align-items-end" @submit.prevent="saveUserEdit()">
+            <div class="col-md-3">
+              <label class="form-label small mb-1" x-text="t('新密码（留空不改）','New password (blank = keep)')"></label>
+              <input class="form-control form-control-sm" type="password" x-model="userEdit.password"/>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small mb-1" x-text="t('用户组','Group')"></label>
+              <select class="form-select form-select-sm" x-model="userEdit.group_id">
+                <option value="" x-text="t('（默认组）','(default)')"></option>
+                <template x-for="g in groups" :key="g.id">
+                  <option :value="g.id" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <button type="submit" class="btn btn-primary btn-sm w-100" x-text="t('保存','Save')"></button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     Access Codes Modal（每个访问码 = 一份隧道凭据，绑定一台设备）
+     ============================================================ -->
+<div class="modal fade" id="codesModal" tabindex="-1" aria-labelledby="codesModalLabel">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="codesModalLabel"><i class="bi bi-key me-2"></i><span x-text="t('我的访问码','My Access Codes')"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-text mb-3" x-text="t('每个访问码是一条独立隧道：独立地址、独立密钥，首次连接后绑定到那台设备。换机器时先解绑再重连。','Each access code is an independent tunnel: its own address and key, bound to the first device that connects. Unbind before moving to a new machine.')"></div>
+
+        <form class="row g-2 align-items-end mb-3" @submit.prevent="createCode()">
+          <div class="col-md-6">
+            <label class="form-label small mb-1" x-text="t('访问码名称','Access Code Name')"></label>
+            <input class="form-control form-control-sm" x-model="codeForm.name" :placeholder="t('如：家里的服务器','e.g. home server')"/>
+          </div>
+          <div class="col-md-3" style="display:none" x-show="isAdmin && codesScopeUserId">
+            <input class="form-control form-control-sm" :value="codeOwnerName(codesScopeUserId)" readonly/>
+          </div>
+          <div class="col-md-3">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="codeSaving">
+              <span x-text="t('创建访问码','Create Code')"></span>
+            </button>
+          </div>
+          <div class="col-12">
+            <div class="form-text" x-text="t('创建后点「接入码」复制整串凭据，粘贴到 pf-client 即可连接。','After creating, click the key icon to copy the code, then paste it into pf-client.')"></div>
+          </div>
+        </form>
+
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead><tr>
+              <th x-text="t('名称','Name')"></th>
+              <th style="display:none" x-show="!codesScopeUserId" x-text="t('归属','Owner')"></th>
+              <th x-text="t('隧道地址','Tunnel IP')"></th>
+              <th x-text="t('隧道','Tunnel')"></th>
+              <th x-text="t('绑定设备','Bound Device')"></th>
+              <th x-text="t('最近活跃','Last Seen')"></th>
+              <th x-text="t('状态','Status')"></th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              <template x-for="c in codes" :key="c.id">
+                <tr>
+                  <td class="small fw-semibold" x-text="c.name"></td>
+                  <td class="small" style="display:none" x-show="!codesScopeUserId" x-text="c.user_name || c.user_id"></td>
+                  <td class="font-monospace small" x-text="c.tun_ip"></td>
+                  <td><span class="badge rounded-pill" :class="c.online ? 'text-bg-success' : 'text-bg-light text-muted'" x-text="c.online ? t('在线','Online') : t('离线','Offline')"></span></td>
+                  <td class="small">
+                    <template x-if="c.device_label">
+                      <span><i class="bi bi-hdd me-1"></i><span class="font-monospace" x-text="c.device_label"></span></span>
+                    </template>
+                    <template x-if="!c.device_label">
+                      <span class="text-muted" x-text="t('未绑定（下次连接自动绑定）','not bound (auto-binds on next connect)')"></span>
+                    </template>
+                  </td>
+                  <td class="small text-muted" x-text="c.last_seen_at ? fmtDateTime(c.last_seen_at) : '—'"></td>
+                  <td><span class="badge rounded-pill" :class="c.disabled ? 'text-bg-danger' : 'text-bg-success'" x-text="c.disabled ? t('已停用','Disabled') : t('正常','Active')"></span></td>
+                  <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-primary btn-icon" @click="showCodeText(c)" :title="t('接入码','Access code')"><i class="bi bi-key"></i></button>
+                    <button class="btn btn-sm btn-outline-warning btn-icon" @click="unbindCode(c)" x-show="c.device_label"
+                            :title="t('解绑设备','Unbind device')"><i class="bi bi-link-slash"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary btn-icon" @click="toggleCodeDisabled(c)"
+                            :title="c.disabled ? t('启用','Enable') : t('停用','Disable')">
+                      <i class="bi" :class="c.disabled ? 'bi-play' : 'bi-pause'"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger btn-icon" @click="deleteCode(c)" :title="t('删除','Delete')"><i class="bi bi-trash"></i></button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="codes.length===0"><td colspan="8" class="text-center text-muted small py-3" x-text="t('还没有访问码','No access codes')"></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 接入码文本 -->
+        <div class="mt-3" x-show="codeText.code" x-cloak>
           <hr/>
-          <h6 class="mb-2"><i class="bi bi-key me-1"></i><span x-text="t('接入码','Access Code')"></span> — <span class="fw-semibold" x-text="accessCode.username"></span></h6>
-          <div class="alert alert-warning py-2 small" x-text="t('接入码等同于密码，请通过可信渠道发给该用户。粘贴到 pf-client 的输入框即可连接。','The access code is equivalent to a password — deliver it over a trusted channel. The user pastes it into pf-client to connect.')"></div>
+          <h6 class="mb-2"><i class="bi bi-key me-1"></i><span x-text="t('接入码','Access Code')"></span> — <span class="fw-semibold" x-text="codeText.name"></span></h6>
+          <div class="alert alert-warning py-2 small" x-text="t('接入码等同于密码：它内含地址与密钥，请通过可信渠道交付。每个访问码只能绑定一台设备。','The access code is equivalent to a password: it embeds the address and key. Deliver it over a trusted channel. Each code binds to one device.')"></div>
           <div class="input-group input-group-sm mb-2">
-            <input class="form-control font-monospace" :value="accessCode.code" readonly/>
-            <button class="btn btn-outline-secondary btn-icon" @click="copyText(accessCode.code, '接入码已复制', 'Access code copied')">
+            <input class="form-control font-monospace" :value="codeText.code" readonly/>
+            <button class="btn btn-outline-secondary btn-icon" @click="copyText(codeText.code, '接入码已复制', 'Access code copied')">
               <i class="bi bi-clipboard"></i><span class="d-none d-sm-inline" x-text="t('复制','Copy')"></span>
             </button>
           </div>
           <div class="row g-2 small text-muted">
-            <div class="col-md-6"><span x-text="t('中转机地址','Relay address')"></span>: <span class="font-monospace" x-text="accessCode.addr"></span></div>
-            <div class="col-md-6"><span x-text="t('用户 ID','User ID')"></span>: <span class="font-monospace" x-text="accessCode.user_id"></span></div>
+            <div class="col-md-4"><span x-text="t('中转机地址','Relay address')"></span>: <span class="font-monospace" x-text="codeText.addr"></span></div>
+            <div class="col-md-4"><span x-text="t('隧道地址','Tunnel IP')"></span>: <span class="font-monospace" x-text="codeText.tun_ip"></span></div>
+            <div class="col-md-4"><span x-text="t('访问码 ID','Code ID')"></span>: <span class="font-monospace" x-text="codeText.code_id"></span></div>
           </div>
-          <button class="btn btn-sm btn-outline-danger mt-2" @click="regenerateSecret(accessCode.user_id)">
+          <button class="btn btn-sm btn-outline-danger mt-2" @click="regenerateCode(codeText.code_id)">
             <i class="bi bi-arrow-repeat me-1"></i><span x-text="t('重新生成密钥（旧接入码立即失效）','Regenerate key (invalidates the old code)')"></span>
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     Groups Modal（配额载体；全局设置为天花板）
+     ============================================================ -->
+<div class="modal fade" id="groupsModal" tabindex="-1" aria-labelledby="groupsModalLabel">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="groupsModalLabel"><i class="bi bi-collection me-2"></i><span x-text="t('用户组','User Groups')"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-text mb-3" x-text="t('组是配额的载体：端口区间、访问码数、并发隧道数、规则数。某项留 0 表示取「全局设置」里的值。','Groups carry the quotas: port range, code count, concurrent tunnels, rule count. A value of 0 falls back to Global Settings.')"></div>
+
+        <form class="row g-2 align-items-end mb-3" @submit.prevent="saveGroup()">
+          <div class="col-md-2">
+            <label class="form-label small mb-1"><span x-text="t('组名','Name')"></span> <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm" x-model="groupForm.name"/>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small mb-1" x-text="t('端口区间','Port Range')"></label>
+            <div class="input-group input-group-sm">
+              <input class="form-control" type="number" min="0" max="65535" x-model.number="groupForm.port_range_start" placeholder="0"/>
+              <span class="input-group-text">-</span>
+              <input class="form-control" type="number" min="0" max="65535" x-model.number="groupForm.port_range_end" placeholder="0"/>
+            </div>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label small mb-1" x-text="t('码上限','Codes')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_access_codes" placeholder="0"/>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label small mb-1" x-text="t('隧道上限','Tunnels')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_tunnels" placeholder="0"/>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label small mb-1" x-text="t('规则上限','Rules')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_rules" placeholder="0"/>
+          </div>
+          <div class="col-md-2">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" x-model="groupForm.is_default" id="chkGroupDefault"/>
+              <label class="form-check-label small" for="chkGroupDefault" x-text="t('设为默认组','Default group')"></label>
+            </div>
+          </div>
+          <div class="col-md-2">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="groupSaving">
+              <span x-text="t('创建组','Create Group')"></span>
+            </button>
+          </div>
+        </form>
+
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead><tr>
+              <th x-text="t('组名','Name')"></th>
+              <th x-text="t('端口区间','Port Range')"></th>
+              <th x-text="t('码上限','Codes')"></th>
+              <th x-text="t('隧道上限','Tunnels')"></th>
+              <th x-text="t('规则上限','Rules')"></th>
+              <th x-text="t('成员数','Members')"></th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              <template x-for="g in groups" :key="g.id">
+                <tr>
+                  <td class="small fw-semibold">
+                    <span x-text="g.name"></span>
+                    <span class="badge rounded-pill text-bg-secondary ms-1" x-show="g.is_default" x-text="t('默认','default')"></span>
+                  </td>
+                  <td class="font-monospace small" x-text="g.port_range_start ? (g.port_range_start + '-' + g.port_range_end) : quotaFallback()"></td>
+                  <td class="small" x-text="g.max_access_codes || quotaFallback()"></td>
+                  <td class="small" x-text="g.max_tunnels || quotaFallback()"></td>
+                  <td class="small" x-text="g.max_rules || quotaFallback()"></td>
+                  <td class="small" x-text="g.member_count"></td>
+                  <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-secondary btn-icon" @click="makeGroupDefault(g)" x-show="!g.is_default"
+                            :title="t('设为默认组','Set as default')"><i class="bi bi-star"></i></button>
+                    <button class="btn btn-sm btn-outline-danger btn-icon" @click="deleteGroup(g)" :title="t('删除','Delete')"><i class="bi bi-trash"></i></button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="groups.length===0"><td colspan="7" class="text-center text-muted small py-3" x-text="t('暂无用户组','No groups')"></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     Global Settings Modal（配额天花板）
+     ============================================================ -->
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="settingsModalLabel"><i class="bi bi-sliders me-2"></i><span x-text="t('全局设置','Global Settings')"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning py-2 small" x-text="t('这里是配额的天花板：任何用户组的配置都不能突破它。收紧前请先检查各用户组。','These are the ceilings: no group may exceed them. Check existing groups before tightening.')"></div>
+        <form class="row g-2" @submit.prevent="saveSettings()">
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('全局端口区间（组的区间必须落在其中）','Global port range (group ranges must fall inside)')"></label>
+            <div class="input-group input-group-sm">
+              <input class="form-control" type="number" min="0" max="65535" x-model.number="settingsForm.port_range_start"/>
+              <span class="input-group-text">-</span>
+              <input class="form-control" type="number" min="0" max="65535" x-model.number="settingsForm.port_range_end"/>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small mb-1" x-text="t('每人访问码上限','Access codes / user')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_access_codes_per_user"/>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small mb-1" x-text="t('每人并发隧道上限','Concurrent tunnels / user')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_tunnels_per_user"/>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small mb-1" x-text="t('每人规则上限','Rules / user')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_rules_per_user"/>
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="settingsSaving" x-text="t('保存','Save')"></button>
+          </div>
+          <div class="col-12">
+            <div class="form-text" x-text="t('0 表示不限。改动即时生效，正在使用的隧道与规则不受影响。','0 means unlimited. Changes take effect immediately; existing tunnels and rules are unaffected.')"></div>
+          </div>
+        </form>
       </div>
     </div>
   </div>
@@ -972,9 +1228,27 @@
         <dl class="row small mb-3">
           <dt class="col-5" x-text="t('用户名','Username')"></dt><dd class="col-7" x-text="me.username"></dd>
           <dt class="col-5" x-text="t('角色','Role')"></dt><dd class="col-7" x-text="me.role==='admin' ? t('管理员','Admin') : t('普通用户','User')"></dd>
-          <dt class="col-5" x-text="t('隧道地址','Tunnel IP')"></dt><dd class="col-7 font-monospace" x-text="me.tun_ip || '-'"></dd>
-          <dt class="col-5" x-text="t('端口区间','Port Range')"></dt><dd class="col-7 font-monospace" x-text="me.port_range_start ? (me.port_range_start + '-' + me.port_range_end) : t('不限','unlimited')"></dd>
-          <dt class="col-5" x-text="t('规则上限','Rule Quota')"></dt><dd class="col-7" x-text="me.max_rules ? me.max_rules : t('不限','unlimited')"></dd>
+          <dt class="col-5" x-text="t('用户组','Group')"></dt><dd class="col-7" x-text="me.group_name || t('默认组','default')"></dd>
+          <dt class="col-5" x-text="t('端口区间','Port Range')"></dt>
+          <dd class="col-7 font-monospace">
+            <span x-text="me.quota && me.quota.port_range_start ? (me.quota.port_range_start + '-' + me.quota.port_range_end) : t('不限','unlimited')"></span>
+            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.port_source)"></span>
+          </dd>
+          <dt class="col-5" x-text="t('访问码上限','Code Quota')"></dt>
+          <dd class="col-7">
+            <span x-text="me.quota && me.quota.max_access_codes ? me.quota.max_access_codes : t('不限','unlimited')"></span>
+            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.access_code_source)"></span>
+          </dd>
+          <dt class="col-5" x-text="t('并发隧道上限','Tunnel Quota')"></dt>
+          <dd class="col-7">
+            <span x-text="me.quota && me.quota.max_tunnels ? me.quota.max_tunnels : t('不限','unlimited')"></span>
+            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.tunnel_source)"></span>
+          </dd>
+          <dt class="col-5" x-text="t('规则上限','Rule Quota')"></dt>
+          <dd class="col-7">
+            <span x-text="me.quota && me.quota.max_rules ? me.quota.max_rules : t('不限','unlimited')"></span>
+            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.rule_source)"></span>
+          </dd>
         </dl>
         <div class="alert alert-warning py-2 small" x-show="me.must_change_password" x-cloak
              x-text="t('这是初始密码，请立即修改。','This is the initial password — change it now.')"></div>
@@ -1151,14 +1425,29 @@ function portForwardApp() {
 	    _sessionsModal: null,
 	    _sessionsTimer: null,
 	    // 身份与用户管理
-	    me: { id:'', username:'', role:'', tun_ip:'', port_range_start:0, port_range_end:0, max_rules:0, must_change_password:false },
+	    me: { id:'', username:'', role:'', group_id:'', group_name:'', quota:{}, must_change_password:false },
 	    users: [],
-	    userForm: { username:'', password:'', role:'user', port_range_start:null, port_range_end:null, max_rules:0 },
+	    groups: [],
+	    myCodes: [],          // 规则表单用的本人访问码（普通用户）
+	    codes: [],            // 访问码弹窗列表
+	    codesScopeUserId: '', // 弹窗当前的作用域（空=全部/本人）
+	    codeForm: { name:'', user_id:'' },
+	    codeSaving: false,
+	    codeText: { code_id:'', name:'', addr:'', secret:'', code:'', tun_ip:'' },
+	    userForm: { username:'', password:'', role:'user', group_id:'' },
+	    userEdit: { id:'', username:'', password:'', group_id:'' },
 	    userSaving: false,
-	    accessCode: { user_id:'', username:'', addr:'', secret:'', code:'' },
+	    groupForm: { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false },
+	    groupSaving: false,
+	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0 },
+	    settingsSaving: false,
+	    globalSettings: null, // 组页面回退值展示用
 	    pwForm: { old_password:'', new_password:'' },
 	    pwSaving: false,
 	    _usersModal: null,
+	    _codesModal: null,
+	    _groupsModal: null,
+	    _settingsModal: null,
 	    _accountModal: null,
 
     get filteredRules() {
@@ -1180,11 +1469,20 @@ function portForwardApp() {
 	      return this.me.role === 'admin'
 	    },
 
+    // 普通用户建规则时目标地址的默认值：第一个启用中的访问码。
+    defaultCodeTunIP() {
+      const c = this.myCodes.find(x => !x.disabled)
+      return c ? c.tun_ip : ''
+    },
+
     async init() {
       this._ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'))
       this._wslModal  = new bootstrap.Modal(document.getElementById('wslModal'))
       this._aclModal = new bootstrap.Modal(document.getElementById('aclModal'))
       this._usersModal = new bootstrap.Modal(document.getElementById('usersModal'))
+      this._codesModal = new bootstrap.Modal(document.getElementById('codesModal'))
+      this._groupsModal = new bootstrap.Modal(document.getElementById('groupsModal'))
+      this._settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'))
       this._accountModal = new bootstrap.Modal(document.getElementById('accountModal'))
       this._sessionsModal = new bootstrap.Modal(document.getElementById('sessionsModal'))
       const sessionsModalEl = document.getElementById('sessionsModal')
@@ -1209,8 +1507,8 @@ function portForwardApp() {
 	      // 身份必须先拿到：菜单显隐、规则表单的目标地址锁定、数据作用域
 	      // 都依赖它。拿不到就说明未登录，直接跳登录页。
 	      if (!await this.loadMe()) return
-	      const tasks = [this.refresh()]
-	      if (this.isAdmin) tasks.push(this.loadWSLCapability(), this.loadUsers())
+	      const tasks = [this.refresh(), this.loadMyCodes()]
+	      if (this.isAdmin) tasks.push(this.loadWSLCapability(), this.loadUsers(), this.loadGroups())
 	      await Promise.all(tasks)
 	      if (this.me.must_change_password) this.showAccountModal()
 	      this._refreshTimer = setInterval(() => this.refresh({ background: true }), 8000)
@@ -1273,7 +1571,6 @@ function portForwardApp() {
     // --- 用户管理（仅管理员）---
 
     showUsersModal() {
-      this.accessCode = { user_id:'', username:'', addr:'', secret:'', code:'' }
       this.loadUsers()
       this._usersModal.show()
     },
@@ -1284,6 +1581,33 @@ function portForwardApp() {
         const d = await res.json()
         if (d.success) this.users = d.data || []
       } catch { /* 静默 */ }
+    },
+
+    editUser(u) {
+      this.userEdit = { id: u.id, username: u.username, password: '', group_id: u.role==='admin' ? '' : (u.group_id || '') }
+    },
+
+    async saveUserEdit() {
+      this.userSaving = true
+      try {
+        const body = { group_id: this.userEdit.group_id }
+        if (this.userEdit.password) body.password = this.userEdit.password
+        const res = await fetch('/api/users/' + this.userEdit.id, {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('用户已更新','User updated'))
+          this.userEdit = { id:'', username:'', password:'', group_id:'' }
+          await this.loadUsers()
+        } else {
+          showToast('danger', d.message || _t('操作失败','Operation failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.userSaving = false }
     },
 
     async saveUser() {
@@ -1300,54 +1624,21 @@ function portForwardApp() {
             username: this.userForm.username.trim(),
             password: this.userForm.password,
             role: this.userForm.role,
-            comment: '',
-            port_range_start: Number(this.userForm.port_range_start) || 0,
-            port_range_end: Number(this.userForm.port_range_end) || 0,
-            max_rules: Number(this.userForm.max_rules) || 0
+            group_id: this.userForm.group_id,
+            comment: ''
           })
         })
         const d = await res.json()
         if (d.success) {
-          showToast('success', d.message || _t('用户已创建','User created'))
-          this.userForm = { username:'', password:'', role:'user', port_range_start:null, port_range_end:null, max_rules:0 }
+          showToast('success', d.message || _t('用户已创建，请在「我的访问码」为其创建访问码','User created — create an access code for them'))
+          this.userForm = { username:'', password:'', role:'user', group_id:'' }
           await this.loadUsers()
-          // 创建完立刻把接入码摆出来：管理员下一步一定是要把它发给用户。
-          if (d.data && d.data.id) this.showAccessCode(d.data)
         } else {
           showToast('danger', d.message || _t('创建失败','Create failed'))
         }
       } catch (e) {
         showToast('danger', _t('网络错误: ','Network error: ') + e.message)
       } finally { this.userSaving = false }
-    },
-
-    async showAccessCode(u) {
-      try {
-        const res = await fetch('/api/users/' + u.id + '/access-code')
-        const d = await res.json()
-        if (d.success) this.accessCode = d.data
-        else showToast('danger', d.message || _t('获取接入码失败','Failed to get access code'))
-      } catch (e) {
-        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
-      }
-    },
-
-    async regenerateSecret(id) {
-      showConfirm(_t('重新生成密钥后，该用户当前使用的接入码将立即失效，需要重新配置客户端。继续？',
-                     'Regenerating the key immediately invalidates the access code in use; the client must be reconfigured. Continue?'), async () => {
-        try {
-          const res = await fetch('/api/users/' + id + '/regenerate-secret', { method: 'POST' })
-          const d = await res.json()
-          if (d.success) {
-            this.accessCode = d.data
-            showToast('success', d.message || _t('密钥已重新生成','Key regenerated'))
-          } else {
-            showToast('danger', d.message || _t('操作失败','Operation failed'))
-          }
-        } catch (e) {
-          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
-        }
-      })
     },
 
     async toggleUserDisabled(u) {
@@ -1366,14 +1657,13 @@ function portForwardApp() {
     },
 
     async deleteUser(u) {
-      showConfirm(_t('删除用户 ' + u.username + ' ？其隧道凭据将立即失效。',
-                     'Delete user ' + u.username + '? Their tunnel credentials stop working immediately.'), async () => {
+      showConfirm(_t('删除用户 ' + u.username + ' ？其全部访问码与在线隧道将立即失效。',
+                     'Delete user ' + u.username + '? All their access codes and tunnels stop working immediately.'), async () => {
         try {
           const res = await fetch('/api/users/' + u.id, { method: 'DELETE' })
           const d = await res.json()
           if (d.success) {
             showToast('success', d.message || _t('用户已删除','User deleted'))
-            if (this.accessCode.user_id === u.id) this.accessCode = { user_id:'', username:'', addr:'', secret:'', code:'' }
             this.loadUsers()
           } else {
             showToast('danger', d.message || _t('删除失败','Delete failed'))
@@ -1384,11 +1674,291 @@ function portForwardApp() {
       })
     },
 
-    // 管理员在规则表单里换归属用户时，目标地址跟着换成那个用户的隧道地址。
-    onOwnerChange() {
-      const u = this.users.find(x => x.id === this.form.user_id)
-      if (u && u.tun_ip) this.form.target_addr = u.tun_ip
+    // --- 访问码（自助；管理员可代管他人）---
+
+    showCodesModal(scopeUserId) {
+      this.codesScopeUserId = scopeUserId || ''
+      this.codeForm = { name:'', user_id: this.codesScopeUserId }
+      this.codeText = { code_id:'', name:'', addr:'', secret:'', code:'', tun_ip:'' }
+      this.loadCodes()
+      this._codesModal.show()
     },
+
+    async loadCodes() {
+      try {
+        const url = this.codesScopeUserId ? '/api/access-codes?user_id=' + encodeURIComponent(this.codesScopeUserId) : '/api/access-codes'
+        const res = await fetch(url)
+        const d = await res.json()
+        if (d.success) this.codes = d.data || []
+      } catch { /* 静默 */ }
+    },
+
+    // 规则表单用的本人访问码列表（普通用户）。停用的码也要列出来——让用户
+    // 看到「它存在但不可用」，比从列表里消失更能解释规则为什么连不通。
+    async loadMyCodes() {
+      if (this.isAdmin) { this.myCodes = []; return }
+      try {
+        const res = await fetch('/api/access-codes')
+        const d = await res.json()
+        if (d.success) this.myCodes = d.data || []
+      } catch { /* 静默 */ }
+    },
+
+    codeOwnerName(id) {
+      const u = this.users.find(x => x.id === id)
+      return u ? u.username : id
+    },
+
+    async createCode() {
+      this.codeSaving = true
+      try {
+        const res = await fetch('/api/access-codes', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ name: this.codeForm.name.trim(), user_id: this.codeForm.user_id })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('访问码已创建','Access code created'))
+          this.codeForm.name = ''
+          await this.loadCodes()
+          await this.loadMyCodes()
+          // 创建完立刻把接入码摆出来：下一步一定是复制去粘贴。
+          if (d.data && d.data.id) this.showCodeText(d.data)
+        } else {
+          showToast('danger', d.message || _t('创建失败','Create failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.codeSaving = false }
+    },
+
+    async showCodeText(c) {
+      try {
+        const res = await fetch('/api/access-codes/' + c.id + '/code')
+        const d = await res.json()
+        if (d.success) this.codeText = d.data
+        else showToast('danger', d.message || _t('获取接入码失败','Failed to get access code'))
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      }
+    },
+
+    async regenerateCode(id) {
+      showConfirm(_t('重新生成密钥后，当前接入码立即失效，绑定该访问码的客户端需要重新配置。继续？',
+                     'Regenerating the key immediately invalidates the code; the bound client must be reconfigured. Continue?'), async () => {
+        try {
+          const res = await fetch('/api/access-codes/' + id + '/regenerate', { method: 'POST' })
+          const d = await res.json()
+          if (d.success) {
+            this.codeText = d.data
+            showToast('success', d.message || _t('密钥已重新生成','Key regenerated'))
+            this.loadCodes()
+          } else {
+            showToast('danger', d.message || _t('操作失败','Operation failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
+    },
+
+    async unbindCode(c) {
+      showConfirm(_t('解绑后当前设备的连接会立即断开，下次连接会绑定到新设备。继续？',
+                     'Unbinding disconnects the current device immediately; the next connection binds a new device. Continue?'), async () => {
+        try {
+          const res = await fetch('/api/access-codes/' + c.id + '/unbind', { method: 'POST' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('设备绑定已解除','Device unbound'))
+            this.loadCodes()
+          } else {
+            showToast('danger', d.message || _t('操作失败','Operation failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
+    },
+
+    async toggleCodeDisabled(c) {
+      try {
+        const res = await fetch('/api/access-codes/' + c.id, {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ disabled: !c.disabled })
+        })
+        const d = await res.json()
+        if (d.success) {
+          this.loadCodes()
+          this.loadMyCodes()
+        } else {
+          showToast('danger', d.message || _t('操作失败','Operation failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      }
+    },
+
+    async deleteCode(c) {
+      showConfirm(_t('删除访问码「' + c.name + '」？其隧道地址会被回收，指向它的规则必须先删除或改掉。',
+                     'Delete access code "' + c.name + '"? Its tunnel address is reclaimed; rules pointing at it must be removed first.'), async () => {
+        try {
+          const res = await fetch('/api/access-codes/' + c.id, { method: 'DELETE' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('访问码已删除','Access code deleted'))
+            if (this.codeText.code_id === c.id) this.codeText = { code_id:'', name:'', addr:'', secret:'', code:'', tun_ip:'' }
+            this.loadCodes()
+            this.loadMyCodes()
+          } else {
+            showToast('danger', d.message || _t('删除失败','Delete failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
+    },
+
+    // --- 用户组（仅管理员）---
+
+    showGroupsModal() {
+      this.loadGroups()
+      this._groupsModal.show()
+    },
+
+    async loadGroups() {
+      try {
+        const res = await fetch('/api/groups')
+        const d = await res.json()
+        if (d.success) this.groups = d.data || []
+      } catch { /* 静默 */ }
+    },
+
+    // 组页面上「取全局值」的展示文案：0 = 未单独配置，实际值来自全局设置。
+    quotaFallback() {
+      return '→ ' + _t('全局默认','global default')
+    },
+
+    async saveGroup() {
+      if (!this.groupForm.name.trim()) {
+        showToast('warning', _t('请填写组名','Enter a group name'))
+        return
+      }
+      this.groupSaving = true
+      try {
+        const res = await fetch('/api/groups', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            name: this.groupForm.name.trim(),
+            comment: '',
+            port_range_start: Number(this.groupForm.port_range_start) || 0,
+            port_range_end: Number(this.groupForm.port_range_end) || 0,
+            max_access_codes: Number(this.groupForm.max_access_codes) || 0,
+            max_tunnels: Number(this.groupForm.max_tunnels) || 0,
+            max_rules: Number(this.groupForm.max_rules) || 0,
+            is_default: !!this.groupForm.is_default
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('用户组已创建','Group created'))
+          this.groupForm = { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false }
+          this.loadGroups()
+        } else {
+          showToast('danger', d.message || _t('创建失败','Create failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.groupSaving = false }
+    },
+
+    async makeGroupDefault(g) {
+      try {
+        const res = await fetch('/api/groups/' + g.id, {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ is_default: true })
+        })
+        const d = await res.json()
+        if (d.success) this.loadGroups()
+        else showToast('danger', d.message || _t('操作失败','Operation failed'))
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      }
+    },
+
+    async deleteGroup(g) {
+      showConfirm(_t('删除用户组「' + g.name + '」？','Delete group "' + g.name + '"?'), async () => {
+        try {
+          const res = await fetch('/api/groups/' + g.id, { method: 'DELETE' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('用户组已删除','Group deleted'))
+            this.loadGroups()
+          } else {
+            showToast('danger', d.message || _t('删除失败','Delete failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
+    },
+
+    // --- 全局设置（仅管理员）---
+
+    async showSettingsModal() {
+      try {
+        const res = await fetch('/api/settings')
+        const d = await res.json()
+        if (d.success) {
+          this.settingsForm = d.data
+          this.globalSettings = d.data
+          this._settingsModal.show()
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      }
+    },
+
+    async saveSettings() {
+      this.settingsSaving = true
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            port_range_start: Number(this.settingsForm.port_range_start) || 0,
+            port_range_end: Number(this.settingsForm.port_range_end) || 0,
+            max_access_codes_per_user: Number(this.settingsForm.max_access_codes_per_user) || 0,
+            max_tunnels_per_user: Number(this.settingsForm.max_tunnels_per_user) || 0,
+            max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('全局设置已更新','Settings updated'))
+          this.globalSettings = d.data
+          this._settingsModal.hide()
+        } else {
+          showToast('danger', d.message || _t('保存失败','Save failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.settingsSaving = false }
+    },
+
+    // 配额来源的展示标签。
+    quotaSourceLabel(src) {
+      if (src === 'group') return _t('（来自用户组）','(from group)')
+      if (src === 'global') return _t('（全局默认）','(global default)')
+      if (src === 'admin') return _t('（管理员不受限）','(admin, unlimited)')
+      return ''
+    },
+
+    // 管理员在规则表单里换归属用户时，目标地址清空（管理员手填任意主机）。
+    onOwnerChange() {},
 
     // copyText 是通用剪贴板写入：非 HTTPS（面板常跑在明文内网 IP 上）时
     // navigator.clipboard 是 undefined，必须走 textarea + execCommand 降级。
@@ -1473,7 +2043,7 @@ function portForwardApp() {
 	        listen_addr:'0.0.0.0',
 	        listen_port: null,
 	        protocol:'tcp',
-	        target_addr: this.isAdmin ? '' : (this.me.tun_ip || ''),
+	        target_addr: this.isAdmin ? '' : this.defaultCodeTunIP(),
 	        target_port: null,
 	        comment:'',
 	        user_id: this.isAdmin ? '' : this.me.id,

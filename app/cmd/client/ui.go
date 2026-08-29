@@ -86,7 +86,7 @@ func (s *uiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// 尚未连接过：把上次记住的凭据回填给界面，用户不必重新粘贴接入码。
 		last := loadConfig()
 		snap.Addr = last.Addr
-		snap.UserID = last.UserID
+		snap.CodeID = last.CodeID
 		snap.HasCred = last.complete()
 	}
 	writeJSON(w, http.StatusOK, snap)
@@ -100,7 +100,7 @@ func (s *uiServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Code   string `json:"code"`
 		Addr   string `json:"addr"`
-		UserID string `json:"user_id"`
+		CodeID string `json:"code_id"`
 		Secret string `json:"secret"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -108,7 +108,7 @@ func (s *uiServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 三个字段都空时沿用已保存的凭据（界面上的「连接」按钮不必每次重填）。
-	if strings.TrimSpace(req.Code) == "" && strings.TrimSpace(req.UserID) == "" && strings.TrimSpace(req.Secret) == "" {
+	if strings.TrimSpace(req.Code) == "" && strings.TrimSpace(req.CodeID) == "" && strings.TrimSpace(req.Secret) == "" {
 		saved := loadConfig()
 		if saved.complete() {
 			if a := strings.TrimSpace(req.Addr); a != "" {
@@ -118,7 +118,7 @@ func (s *uiServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	conf, err := parseConnectInput(req.Code, req.Addr, req.UserID, req.Secret)
+	conf, err := parseConnectInput(req.Code, req.Addr, req.CodeID, req.Secret)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

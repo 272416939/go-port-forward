@@ -1,4 +1,7 @@
-// Package users 管理 Web 账号与隧道身份（两者是同一个对象）。
+// Package users 管理 Web 账号、用户组与访问码。
+//
+// 三层关系：Settings（全局天花板）→ UserGroup（配额载体）→ User（归属组）
+// → AccessCode（隧道身份，绑定一台设备）。
 //
 // 这一层的职责边界：所有「谁能做什么」的判定都在这里或调用方 handler 里，
 // storage 只负责存取，tunnelapp 只消费 Identity 查询。
@@ -25,6 +28,15 @@ import (
 // 又让 base64 文本控制在 44 字符（接入码整串仍可一行复制）。
 const TunnelSecretBytes = 32
 
+// TunnelEvictor 让用户服务在停用/解绑/删除访问码时立刻踢掉在线隧道。
+//
+// 不踢的话「停用」只是界面上的一个状态：对方的隧道还在跑，流量照常。解绑更
+// 明显——用户以为已经换到新机器，实际上旧机器还占着那个隧道地址。
+type TunnelEvictor interface {
+	EvictCode(codeID string) bool
+	OnlineCodeIDs() []string
+}
+
 // Service 是用户服务。
 type Service struct {
 	store    storage.Store
@@ -33,10 +45,11 @@ type Service struct {
 	mu         sync.RWMutex
 	tunPool    netip.Prefix
 	tunGateway netip.Addr
-	publicAddr string // 写进接入码的中转机地址（config 的 tunnel.public_addr）
+	publicAddr string        // 写进接入码的中转机地址（config 的 tunnel.public_addr）
+	evictor    TunnelEvictor // 隧道服务端；未启用隧道时为 nil
 }
 
-// New 创建用户服务。tunAddr 是 config 的 tunnel.tun_addr（如 "10.66.0.1/24"）。
+// New 创建用户服务。tunAddr 是 config 的 tunnel.tun_addr（如 "10.66.0.1/16"）。
 func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) (*Service, error) {
 	pool, gw, err := storage.ParseTunnelPrefix(tunAddr)
 	if err != nil {
@@ -51,15 +64,59 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 	}, nil
 }
 
-// TunnelPrefix 返回隧道网段与网关（tunnelapp 校验用）。
+// SetEvictor 注入隧道服务端。隧道晚于用户服务启动（它需要 Identity 查询），
+// 所以这里是二段装配而不是构造参数。
+func (s *Service) SetEvictor(e TunnelEvictor) {
+	s.mu.Lock()
+	s.evictor = e
+	s.mu.Unlock()
+}
+
+func (s *Service) tunnel() TunnelEvictor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.evictor
+}
+
+// TunnelPrefix 返回隧道网段与网关。
 func (s *Service) TunnelPrefix() (netip.Prefix, netip.Addr) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tunPool, s.tunGateway
 }
 
-// List 返回全部用户。
-func (s *Service) List() ([]*models.User, error) { return s.store.ListUsers() }
+// --- 用户 ---
+
+// List 返回全部用户（附带组名与访问码数，供面板展示）。
+func (s *Service) List() ([]*models.User, error) {
+	all, err := s.store.ListUsers()
+	if err != nil {
+		return nil, err
+	}
+	groups, err := s.groupNames()
+	if err != nil {
+		return nil, err
+	}
+	codes, err := s.store.ListAccessCodes()
+	if err != nil {
+		return nil, err
+	}
+	online := s.onlineCodes()
+	perUser := map[string]int{}
+	onlinePerUser := map[string]int{}
+	for _, c := range codes {
+		perUser[c.UserID]++
+		if online[c.ID] {
+			onlinePerUser[c.UserID]++
+		}
+	}
+	for _, u := range all {
+		u.GroupName = groups[u.GroupID]
+		u.AccessCodeCount = perUser[u.ID]
+		u.TunnelOnline = onlinePerUser[u.ID]
+	}
+	return all, nil
+}
 
 // Get 按 ID 取用户。
 func (s *Service) Get(id string) (*models.User, error) { return s.store.GetUser(id) }
@@ -67,50 +124,54 @@ func (s *Service) Get(id string) (*models.User, error) { return s.store.GetUser(
 // GetByName 按用户名取用户。
 func (s *Service) GetByName(name string) (*models.User, error) { return s.store.GetUserByName(name) }
 
-// Create 创建用户：生成密码哈希与隧道密钥，隧道地址由存储层在事务内分配。
+// Create 创建用户。未指定组时落到全局设置里的默认组。
 func (s *Service) Create(req *models.CreateUserRequest) (*models.User, error) {
 	if err := models.ValidateCreateUserRequest(req); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidUser, err)
+	}
+	cfg, err := s.store.Settings()
+	if err != nil {
+		return nil, err
+	}
+	groupID := req.GroupID
+	if groupID == "" && req.Role != models.RoleAdmin {
+		groupID = cfg.DefaultGroupID
+	}
+	if groupID != "" {
+		if _, gerr := s.store.GetGroup(groupID); gerr != nil {
+			return nil, fmt.Errorf("%w: 指定的用户组不存在 | group not found: %s", ErrInvalidUser, groupID)
+		}
 	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		return nil, err
 	}
-	secret, err := auth.RandomSecret(TunnelSecretBytes)
-	if err != nil {
-		return nil, err
-	}
 	u := &models.User{
-		ID:             uuid.NewString(),
-		Username:       req.Username,
-		Role:           req.Role,
-		Comment:        req.Comment,
-		PasswordHash:   hash,
-		TunnelSecret:   secret,
-		PortRangeStart: req.PortRangeStart,
-		PortRangeEnd:   req.PortRangeEnd,
-		MaxRules:       req.MaxRules,
-		CreatedAt:      time.Now(),
+		ID:        uuid.NewString(),
+		Username:  req.Username,
+		Role:      req.Role,
+		GroupID:   groupID,
+		Comment:   req.Comment,
+		PasswordHash: hash,
+		CreatedAt: time.Now(),
 	}
-	pool, gw := s.TunnelPrefix()
-	if err := s.store.CreateUser(u, pool, gw); err != nil {
+	if err := s.store.CreateUser(u); err != nil {
 		return nil, err
 	}
-	logger.S.Infow("用户已创建 | user created", "user", u.Username, "role", u.Role, "tun_ip", u.TunIP)
+	logger.S.Infow("用户已创建 | user created", "user", u.Username, "role", u.Role, "group", groupID)
 	return u, nil
 }
 
-// Update 修改用户属性。改密码或停用都会立刻注销该用户的全部会话——否则
-// 「停用」只是界面上的状态，对方手里的 cookie 依然能用到自然过期。
+// Update 修改用户属性。改密码或停用都会立刻注销该用户的全部会话，停用还会
+// 踢掉他名下所有在线隧道——否则「停用」只是界面上的状态。
 func (s *Service) Update(id string, req *models.UpdateUserRequest) (*models.User, error) {
 	u, err := s.store.GetUser(id)
 	if err != nil {
 		return nil, err
 	}
 	revoke := false
-	// 记下改动前是否为「生效中的管理员」：只有让这样一个账号失效才需要
-	// 检查是否还剩别的管理员。按 req 字段判断会把「停用一个普通用户」也
-	// 卷进来，那是无关的。
+	// 记下改动前是否为「生效中的管理员」：只有让这样一个账号失效才需要检查
+	// 是否还剩别的管理员。
 	wasActiveAdmin := u.Role == models.RoleAdmin && !u.Disabled
 
 	if req.Password != nil {
@@ -132,29 +193,23 @@ func (s *Service) Update(id string, req *models.UpdateUserRequest) (*models.User
 		}
 		u.Role = role
 	}
+	if req.GroupID != nil {
+		gid := strings.TrimSpace(*req.GroupID)
+		if gid != "" {
+			if _, gerr := s.store.GetGroup(gid); gerr != nil {
+				return nil, fmt.Errorf("%w: 指定的用户组不存在 | group not found: %s", ErrInvalidUser, gid)
+			}
+		}
+		u.GroupID = gid
+	}
 	if req.Comment != nil {
 		u.Comment = strings.TrimSpace(*req.Comment)
 	}
-	start, end := u.PortRangeStart, u.PortRangeEnd
-	if req.PortRangeStart != nil {
-		start = *req.PortRangeStart
-	}
-	if req.PortRangeEnd != nil {
-		end = *req.PortRangeEnd
-	}
-	if err := models.ValidatePortRange(start, end); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidUser, err)
-	}
-	u.PortRangeStart, u.PortRangeEnd = start, end
-	if req.MaxRules != nil {
-		if *req.MaxRules < 0 {
-			return nil, fmt.Errorf("%w: 规则数上限不能为负 | max_rules must not be negative", ErrInvalidUser)
-		}
-		u.MaxRules = *req.MaxRules
-	}
+	disableNow := false
 	if req.Disabled != nil {
 		if *req.Disabled && !u.Disabled {
 			revoke = true
+			disableNow = true
 		}
 		u.Disabled = *req.Disabled
 	}
@@ -171,6 +226,9 @@ func (s *Service) Update(id string, req *models.UpdateUserRequest) (*models.User
 	}
 	if revoke && s.sessions != nil {
 		s.sessions.RevokeUser(u.ID)
+	}
+	if disableNow {
+		s.evictUserTunnels(u.ID)
 	}
 	return u, nil
 }
@@ -206,63 +264,34 @@ func (s *Service) ChangeOwnPassword(id, oldPw, newPw string) error {
 	return nil
 }
 
-// Delete 删除用户并注销其会话。
+// Delete 删除用户：连带删掉他的访问码并踢掉在线隧道。
+//
+// 连带删除而不是拒绝：访问码没有独立存在的意义，留着会变成永远无人认领的
+// 孤儿凭据，而它仍然能建立隧道。调用方（handler）负责先确认没有规则引用。
 func (s *Service) Delete(id string) error {
+	codes, err := s.store.ListAccessCodesByUser(id)
+	if err != nil {
+		return err
+	}
 	if err := s.store.DeleteUser(id); err != nil {
 		return err
+	}
+	n, derr := s.store.DeleteAccessCodesByUser(id)
+	if derr != nil {
+		logger.S.Warnw("删除用户后清理访问码失败 | failed to clean up access codes", "user_id", id, "err", derr)
+	}
+	if tun := s.tunnel(); tun != nil {
+		for _, c := range codes {
+			tun.EvictCode(c.ID)
+		}
 	}
 	if s.sessions != nil {
 		s.sessions.RevokeUser(id)
 	}
+	if n > 0 {
+		logger.S.Infow("用户已删除 | user deleted", "user_id", id, "access_codes_removed", n)
+	}
 	return nil
-}
-
-// RegenerateSecret 重新生成隧道密钥（旧接入码立即失效）。
-func (s *Service) RegenerateSecret(id string) (*models.User, error) {
-	u, err := s.store.GetUser(id)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := auth.RandomSecret(TunnelSecretBytes)
-	if err != nil {
-		return nil, err
-	}
-	u.TunnelSecret = secret
-	if err := s.store.SaveUser(u); err != nil {
-		return nil, err
-	}
-	logger.S.Infow("隧道密钥已重新生成 | tunnel secret regenerated", "user", u.Username)
-	return u, nil
-}
-
-// AccessCode 生成该用户的接入码。fallbackAddr 用于 publicAddr 未配置时
-// （通常取自 HTTP 请求的 Host，因为服务端无从知晓自己的公网地址）。
-func (s *Service) AccessCode(id, fallbackAddr string) (models.UserAccessCode, error) {
-	var out models.UserAccessCode
-	u, err := s.store.GetUser(id)
-	if err != nil {
-		return out, err
-	}
-	s.mu.RLock()
-	addr := s.publicAddr
-	s.mu.RUnlock()
-	if addr == "" {
-		addr = strings.TrimSpace(fallbackAddr)
-	}
-	if addr == "" {
-		return out, fmt.Errorf("%w: 无法确定中转机地址，请在 config.yaml 配置 tunnel.public_addr | cannot determine relay address", ErrInvalidUser)
-	}
-	code, err := accesscode.Encode(accesscode.Code{Addr: addr, UserID: u.ID, Secret: u.TunnelSecret})
-	if err != nil {
-		return out, err
-	}
-	return models.UserAccessCode{
-		UserID:   u.ID,
-		Username: u.Username,
-		Addr:     addr,
-		Secret:   u.TunnelSecret,
-		Code:     code,
-	}, nil
 }
 
 // Authenticate 校验用户名密码，返回用户。
@@ -298,9 +327,69 @@ func (s *Service) ensureAnotherAdmin(excludeID string) error {
 	return storage.ErrLastAdmin
 }
 
+// evictUserTunnels 踢掉某用户名下全部在线隧道。
+func (s *Service) evictUserTunnels(userID string) {
+	tun := s.tunnel()
+	if tun == nil {
+		return
+	}
+	codes, err := s.store.ListAccessCodesByUser(userID)
+	if err != nil {
+		return
+	}
+	for _, c := range codes {
+		tun.EvictCode(c.ID)
+	}
+}
+
+// onlineCodes 返回当前在线的访问码集合。
+func (s *Service) onlineCodes() map[string]bool {
+	out := map[string]bool{}
+	tun := s.tunnel()
+	if tun == nil {
+		return out
+	}
+	for _, id := range tun.OnlineCodeIDs() {
+		out[id] = true
+	}
+	return out
+}
+
+func (s *Service) groupNames() (map[string]string, error) {
+	groups, err := s.store.ListGroups()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(groups))
+	for _, g := range groups {
+		out[g.ID] = g.Name
+	}
+	return out, nil
+}
+
 // 服务层错误。
 var (
 	ErrInvalidUser    = errors.New("invalid user request")
 	ErrBadCredentials = errors.New("用户名或密码错误 | invalid username or password")
 	ErrUserDisabled   = errors.New("账号已停用 | account is disabled")
+	ErrQuotaExceeded  = errors.New("quota exceeded")
 )
+
+// accessCodeAddr 返回写进接入码的中转机地址。
+func (s *Service) accessCodeAddr(fallback string) (string, error) {
+	s.mu.RLock()
+	addr := s.publicAddr
+	s.mu.RUnlock()
+	if addr == "" {
+		addr = strings.TrimSpace(fallback)
+	}
+	if addr == "" {
+		return "", fmt.Errorf("%w: 无法确定中转机地址，请在 config.yaml 配置 tunnel.public_addr | cannot determine relay address", ErrInvalidUser)
+	}
+	return addr, nil
+}
+
+// encodeCode 生成某访问码的接入码文本。
+func encodeCode(addr string, c *models.AccessCode) (string, error) {
+	return accesscode.Encode(accesscode.Code{Addr: addr, CodeID: c.ID, Secret: c.Secret})
+}

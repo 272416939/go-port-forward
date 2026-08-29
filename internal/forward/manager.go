@@ -178,31 +178,48 @@ func (m *Manager) SessionsForUser(userID string) []models.SessionEntry {
 	return out
 }
 
-// SessionIPsByUser 按归属用户分组活跃会话的来源 IP。
+// SessionIPsByCode 按「规则目标地址 → 访问码」分组活跃会话的来源 IP。
 //
 // 这是隧道回程路由推送的数据源。分组是隔离的一部分：把全部玩家 IP 推给每个
 // 隧道客户端，等于让 A 为 B 的玩家安装 /32 回程路由，也把 B 的玩家地址泄漏
-// 给了 A。无归属的规则（管理员维护）归到空字符串键下，不会被推给任何用户。
-func (m *Manager) SessionIPsByUser() map[string][]string {
-	owned := m.ruleOwners()
+// 给了 A。
+//
+// tunIPToCode 由调用方（装配层）提供，因为「哪个隧道地址属于哪个访问码」是
+// 用户服务的知识，manager 不该知道访问码的存在。
+func (m *Manager) SessionIPsByCode(tunIPToCode map[string]string) map[string][]string {
+	if len(tunIPToCode) == 0 {
+		return nil
+	}
+	targets := m.ruleTargets()
 	out := make(map[string][]string)
 	seen := make(map[string]map[string]bool)
 	for _, s := range m.svc.sessions.snapshot() {
 		if s.SrcIP == "" {
 			continue
 		}
-		uid := owned[s.RuleID]
-		if uid == "" {
+		codeID := tunIPToCode[targets[s.RuleID]]
+		if codeID == "" {
 			continue
 		}
-		if seen[uid] == nil {
-			seen[uid] = make(map[string]bool)
+		if seen[codeID] == nil {
+			seen[codeID] = make(map[string]bool)
 		}
-		if seen[uid][s.SrcIP] {
+		if seen[codeID][s.SrcIP] {
 			continue
 		}
-		seen[uid][s.SrcIP] = true
-		out[uid] = append(out[uid], s.SrcIP)
+		seen[codeID][s.SrcIP] = true
+		out[codeID] = append(out[codeID], s.SrcIP)
+	}
+	return out
+}
+
+// ruleTargets 返回「规则 ID → 目标地址」快照。
+func (m *Manager) ruleTargets() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]string, len(m.rules))
+	for id, r := range m.rules {
+		out[id] = r.TargetAddr
 	}
 	return out
 }
@@ -228,6 +245,26 @@ func (m *Manager) CountRulesByUser(userID string) int {
 	n := 0
 	for _, r := range m.rules {
 		if r.UserID == userID {
+			n++
+		}
+	}
+	return n
+}
+
+// CountRulesByTarget 返回目标地址等于 addr 的规则数。
+//
+// 删访问码前用它确认没有规则还指着那条隧道：规则的 target_addr 就是「这条规则
+// 喂给哪条隧道」的唯一真相，删掉访问码而留下规则，流量会被发进一个不再属于
+// 任何人的地址，而界面上看不出异常。
+func (m *Manager) CountRulesByTarget(addr string) int {
+	if addr == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, r := range m.rules {
+		if r.TargetAddr == addr {
 			n++
 		}
 	}

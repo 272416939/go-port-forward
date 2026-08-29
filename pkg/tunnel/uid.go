@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// UID 是隧道用户 ID 的线上表示（uuid 的 16 字节二进制形式）。
+// UID 是访问码 ID 的线上表示（uuid 的 16 字节二进制形式）。
 //
-// 握手包里带的是二进制 uuid 而不是用户名：用户名会随重命名变化，而且明文
-// 出现在网络上等于泄漏身份语义。这里刻意不引入 uuid 库——pkg/tunnel 同时被
-// 主模块和独立的客户端 module 依赖，少一个依赖就少一处版本漂移。
+// 握手包里带的是二进制 uuid 而不是名称：名称会随重命名变化，而且明文出现在
+// 网络上等于泄漏身份语义。这里刻意不引入 uuid 库——pkg/tunnel 同时被主模块和
+// 独立的客户端 module 依赖，少一个依赖就少一处版本漂移。
 type UID [UIDSize]byte
 
 // ParseUID 解析 uuid 文本（接受带连字符与不带连字符两种写法）。
@@ -18,11 +18,11 @@ func ParseUID(s string) (UID, error) {
 	var u UID
 	clean := strings.ReplaceAll(strings.TrimSpace(s), "-", "")
 	if len(clean) != UIDSize*2 {
-		return u, fmt.Errorf("tunnel: 无效的用户 ID %q | invalid user id", s)
+		return u, fmt.Errorf("tunnel: 无效的访问码 ID %q | invalid access code id", s)
 	}
 	raw, err := hex.DecodeString(clean)
 	if err != nil {
-		return u, fmt.Errorf("tunnel: 无效的用户 ID %q | invalid user id", s)
+		return u, fmt.Errorf("tunnel: 无效的访问码 ID %q | invalid access code id", s)
 	}
 	copy(u[:], raw)
 	return u, nil

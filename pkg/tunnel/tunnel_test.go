@@ -8,8 +8,10 @@ import (
 )
 
 var (
-	testTunIP = netip.MustParseAddr("10.66.0.7")
-	testGW    = netip.MustParseAddr("10.66.0.1")
+	testTunIP  = netip.MustParseAddr("10.66.0.7")
+	testGW     = netip.MustParseAddr("10.66.0.1")
+	testDevice = [FingerprintSize]byte{0xA1, 0xB2, 0xC3, 0xD4}
+	otherDevice = [FingerprintSize]byte{0x11, 0x22, 0x33, 0x44}
 )
 
 func mustUID(t *testing.T, s string) UID {
@@ -26,7 +28,7 @@ func TestHandshakeAndSessionRoundTrip(t *testing.T) {
 	uid := mustUID(t, "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9")
 
 	// 客户端构造 Hello，服务端解析
-	hello, clientPriv, err := NewClientHello(secret, uid)
+	hello, clientPriv, err := NewClientHello(secret, uid, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +78,7 @@ func TestHandshakeAndSessionRoundTrip(t *testing.T) {
 
 func TestWrongSecretRejected(t *testing.T) {
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello([]byte("right-secret"), uid)
+	hello, _, err := NewClientHello([]byte("right-secret"), uid, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestWrongSecretRejected(t *testing.T) {
 	}
 }
 
-// 隔离的第一道门：用户 A 的密钥不能开出 B 声称的会话。uid 明文可改，但
+// 隔离的第一道门：访问码 A 的密钥不能开出 B 声称的会话。uid 明文可改，但
 // 改了 uid 就对不上 MAC；换成 A 的密钥去签 B 的 uid，服务端查 B 的密钥验签必失败。
 func TestCrossUserSecretRejected(t *testing.T) {
 	secretA := []byte("secret-of-user-a")
@@ -93,7 +95,7 @@ func TestCrossUserSecretRejected(t *testing.T) {
 	uidA := mustUID(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	uidB := mustUID(t, "11111111-2222-3333-4444-555555555555")
 
-	hello, _, err := NewClientHello(secretA, uidA)
+	hello, _, err := NewClientHello(secretA, uidA, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestCrossUserSecretRejected(t *testing.T) {
 func TestTamperedAcceptAddressRejected(t *testing.T) {
 	secret := []byte("s")
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello(secret, uid)
+	hello, _, err := NewClientHello(secret, uid, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,19 +134,100 @@ func TestTamperedAcceptAddressRejected(t *testing.T) {
 	}
 }
 
-// v1 客户端必须被识别成「版本过旧」而不是「认证失败」——否则运维只会看到
-// 一条查不出原因的 auth failed。
-func TestV1HelloReportedAsOldVersion(t *testing.T) {
+// 旧版客户端必须被识别成「版本过旧」而不是「认证失败」——否则运维只会看到
+// 一条查不出原因的 auth failed。v1 与 v2 的包长各自唯一，靠长度先行判定。
+func TestOldHelloReportedAsOldVersion(t *testing.T) {
 	v1 := make([]byte, 0, 73)
 	v1 = append(v1, TypeHello)
 	v1 = append(v1, bytes.Repeat([]byte{0xAB}, 32)...) // eph
 	v1 = append(v1, bytes.Repeat([]byte{0x00}, 8)...)  // ts
 	v1 = append(v1, bytes.Repeat([]byte{0xCD}, 32)...) // mac
-	if _, err := PeekHello(v1); !errors.Is(err, ErrOldVersion) {
-		t.Fatalf("v1 hello must report ErrOldVersion, got %v", err)
+
+	v2 := make([]byte, 0, 90)
+	v2 = append(v2, TypeHello, 0x02)
+	v2 = append(v2, bytes.Repeat([]byte{0xEE}, UIDSize)...)
+	v2 = append(v2, bytes.Repeat([]byte{0xAB}, 32)...)
+	v2 = append(v2, bytes.Repeat([]byte{0x00}, 8)...)
+	v2 = append(v2, bytes.Repeat([]byte{0xCD}, 32)...)
+
+	for name, pkt := range map[string][]byte{"v1": v1, "v2": v2} {
+		if _, err := PeekHello(pkt); !errors.Is(err, ErrOldVersion) {
+			t.Fatalf("%s hello must report ErrOldVersion, got %v", name, err)
+		}
+		if _, err := ParseClientHello([]byte("any"), pkt); !errors.Is(err, ErrOldVersion) {
+			t.Fatalf("%s hello parse must report ErrOldVersion, got %v", name, err)
+		}
 	}
-	if _, err := ParseClientHello([]byte("any"), v1); !errors.Is(err, ErrOldVersion) {
-		t.Fatalf("v1 hello parse must report ErrOldVersion, got %v", err)
+}
+
+// 设备指纹进了 MAC：换一台设备重放同一个 Hello 会被识破。
+func TestTamperedDeviceRejected(t *testing.T) {
+	secret := []byte("s")
+	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
+	hello, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := hello.Marshal()
+	copy(wire[2+UIDSize:2+UIDSize+FingerprintSize], otherDevice[:])
+	if _, perr := ParseClientHello(secret, wire); !errors.Is(perr, ErrAuth) {
+		t.Fatalf("tampered device fingerprint must fail: %v", perr)
+	}
+	// 原包仍然可解析，确认上面失败的原因确实是指纹而不是别的。
+	if parsed, perr := ParseClientHello(secret, hello.Marshal()); perr != nil {
+		t.Fatalf("untampered hello must parse: %v", perr)
+	} else if parsed.Device != testDevice {
+		t.Fatalf("device = %x", parsed.Device)
+	}
+}
+
+// Reject 必须验 MAC：不验的话任何人都能伪造一个拒绝应答让客户端停止重连，
+// 那是一个单包就能生效的拒绝服务。
+func TestRejectRequiresValidMAC(t *testing.T) {
+	secret := []byte("s")
+	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
+	hello, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := NewServerReject(secret, hello.Eph, RejectDeviceMismatch).Marshal()
+
+	got, perr := ParseServerReject(secret, wire, hello.Eph)
+	if perr != nil {
+		t.Fatalf("valid reject must parse: %v", perr)
+	}
+	if got.Reason != RejectDeviceMismatch {
+		t.Fatalf("reason = %v", got.Reason)
+	}
+	if !got.Reason.Terminal() {
+		t.Fatal("device mismatch must be a terminal reason（客户端不该继续重试）")
+	}
+
+	if _, perr := ParseServerReject([]byte("wrong-secret"), wire, hello.Eph); !errors.Is(perr, ErrAuth) {
+		t.Fatalf("reject signed with another secret must fail: %v", perr)
+	}
+	// 换一个 clientEph（重放到另一次握手上）也必须失败。
+	var otherEph [32]byte
+	otherEph[0] = 0x99
+	if _, perr := ParseServerReject(secret, wire, otherEph); !errors.Is(perr, ErrAuth) {
+		t.Fatalf("replayed reject must fail: %v", perr)
+	}
+	tampered := append([]byte(nil), wire...)
+	tampered[2] = byte(RejectTunnelLimit)
+	if _, perr := ParseServerReject(secret, tampered, hello.Eph); !errors.Is(perr, ErrAuth) {
+		t.Fatalf("tampered reason must fail: %v", perr)
+	}
+}
+
+// tunnel_limit 是暂时状态（对端可能马上下线），必须继续重试；其余是终态。
+func TestRejectTerminalClassification(t *testing.T) {
+	if RejectTunnelLimit.Terminal() {
+		t.Fatal("并发上限是暂时状态，应继续重试")
+	}
+	for _, r := range []RejectReason{RejectDeviceMismatch, RejectCodeDisabled, RejectUserDisabled, RejectAddrInvalid} {
+		if !r.Terminal() {
+			t.Fatalf("%v 需要人工介入，应停止重试", r)
+		}
 	}
 }
 

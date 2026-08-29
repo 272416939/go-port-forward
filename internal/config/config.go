@@ -27,7 +27,7 @@ type TunnelConfig struct {
 	// carries its own secret. Kept so old config files still load; ignored.
 	PSK        string `mapstructure:"psk"`
 	TunName    string `mapstructure:"tun_name"`
-	TunAddr    string `mapstructure:"tun_addr"`    // e.g. "10.66.0.1/24" — also the client address pool
+	TunAddr    string `mapstructure:"tun_addr"`    // e.g. "10.66.0.1/16" — also the access-code address pool
 	PublicAddr string `mapstructure:"public_addr"` // relay address embedded in access codes, e.g. "1.2.3.4:7947"
 	NAT        bool   `mapstructure:"nat"`         // ip_forward + MASQUERADE + FORWARD accept
 }
@@ -151,7 +151,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tunnel.listen", ":7947")
 	v.SetDefault("tunnel.psk", "")
 	v.SetDefault("tunnel.tun_name", "pftun0")
-	v.SetDefault("tunnel.tun_addr", "10.66.0.1/24")
+	// /16 而不是 /24：隧道地址按访问码分配（一个访问码一台设备），/24 的
+	// 253 个位置在几十个用户时就会耗尽。已写死 /24 的旧部署不受影响。
+	v.SetDefault("tunnel.tun_addr", "10.66.0.1/16")
 	v.SetDefault("tunnel.public_addr", "")
 	v.SetDefault("tunnel.nat", true)
 
