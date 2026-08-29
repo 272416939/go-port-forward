@@ -1083,8 +1083,11 @@
                   <td><span class="badge rounded-pill" :class="c.disabled ? 'text-bg-danger' : 'text-bg-success'" x-text="c.disabled ? t('已停用','Disabled') : t('正常','Active')"></span></td>
                   <td class="text-end text-nowrap">
                     <button class="btn btn-sm btn-outline-primary btn-icon" @click="showCodeText(c)" :title="t('接入码','Access code')"><i class="bi bi-key"></i></button>
-                    <button class="btn btn-sm btn-outline-warning btn-icon" @click="unbindCode(c)" x-show="c.device_label"
-                            :title="t('解绑设备','Unbind device')"><i class="bi bi-link-slash"></i></button>
+                    <button class="btn btn-sm btn-outline-warning btn-icon" @click="unbindCode(c)"
+                            :disabled="!c.device_label"
+                            :title="c.device_label ? t('解绑设备','Unbind device') : t('未绑定设备','not bound')">
+                      <i class="bi bi-plug"></i>
+                    </button>
                     <button class="btn btn-sm btn-outline-secondary btn-icon" @click="toggleCodeDisabled(c)"
                             :title="c.disabled ? t('启用','Enable') : t('停用','Disable')">
                       <i class="bi" :class="c.disabled ? 'bi-play' : 'bi-pause'"></i>
