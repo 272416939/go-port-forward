@@ -335,7 +335,32 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Embedded SPA — wrap with fixMIME to guarantee correct Content-Type
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	mux.Handle("/", fixMIME(http.FileServer(http.FS(staticFS))))
+	spa := fixMIME(http.FileServer(http.FS(staticFS)))
+	// SPA 入口网关：未登录的访客直接 302 到登录页，浏览器不再短暂渲染面板
+	// 骨架后靠 JS 跳转（index.html 的身份校验仍保留，兜住「有 cookie 但
+	// 会话已过期」的情况——进程重启会使全部会话失效）。
+	mux.Handle("/", s.spaGate(spa))
+}
+
+// spaGate 把未登录的 SPA 入口请求重定向到登录页。
+//
+// 只拦 SPA 入口（/ 与 /index.html）：其余静态资源（login.html 自身、css/js、
+// 图标）保持公开。判定是「有没有凭据的痕迹」——cookie 存在（有效性由 API 层
+// 校验）或带 Authorization 头（应急后门的 Basic Auth 用法）即放行，避免在
+// 静态文件路径上做完整的会话校验。
+func (s *Server) spaGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			p := r.URL.Path
+			if p == "/" || p == "/index.html" {
+				if auth.TokenFromRequest(r) == "" && r.Header.Get("Authorization") == "" {
+					http.Redirect(w, r, "/login.html", http.StatusFound)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // fixMIME wraps a handler to force correct Content-Type for known static file

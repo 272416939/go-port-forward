@@ -29,6 +29,15 @@
 </style>
 </head>
 <body x-data="portForwardApp()" x-init="init()">
+<!-- 身份确认前的加载遮罩：面板内容在 loadMe 完成前不可见，避免「先闪面板
+     再跳登录页」。遮罩放在 auth-gate 之外，不受其隐藏影响。 -->
+<div id="boot-loader" style="position:fixed;inset:0;display:grid;place-items:center;z-index:2000;background:var(--bs-body-bg, #fff);">
+  <div class="text-center">
+    <div class="spinner-border" style="width:2.5rem;height:2.5rem;"></div>
+    <div class="mt-3 small text-muted" id="bootText">正在验证身份…</div>
+  </div>
+</div>
+<div id="auth-gate" style="visibility:hidden">
 
 <!-- Top progress bar (NProgress-like) -->
 <div class="htmx-progress"></div>
@@ -1687,15 +1696,27 @@ function portForwardApp() {
     async loadMe() {
       try {
         const res = await fetch('/api/auth/me')
+        // 401 在遮罩下直接跳登录页：面板从未可见，没有闪烁。
         if (res.status === 401) { location.href = '/login.html'; return false }
         const d = await res.json()
         if (!d.success) { location.href = '/login.html'; return false }
         this.me = d.data || this.me
+        this.revealApp()
         return true
       } catch (e) {
+        this.revealApp()
         showToast('danger', _t('无法获取当前身份: ','Failed to load identity: ') + e.message)
         return false
       }
+    },
+
+    // revealApp 解除启动遮罩。服务端 spaGate 已把未登录访客挡在登录页，
+    // 走到这里的基本都是有效会话（或应急后门）。
+    revealApp() {
+      const gate = document.getElementById('auth-gate')
+      const loader = document.getElementById('boot-loader')
+      if (gate) gate.style.visibility = 'visible'
+      if (loader) loader.remove()
     },
 
     showAccountModal() {
@@ -2841,5 +2862,6 @@ function portForwardApp() {
   }
 }
 </script>
+<!-- /auth-gate -->
 </body>
 </html>
