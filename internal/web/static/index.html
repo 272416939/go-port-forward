@@ -21,6 +21,11 @@
       document.documentElement.setAttribute('data-bs-theme-mode', mode);
     })();
   </script>
+<style>
+  /* 规则页顶部的配额速览条 */
+  .quota-strip { display: inline-flex; align-items: center; gap: 1.25rem; flex-wrap: wrap; }
+  .quota-strip__item { display: inline-flex; align-items: center; }
+</style>
 </head>
 <body x-data="portForwardApp()" x-init="init()">
 
@@ -172,6 +177,17 @@
         <!-- Rules table -->
         <div class="table-container">
           <div class="table-container__toolbar">
+            <!-- 普通用户的配额速览（数据与 /api/auth/me 同源，随页面轮询刷新） -->
+            <div class="quota-strip small text-nowrap me-3" style="display:none" x-show="!isAdmin">
+              <span class="quota-strip__item"><span class="text-muted" x-text="t('当前分组','Group')"></span>:
+                <span class="fw-semibold" x-text="me.group_name || t('默认组','default')"></span></span>
+              <span class="quota-strip__item"><span class="text-muted" x-text="t('在线隧道','Online Tunnels')"></span>
+                <span class="badge rounded-pill ms-1" :class="quotaExceeded(me.quota,'max_tunnels','tunnels') ? 'text-bg-danger' : 'text-bg-secondary'"
+                      x-text="quotaRatio(me.quota,'max_tunnels','tunnels')"></span></span>
+              <span class="quota-strip__item"><span class="text-muted" x-text="t('规则数量','Rules')"></span>
+                <span class="badge rounded-pill ms-1" :class="quotaExceeded(me.quota,'max_rules','rules') ? 'text-bg-danger' : 'text-bg-secondary'"
+                      x-text="quotaRatio(me.quota,'max_rules','rules')"></span></span>
+            </div>
             <div class="table-container__search">
               <i class="bi bi-search"></i>
               <input class="form-control form-control-sm" type="search" :placeholder="t('搜索规则名称…','Search rules…')" x-model="search"/>
@@ -1006,13 +1022,9 @@
         <div class="form-text mb-3" x-text="t('每个访问码是一条独立隧道：独立地址、独立密钥，首次连接后绑定到那台设备。换机器时先解绑再重连。','Each access code is an independent tunnel: its own address and key, bound to the first device that connects. Unbind before moving to a new machine.')"></div>
 
         <div class="mb-3" x-show="!isAdmin" x-cloak>
-          <span class="me-2 small" x-text="t('配额','Quota')"></span>
+          <span class="me-2 small" x-text="t('访问码配额','Code Quota')"></span>
           <span class="badge rounded-pill" :class="quotaExceeded(me.quota,'max_access_codes','access_codes') ? 'text-bg-danger' : 'text-bg-secondary'"
                 x-text="t('已创建','created') + ' ' + quotaRatio(me.quota,'max_access_codes','access_codes')"></span>
-          <span class="badge rounded-pill text-bg-secondary"
-                x-text="t('在线隧道','online tunnels') + ' ' + quotaRatio(me.quota,'max_tunnels','tunnels')"></span>
-          <span class="badge rounded-pill text-bg-secondary"
-                x-text="t('转发规则','rules') + ' ' + quotaRatio(me.quota,'max_rules','rules')"></span>
           <span class="small text-danger ms-2" x-show="quotaExceeded(me.quota,'max_access_codes','access_codes')"
                 x-text="t('访问码已达上限，删除不用的之后才能新建','code quota reached — delete unused ones first')"></span>
         </div>
@@ -1653,6 +1665,9 @@ function portForwardApp() {
 	      await Promise.all(tasks)
 	      if (this.me.must_change_password) this.showAccountModal()
 	      this._refreshTimer = setInterval(() => this.refresh({ background: true }), 8000)
+	      // 配额速览条（在线隧道/规则用量）与规则列表同频刷新；me 很轻，
+	      // 与 8s 轮询同频不会构成负担。
+	      this._quotaTimer = setInterval(() => { if (!document.hidden) this.loadMe() }, 8000)
 	      document.addEventListener('visibilitychange', () => {
 	        if (!document.hidden) this.refresh({ background: true })
 	        if (this._diagnosticsVisible && !document.hidden) this.loadDiagnostics({ background: true })
