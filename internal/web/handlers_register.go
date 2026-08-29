@@ -94,7 +94,7 @@ func (h *handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	okWithMessage(w, nil, "密码已重置，请用新密码登录 | password has been reset")
 }
 
-// writeUserError 的注册相关补充映射（email 包与 users 包的新错误）。
+// writePublicError 的注册相关补充映射（email 包与 users 包的新错误）。
 func writePublicError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, users.ErrEmailNotConfigured):
@@ -103,8 +103,12 @@ func writePublicError(w http.ResponseWriter, err error) {
 		fail(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, users.ErrRegistrationClosed):
 		fail(w, http.StatusForbidden, err.Error())
-	case errors.Is(err, storage.ErrEmailExists):
-		fail(w, http.StatusConflict, err.Error())
+	case errors.Is(err, storage.ErrEmailExists), errors.Is(err, storage.ErrUserExists):
+		// 用户名/邮箱重名的提示必须脱敏：回显原文等于提供「这个用户名或
+		// 邮箱有没有被注册」的探测器（登录接口早已防枚举，注册对齐）。
+		// 真实用户换一个名字重试即可，前端表单有格式提示兜底。
+		fail(w, http.StatusBadRequest,
+			"注册失败：用户名或邮箱不可用，请更换后重试 | registration failed: the username or email is unavailable, please try another")
 	default:
 		writeUserError(w, err)
 	}

@@ -213,7 +213,7 @@ func (h *handler) createRule(w http.ResponseWriter, r *http.Request) {
 
 	rule, err := h.mgr.AddRule(&req)
 	if err != nil {
-		writeAPIError(w, err)
+		writeAPIError(w, maskPortConflict(me, err, req.ListenPort))
 		return
 	}
 	createdWithMessage(w, rule, h.syncFirewallOnCreate(rule))
@@ -262,7 +262,7 @@ func (h *handler) updateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, err := h.mgr.UpdateRule(id, &req)
 	if err != nil {
-		writeAPIError(w, err)
+		writeAPIError(w, maskPortConflict(me, err, next.ListenPort))
 		return
 	}
 	okWithMessage(w, rule, h.syncFirewallOnUpdate(before, rule))
@@ -313,7 +313,7 @@ func (h *handler) toggleRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, err := h.mgr.ToggleRule(id, *body.Enabled)
 	if err != nil {
-		writeAPIError(w, err)
+		writeAPIError(w, maskPortConflict(me, err, before.ListenPort))
 		return
 	}
 	okWithMessage(w, rule, h.syncFirewallOnUpdate(before, rule))

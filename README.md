@@ -410,6 +410,24 @@ it stops casual sharing, not a motivated attacker.
 建一条指向 `127.0.0.1:22` 或内网任意主机的转发，把中转机变成一个对外开放的
 跳板。删除仍被规则引用的访问码会被拒绝（409），避免留下指向死地址的规则。
 
+### 端口工具：随机与检测 | Port Tools: Random & Check
+
+规则表单的「监听端口」旁有两个按钮：**随机**（在配额区间内挑一个当前可用的
+端口直接填入）与**检测**（试绑 TCP+UDP 判断端口是否空闲）。检测在服务端真实
+bind，普通用户只能检测/随机**自己配额区间内**的端口——否则端点会沦为中转机
+全端口扫描器。bind 检测存在「检测后、保存前被抢占」的窗口，结果仅供参考，
+以保存时的实际结果为准。
+
+相关提示均已按租户脱敏：普通用户撞上被占用端口只会看到「端口已被占用」，
+不会看到占用者的规则名；注册重名也只提示「用户名或邮箱不可用」，不能被用来
+枚举已注册账号。
+
+The dice button picks a random free port inside your quota range and the bolt button
+probes TCP+UDP availability server-side (scoped to your range — otherwise the endpoint
+would be a full port scanner for the relay). Results are indicative; saving is
+authoritative. Conflict hints are tenant-masked: regular users never see another
+user's rule name, and duplicate-username registrations return a generic message.
+
 ### 安全提示 | Security Notes
 
 多租户意味着面板必须对外可达（`web.host` 不再是 `127.0.0.1`），这带来两点：

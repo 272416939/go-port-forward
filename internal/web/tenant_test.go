@@ -133,6 +133,20 @@ func (f *tenantFixture) seedRule(t *testing.T, owner *models.User, code *models.
 	return r
 }
 
+// resizeGroup 调整某用户所属组的端口区间（测试构造冲突场景用）。
+func (f *tenantFixture) resizeGroup(t *testing.T, u *models.User, start, end int) {
+	t.Helper()
+	g, err := f.svc.GetGroup(u.GroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, uerr := f.svc.UpdateGroup(g.ID, &models.UpdateGroupRequest{
+		PortRangeStart: &start, PortRangeEnd: &end,
+	}); uerr != nil {
+		t.Fatal(uerr)
+	}
+}
+
 func asUser(r *http.Request, u *models.User) *http.Request {
 	return r.WithContext(auth.WithUser(r.Context(), u))
 }

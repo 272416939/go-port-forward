@@ -294,6 +294,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/logs", s.authed(h.listConnLogs))
 	mux.HandleFunc("GET /api/sessions", s.authed(h.listSessions))
 
+	// 端口检测与随机（登录即可；检测范围受配额区间约束）
+	mux.HandleFunc("GET /api/ports/check", s.authed(h.checkPort))
+	mux.HandleFunc("GET /api/ports/random", s.authed(h.randomPort))
+
 	// 用户管理（仅管理员）
 	mux.HandleFunc("GET /api/users", s.adminOnly(h.listUsers))
 	mux.HandleFunc("POST /api/users", s.adminOnly(h.createUser))

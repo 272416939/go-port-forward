@@ -290,7 +290,22 @@
           </div>
           <div class="col-md-4">
             <label class="form-label"><span x-text="t('监听端口','Listen Port')"></span> <span class="text-danger">*</span></label>
-            <input class="form-control" type="number" min="1" max="65535" x-model.number="form.listen_port" placeholder="8080"/>
+            <div class="input-group">
+              <input class="form-control" type="number" min="1" max="65535" x-model.number="form.listen_port" placeholder="8080"/>
+              <button class="btn btn-outline-secondary" type="button" @click="randomPort()" :disabled="portBusy"
+                      :title="t('在配额区间内随机挑一个可用端口','Pick a random free port in your range')">
+                <i class="bi bi-dice-3"></i>
+              </button>
+              <button class="btn btn-outline-secondary" type="button" @click="checkPort()" :disabled="portBusy"
+                      :title="t('检测端口当前是否可用','Check whether the port is free')">
+                <i class="bi bi-lightning"></i>
+              </button>
+            </div>
+            <div class="form-text" x-show="portHint" x-cloak>
+              <span class="badge rounded-pill" :class="portAvailable ? 'text-bg-success' : 'text-bg-danger'"
+                    x-text="portHint"></span>
+              <span class="text-muted" x-text="t('仅供参考，以保存结果为准','indicative only — saving is authoritative')"></span>
+            </div>
           </div>
           <div class="col-md-4">
             <label class="form-label" x-text="t('协议','Protocol')"></label>
@@ -1564,6 +1579,9 @@ function portForwardApp() {
 	    smtpTestTo: '',
 	    smtpSaving: false, smtpTestSending: false,
 	    _smtpModal: null,
+	    portBusy: false,
+	    portHint: '',
+	    portAvailable: false,
 	    pwForm: { old_password:'', new_password:'' },
 	    pwSaving: false,
 	    _usersModal: null,
@@ -2176,6 +2194,50 @@ function portForwardApp() {
 
     // 管理员在规则表单里换归属用户时，目标地址清空（管理员手填任意主机）。
     onOwnerChange() {},
+
+    // --- 端口随机 / 检测 ---
+    // 服务端真实 bind 测试（浏览器探测不了服务器端口）；配额区间校验在
+    // 服务端做，普通用户只能检测/随机自己区间内的端口。
+
+    async randomPort() {
+      this.portBusy = true
+      try {
+        const res = await fetch('/api/ports/random')
+        const d = await res.json()
+        if (d.success && d.data && d.data.port) {
+          this.form.listen_port = d.data.port
+          this.portHint = _t('端口 ' + d.data.port + ' 可用', 'port ' + d.data.port + ' is free')
+          this.portAvailable = true
+        } else {
+          showToast('warning', d.message || _t('未找到可用端口','No free port found'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.portBusy = false }
+    },
+
+    async checkPort() {
+      const p = Number(this.form.listen_port)
+      if (!p || p < 1 || p > 65535) {
+        showToast('warning', _t('请先填写要检测的端口','Enter a port to check first'))
+        return
+      }
+      this.portBusy = true
+      try {
+        const res = await fetch('/api/ports/check?port=' + p)
+        const d = await res.json()
+        if (d.success && d.data) {
+          this.portAvailable = !!d.data.available
+          this.portHint = this.portAvailable
+            ? _t('端口 ' + p + ' 可用', 'port ' + p + ' is free')
+            : _t('端口 ' + p + ' 已被占用', 'port ' + p + ' is in use')
+        } else {
+          showToast('warning', d.message || _t('检测失败','Check failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.portBusy = false }
+    },
 
     // copyText 是通用剪贴板写入：非 HTTPS（面板常跑在明文内网 IP 上）时
     // navigator.clipboard 是 undefined，必须走 textarea + execCommand 降级。
