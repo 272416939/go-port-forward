@@ -287,6 +287,40 @@ func TestDuplicateUsernameRejected(t *testing.T) {
 	}
 }
 
+// 邮箱唯一性：两个账号不能绑同一邮箱，否则找回密码无法定位唯一用户。
+// 判定不分大小写（邮箱域不区分大小写），查重必须在 CreateUser 的写事务内。
+func TestEmailUniqueRejected(t *testing.T) {
+	s := newUserStore(t)
+	u1 := makeUser("u1", "alice", models.RoleUser)
+	u1.Email = "Alice@X.com"
+	if err := s.CreateUser(u1); err != nil {
+		t.Fatal(err)
+	}
+	u2 := makeUser("u2", "bob", models.RoleUser)
+	u2.Email = "alice@x.com"
+	err := s.CreateUser(u2)
+	if !errors.Is(err, ErrEmailExists) {
+		t.Fatalf("邮箱重复应被拒，得到 %v", err)
+	}
+	// 不同邮箱正常。
+	u3 := makeUser("u3", "carol", models.RoleUser)
+	u3.Email = "carol@x.com"
+	if err := s.CreateUser(u3); err != nil {
+		t.Fatal(err)
+	}
+	// 按邮箱查用户不分大小写。
+	got, err := s.GetUserByEmail("ALICE@x.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "u1" {
+		t.Fatalf("id = %s", got.ID)
+	}
+	if _, err := s.GetUserByEmail("nobody@x.com"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("未知邮箱应返回 ErrUserNotFound，得到 %v", err)
+	}
+}
+
 func TestGetUserByNameIsCaseInsensitive(t *testing.T) {
 	s := newUserStore(t)
 	if err := s.CreateUser(makeUser("u1", "alice", models.RoleUser)); err != nil {

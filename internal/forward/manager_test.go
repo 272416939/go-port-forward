@@ -452,6 +452,9 @@ func (s *countingStore) GetUser(id string) (*models.User, error) { return nil, s
 func (s *countingStore) GetUserByName(n string) (*models.User, error) {
 	return nil, storage.ErrUserNotFound
 }
+func (s *countingStore) GetUserByEmail(e string) (*models.User, error) {
+	return nil, storage.ErrUserNotFound
+}
 func (s *countingStore) CreateUser(u *models.User) error { return nil }
 func (s *countingStore) SaveUser(u *models.User) error   { return nil }
 func (s *countingStore) DeleteUser(id string) error      { return nil }
@@ -459,6 +462,10 @@ func (s *countingStore) CountUsers() (int, error)        { return 0, nil }
 
 func (s *countingStore) Settings() (models.Settings, error)       { return models.DefaultSettings(), nil }
 func (s *countingStore) SaveSettings(cfg models.Settings) error   { return nil }
+func (s *countingStore) SMTPConfig() (*models.SMTPConfig, error)  { return &models.SMTPConfig{}, nil }
+func (s *countingStore) UpdateSMTP(req *models.UpdateSMTPRequest) (*models.SMTPConfig, error) {
+	return &models.SMTPConfig{}, nil
+}
 func (s *countingStore) ListGroups() ([]*models.UserGroup, error) { return nil, nil }
 func (s *countingStore) GetGroup(id string) (*models.UserGroup, error) {
 	return nil, storage.ErrGroupNotFound
