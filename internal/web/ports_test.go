@@ -188,6 +188,38 @@ func TestRandomPortWithoutRange(t *testing.T) {
 	}
 }
 
+// 组编辑：改名与收紧配额走 PUT /api/groups/{id}（handler 透传给服务层）。
+func TestUpdateGroupEndpoint(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	g := f.groups["alice"]
+	req := postJSON("/api/groups/"+g.ID, `{"name":"renamed","port_range_start":20000,"port_range_end":20050,"max_rules":4}`, f.admin)
+	req.SetPathValue("id", g.ID)
+	rec := httptest.NewRecorder()
+	f.h.updateGroup(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := f.svc.GetGroup(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "renamed" || got.PortRangeEnd != 20050 || got.MaxRules != 4 {
+		t.Fatalf("编辑未生效：%+v", got)
+	}
+
+	// 收紧到与全局冲突之外自由；但区间越界仍被拒。
+	req = postJSON("/api/groups/"+g.ID, `{"port_range_end":99999}`, f.admin)
+	req.SetPathValue("id", g.ID)
+	rec = httptest.NewRecorder()
+	f.h.updateGroup(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("区间越出全局应被拒，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // maskPortConflict 的管理员透传与用户脱敏（单元级，覆盖 toggle/update 路径
 // 共用的 helper）。
 func TestMaskPortConflictHelper(t *testing.T) {
