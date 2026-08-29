@@ -30,6 +30,10 @@ type Settings struct {
 	// DefaultGroupID 是新建用户的默认组。
 	DefaultGroupID string `json:"default_group_id"`
 
+	// EnableRegistration 控制自助注册入口。默认 false（fail-closed）：注册
+	// 是把「创建账号」的权力交给公网，不开就是不开，绝不该有「未配置即开放」。
+	EnableRegistration bool `json:"enable_registration"`
+
 	// SchemaVersion 记录数据已迁移到哪个版本，迁移逻辑据此保持幂等。
 	SchemaVersion int `json:"schema_version"`
 }
@@ -57,6 +61,7 @@ type UpdateSettingsRequest struct {
 	MaxTunnelsPerUser     *int    `json:"max_tunnels_per_user"`
 	MaxRulesPerUser       *int    `json:"max_rules_per_user"`
 	DefaultGroupID        *string `json:"default_group_id"`
+	EnableRegistration    *bool   `json:"enable_registration"`
 }
 
 // ValidateSettings 校验全局设置自身的合法性。
@@ -103,6 +108,18 @@ type Quota struct {
 	AccessCodeSource QuotaSource `json:"access_code_source"`
 	TunnelSource     QuotaSource `json:"tunnel_source"`
 	RuleSource       QuotaSource `json:"rule_source"`
+
+	// Used 是当前已用的量，供界面显示 0/5 形态的进度。上限与来源是"规则"，
+	// 用量是"现状"，两者一起才算完整的配额视图——用户看到"上限 3"还要知道
+	// "已用 2"，才知道自己还能建几个。
+	Used QuotaUsage `json:"used"`
+}
+
+// QuotaUsage 是各项配额的当前用量。
+type QuotaUsage struct {
+	AccessCodes int `json:"access_codes"`
+	Tunnels     int `json:"tunnels"` // 当前在线的隧道数
+	Rules       int `json:"rules"`
 }
 
 // PortAllowed 报告某监听端口是否在配额区间内。
@@ -170,3 +187,89 @@ func ResolveQuota(g *UserGroup, s Settings) Quota {
 
 // NormalizeGroupName 规范化组名。
 func NormalizeGroupName(s string) string { return strings.TrimSpace(s) }
+
+// SMTP 加密方式。
+const (
+	SMTPStartTLS = "starttls" // 587：明文连接后升级 TLS
+	SMTPSSL      = "ssl"      // 465：连接即 TLS
+	SMTPNone     = "none"     // 25：明文（仅内网中继）
+)
+
+// SMTPConfig 是发信服务器的配置（存 bbolt，管理员在面板里改）。
+//
+// Password 带 json:"-"：本结构体会原样进出 /api/smtp 接口，标签是「密码永不
+// 出 API」的唯一实现。更新时请求里密码留空 = 保留原值（见 storage.UpdateSMTP）。
+// 与 SQLite 一样 bbolt 无内置加密，0600 文件 + API 不回显是实际的边界，
+// 不做伪装加密制造虚假安全感。
+type SMTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"` // 465 / 587 / 25
+	Username   string `json:"username"`
+	Password   string `json:"-"`
+	From       string `json:"from"`      // 发件人地址，如 no-reply@example.com
+	FromName   string `json:"from_name"` // 发件人显示名
+	Encryption string `json:"encryption"`
+}
+
+// Configured 报告 SMTP 是否已配置到可发信的程度。
+func (c *SMTPConfig) Configured() bool {
+	return c != nil && c.Host != "" && c.Port > 0 && c.From != ""
+}
+
+// UpdateSMTPRequest 是更新 SMTP 配置的请求。
+//
+// Password 为 nil 或空串表示保留原值——面板回显时没有密码可显示，提交时也
+// 不该强迫管理员重输。
+type UpdateSMTPRequest struct {
+	Host       *string `json:"host"`
+	Port       *int    `json:"port"`
+	Username   *string `json:"username"`
+	Password   *string `json:"password"`
+	From       *string `json:"from"`
+	FromName   *string `json:"from_name"`
+	Encryption *string `json:"encryption"`
+}
+
+// ValidateSMTPConfig 校验 SMTP 配置自身合法性。
+func ValidateSMTPConfig(c *SMTPConfig) error {
+	if c.Host == "" && c.Port == 0 && c.From == "" {
+		return nil // 整体清空 = 停用邮件功能，合法
+	}
+	if c.Host == "" || c.Port <= 0 || c.Port > 65535 || c.From == "" {
+		return fmt.Errorf("SMTP 配置不完整：服务器、端口与发件人都必填 | smtp host, port and from are required")
+	}
+	switch c.Encryption {
+	case "", SMTPStartTLS, SMTPSSL, SMTPNone:
+	default:
+		return fmt.Errorf("加密方式必须是 starttls、ssl 或 none | encryption must be starttls, ssl or none")
+	}
+	if c.Encryption == "" {
+		c.Encryption = SMTPStartTLS
+	}
+	return nil
+}
+
+// SMTPView 是 /api/smtp 的响应：配置可见，密码只体现为布尔。
+type SMTPView struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	From        string `json:"from"`
+	FromName    string `json:"from_name"`
+	Encryption  string `json:"encryption"`
+	HasPassword bool   `json:"has_password"`
+	Configured  bool   `json:"configured"`
+}
+
+// View 生成脱敏视图。
+func (c *SMTPConfig) View() SMTPView {
+	if c == nil {
+		return SMTPView{}
+	}
+	return SMTPView{
+		Host: c.Host, Port: c.Port, Username: c.Username,
+		From: c.From, FromName: c.FromName, Encryption: c.Encryption,
+		HasPassword: c.Password != "",
+		Configured:  c.Configured(),
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"go-port-forward/internal/auth"
+	"go-port-forward/internal/email"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
 	"go-port-forward/internal/storage"
@@ -47,6 +48,24 @@ type Service struct {
 	tunGateway netip.Addr
 	publicAddr string        // 写进接入码的中转机地址（config 的 tunnel.public_addr）
 	evictor    TunnelEvictor // 隧道服务端；未启用隧道时为 nil
+
+	// rulesCounter 是「某用户名下规则数」的查询（forward.Manager 注入），
+	// 配额用量 0/5 展示的数据源之一。
+	rulesCounter func(userID string) int
+
+	// registerLimiter 限制同一 IP 的注册频率（SMTP 未配置时的主要防线）。
+	registerLimiter *rateLimiter
+	// verifier 是邮箱验证码服务（接口由本包定义，email.VerificationService 实现）；
+	// Mailer 由装配层注入（SMTP 配置在 bbolt 里，面板改完即生效）。
+	verifier CodeIssuer
+}
+
+// CodeIssuer 是验证码的签发与校验能力。接口由消费者（users）定义，
+// email.VerificationService 天然满足——与 TunnelEvictor 是同一个模式：
+// 依赖最小的形状，而不是另一个包的具体类型。
+type CodeIssuer interface {
+	Issue(email, purpose string) error
+	Verify(email, purpose, code string) error
 }
 
 // New 创建用户服务。tunAddr 是 config 的 tunnel.tun_addr（如 "10.66.0.1/16"）。
@@ -61,7 +80,22 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 		tunPool:    pool,
 		tunGateway: gw,
 		publicAddr: strings.TrimSpace(publicAddr),
+		registerLimiter: newRateLimiter(RegistrationRateLimit, time.Hour),
+		verifier:        email.NewVerificationService(nil), // Mailer 由装配层注入
 	}, nil
+}
+
+// SetMailer 注入发信实现（SMTPMailer 由装配层创建，配置从 store 实时读取）。
+// 同时喂给默认的验证码服务；测试注入自定义 CodeIssuer 时自行持有 Mailer。
+func (s *Service) SetMailer(m email.Mailer) {
+	if v, ok := s.verifier.(*email.VerificationService); ok {
+		v.Mailer = m
+	}
+}
+
+// SetVerifier 替换验证码服务（测试注入确定性实现用；生产代码不要调用）。
+func (s *Service) SetVerifier(v CodeIssuer) {
+	s.verifier = v
 }
 
 // SetEvictor 注入隧道服务端。隧道晚于用户服务启动（它需要 Identity 查询），

@@ -990,6 +990,18 @@
       <div class="modal-body">
         <div class="form-text mb-3" x-text="t('每个访问码是一条独立隧道：独立地址、独立密钥，首次连接后绑定到那台设备。换机器时先解绑再重连。','Each access code is an independent tunnel: its own address and key, bound to the first device that connects. Unbind before moving to a new machine.')"></div>
 
+        <div class="mb-3" x-show="!isAdmin" x-cloak>
+          <span class="me-2 small" x-text="t('配额','Quota')"></span>
+          <span class="badge rounded-pill" :class="quotaExceeded(me.quota,'max_access_codes','access_codes') ? 'text-bg-danger' : 'text-bg-secondary'"
+                x-text="t('已创建','created') + ' ' + quotaRatio(me.quota,'max_access_codes','access_codes')"></span>
+          <span class="badge rounded-pill text-bg-secondary"
+                x-text="t('在线隧道','online tunnels') + ' ' + quotaRatio(me.quota,'max_tunnels','tunnels')"></span>
+          <span class="badge rounded-pill text-bg-secondary"
+                x-text="t('转发规则','rules') + ' ' + quotaRatio(me.quota,'max_rules','rules')"></span>
+          <span class="small text-danger ms-2" x-show="quotaExceeded(me.quota,'max_access_codes','access_codes')"
+                x-text="t('访问码已达上限，删除不用的之后才能新建','code quota reached — delete unused ones first')"></span>
+        </div>
+
         <form class="row g-2 align-items-end mb-3" @submit.prevent="createCode()">
           <div class="col-md-6">
             <label class="form-label small mb-1" x-text="t('访问码名称','Access Code Name')"></label>
@@ -999,7 +1011,7 @@
             <input class="form-control form-control-sm" :value="codeOwnerName(codesScopeUserId)" readonly/>
           </div>
           <div class="col-md-3">
-            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="codeSaving">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="codeSaving || (!isAdmin && quotaExceeded(me.quota,'max_access_codes','access_codes'))">
               <span x-text="t('创建访问码','Create Code')"></span>
             </button>
           </div>
@@ -1203,12 +1215,98 @@
             <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_rules_per_user"/>
           </div>
           <div class="col-12">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" x-model="settingsForm.enable_registration" id="chkRegistration"/>
+              <label class="form-check-label small" for="chkRegistration">
+                <span x-text="t('开放自助注册','Open self-service registration')"></span>
+                <span class="text-muted" x-show="!emailConfigured()" x-text="t('（未配置邮件，注册无需邮箱验证）','(email not configured — no verification at signup)')"></span>
+              </label>
+            </div>
+          </div>
+          <div class="col-12">
             <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="settingsSaving" x-text="t('保存','Save')"></button>
           </div>
           <div class="col-12">
             <div class="form-text" x-text="t('0 表示不限。改动即时生效，正在使用的隧道与规则不受影响。','0 means unlimited. Changes take effect immediately; existing tunnels and rules are unaffected.')"></div>
           </div>
         </form>
+        <hr/>
+        <div class="d-flex align-items-center justify-content-between">
+          <div class="small">
+            <i class="bi bi-envelope me-1"></i>
+            <span x-text="t('邮件（SMTP）','Email (SMTP)')"></span>:
+            <span class="badge rounded-pill" :class="smtpConfigured() ? 'text-bg-success' : 'text-bg-secondary'"
+                  x-text="smtpConfigured() ? t('已配置','Configured') : t('未配置','Not configured')"></span>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary btn-icon" @click="showSMTPModal()">
+            <i class="bi bi-gear me-1"></i><span x-text="t('配置','Configure')"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SMTP Modal（发信配置；密码存 bbolt，永不回显）
+     ============================================================ -->
+<div class="modal fade" id="smtpModal" tabindex="-1" aria-labelledby="smtpModalLabel">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="smtpModalLabel"><i class="bi bi-envelope-gear me-2"></i><span x-text="t('邮件设置（SMTP）','Email Settings (SMTP)')"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-info py-2 small" x-text="t('用于注册验证码与找回密码邮件。配置保存在服务端数据库，密码保存后不再回显。','Used for registration and password-reset codes. Stored in the server database; the password is never shown again after saving.')"></div>
+        <form class="row g-2" @submit.prevent="saveSMTP()">
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('SMTP 服务器（留空 = 停用邮件功能）','SMTP host (blank = disable email)')"></label>
+            <input class="form-control form-control-sm" x-model="smtpForm.host" placeholder="smtp.example.com"/>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small mb-1" x-text="t('端口','Port')"></label>
+            <input class="form-control form-control-sm" type="number" min="0" max="65535" x-model.number="smtpForm.port" placeholder="587"/>
+          </div>
+          <div class="col-md-8">
+            <label class="form-label small mb-1" x-text="t('加密方式','Encryption')"></label>
+            <select class="form-select form-select-sm" x-model="smtpForm.encryption">
+              <option value="starttls" x-text="t('STARTTLS（587 端口常用）','STARTTLS (port 587)')"></option>
+              <option value="ssl" x-text="t('SSL/TLS（465 端口常用）','SSL/TLS (port 465)')"></option>
+              <option value="none" x-text="t('无（仅内网中继）','None (local relay only)')"></option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1" x-text="t('账号','Username')"></label>
+            <input class="form-control form-control-sm" x-model="smtpForm.username" autocomplete="off"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1" x-text="t('密码','Password')"></label>
+            <input class="form-control form-control-sm" type="password" x-model="smtpForm.password" autocomplete="new-password"
+                   :placeholder="smtpHasPassword ? t('已保存（留空 = 不修改）','saved (blank = keep)') : ''"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1" x-text="t('发件人地址','From address')"></label>
+            <input class="form-control form-control-sm" x-model="smtpForm.from" placeholder="no-reply@example.com"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1" x-text="t('发件人显示名','From name')"></label>
+            <input class="form-control form-control-sm" x-model="smtpForm.from_name" placeholder="Port Forward"/>
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="smtpSaving" x-text="t('保存','Save')"></button>
+          </div>
+        </form>
+        <hr/>
+        <div class="row g-2">
+          <div class="col-8">
+            <input class="form-control form-control-sm" x-model="smtpTestTo" :placeholder="t('收测试邮件的邮箱','email for the test message')"/>
+          </div>
+          <div class="col-4">
+            <button class="btn btn-outline-secondary btn-sm w-100" @click="sendTestEmail()" :disabled="smtpTestSending"
+                    x-text="t('发测试邮件','Send test')"></button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1229,26 +1327,45 @@
           <dt class="col-5" x-text="t('用户名','Username')"></dt><dd class="col-7" x-text="me.username"></dd>
           <dt class="col-5" x-text="t('角色','Role')"></dt><dd class="col-7" x-text="me.role==='admin' ? t('管理员','Admin') : t('普通用户','User')"></dd>
           <dt class="col-5" x-text="t('用户组','Group')"></dt><dd class="col-7" x-text="me.group_name || t('默认组','default')"></dd>
-          <dt class="col-5" x-text="t('端口区间','Port Range')"></dt>
-          <dd class="col-7 font-monospace">
-            <span x-text="me.quota && me.quota.port_range_start ? (me.quota.port_range_start + '-' + me.quota.port_range_end) : t('不限','unlimited')"></span>
-            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.port_source)"></span>
-          </dd>
-          <dt class="col-5" x-text="t('访问码上限','Code Quota')"></dt>
-          <dd class="col-7">
-            <span x-text="me.quota && me.quota.max_access_codes ? me.quota.max_access_codes : t('不限','unlimited')"></span>
-            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.access_code_source)"></span>
-          </dd>
-          <dt class="col-5" x-text="t('并发隧道上限','Tunnel Quota')"></dt>
-          <dd class="col-7">
-            <span x-text="me.quota && me.quota.max_tunnels ? me.quota.max_tunnels : t('不限','unlimited')"></span>
-            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.tunnel_source)"></span>
-          </dd>
-          <dt class="col-5" x-text="t('规则上限','Rule Quota')"></dt>
-          <dd class="col-7">
-            <span x-text="me.quota && me.quota.max_rules ? me.quota.max_rules : t('不限','unlimited')"></span>
-            <span class="text-muted ms-1" x-text="quotaSourceLabel(me.quota && me.quota.rule_source)"></span>
-          </dd>
+          <template x-if="!isAdmin">
+            <dt class="col-5" x-text="t('端口区间','Port Range')"></dt>
+          </template>
+          <template x-if="!isAdmin">
+            <dd class="col-7 font-monospace">
+              <span x-text="me.quota && me.quota.port_range_start ? (me.quota.port_range_start + '-' + me.quota.port_range_end) : t('未分配','none')"></span>
+              <span class="text-muted ms-1 small" x-text="quotaSourceLabel(me.quota && me.quota.port_source)"></span>
+            </dd>
+          </template>
+          <template x-if="!isAdmin">
+            <dt class="col-5" x-text="t('访问码','Access Codes')"></dt>
+          </template>
+          <template x-if="!isAdmin">
+            <dd class="col-7">
+              <span class="badge rounded-pill" :class="quotaExceeded(me.quota,'max_access_codes','access_codes') ? 'text-bg-danger' : 'text-bg-secondary'"
+                    x-text="quotaRatio(me.quota,'max_access_codes','access_codes')"></span>
+              <span class="text-muted ms-1 small" x-text="quotaSourceLabel(me.quota && me.quota.access_code_source)"></span>
+            </dd>
+          </template>
+          <template x-if="!isAdmin">
+            <dt class="col-5" x-text="t('在线隧道','Online Tunnels')"></dt>
+          </template>
+          <template x-if="!isAdmin">
+            <dd class="col-7">
+              <span class="badge rounded-pill" :class="quotaExceeded(me.quota,'max_tunnels','tunnels') ? 'text-bg-danger' : 'text-bg-secondary'"
+                    x-text="quotaRatio(me.quota,'max_tunnels','tunnels')"></span>
+              <span class="text-muted ms-1 small" x-text="quotaSourceLabel(me.quota && me.quota.tunnel_source)"></span>
+            </dd>
+          </template>
+          <template x-if="!isAdmin">
+            <dt class="col-5" x-text="t('转发规则','Rules')"></dt>
+          </template>
+          <template x-if="!isAdmin">
+            <dd class="col-7">
+              <span class="badge rounded-pill" :class="quotaExceeded(me.quota,'max_rules','rules') ? 'text-bg-danger' : 'text-bg-secondary'"
+                    x-text="quotaRatio(me.quota,'max_rules','rules')"></span>
+              <span class="text-muted ms-1 small" x-text="quotaSourceLabel(me.quota && me.quota.rule_source)"></span>
+            </dd>
+          </template>
         </dl>
         <div class="alert alert-warning py-2 small" x-show="me.must_change_password" x-cloak
              x-text="t('这是初始密码，请立即修改。','This is the initial password — change it now.')"></div>
@@ -1439,9 +1556,14 @@ function portForwardApp() {
 	    userSaving: false,
 	    groupForm: { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false },
 	    groupSaving: false,
-	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0 },
+	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, enable_registration:false },
 	    settingsSaving: false,
 	    globalSettings: null, // 组页面回退值展示用
+	    smtpForm: { host:'', port:587, username:'', password:'', from:'', from_name:'', encryption:'starttls' },
+	    smtpHasPassword: false,
+	    smtpTestTo: '',
+	    smtpSaving: false, smtpTestSending: false,
+	    _smtpModal: null,
 	    pwForm: { old_password:'', new_password:'' },
 	    pwSaving: false,
 	    _usersModal: null,
@@ -1483,6 +1605,7 @@ function portForwardApp() {
       this._codesModal = new bootstrap.Modal(document.getElementById('codesModal'))
       this._groupsModal = new bootstrap.Modal(document.getElementById('groupsModal'))
       this._settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'))
+      this._smtpModal = new bootstrap.Modal(document.getElementById('smtpModal'))
       this._accountModal = new bootstrap.Modal(document.getElementById('accountModal'))
       this._sessionsModal = new bootstrap.Modal(document.getElementById('sessionsModal'))
       const sessionsModalEl = document.getElementById('sessionsModal')
@@ -1710,6 +1833,10 @@ function portForwardApp() {
     },
 
     async createCode() {
+      if (!this.isAdmin && this.quotaExceeded(this.me.quota, 'max_access_codes', 'access_codes')) {
+        showToast('warning', _t('访问码数量已达上限，请先删除不用的访问码','Access code quota reached — delete unused codes first'))
+        return
+      }
       this.codeSaving = true
       try {
         const res = await fetch('/api/access-codes', {
@@ -1933,7 +2060,8 @@ function portForwardApp() {
             port_range_end: Number(this.settingsForm.port_range_end) || 0,
             max_access_codes_per_user: Number(this.settingsForm.max_access_codes_per_user) || 0,
             max_tunnels_per_user: Number(this.settingsForm.max_tunnels_per_user) || 0,
-            max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0
+            max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0,
+            enable_registration: !!this.settingsForm.enable_registration
           })
         })
         const d = await res.json()
@@ -1955,6 +2083,95 @@ function portForwardApp() {
       if (src === 'global') return _t('（全局默认）','(global default)')
       if (src === 'admin') return _t('（管理员不受限）','(admin, unlimited)')
       return ''
+    },
+
+    // 配额用量 0/5：上限 0 = 不限，只显示用量。
+    quotaRatio(quota, maxKey, usedKey) {
+      const q = quota || {}
+      const used = (q.used && q.used[usedKey]) || 0
+      const max = q[maxKey] || 0
+      return max > 0 ? used + '/' + max : String(used)
+    },
+
+    // 用量达上限（上限为 0 = 不限，永不超过）。
+    quotaExceeded(quota, maxKey, usedKey) {
+      const q = quota || {}
+      const max = q[maxKey] || 0
+      if (max <= 0) return false
+      return ((q.used && q.used[usedKey]) || 0) >= max
+    },
+
+    // --- SMTP（仅管理员）---
+
+    smtpConfigured() {
+      return !!(this.globalSettings && this.globalSettings._smtp_configured)
+    },
+
+    showSMTPModal() {
+      this._smtpModal.show()
+      fetch('/api/smtp').then(r => r.json()).then(d => {
+        if (!d.success) return
+        const v = d.data || {}
+        this.smtpForm = {
+          host: v.host || '', port: v.port || 587, username: v.username || '',
+          password: '', from: v.from || '', from_name: v.from_name || '',
+          encryption: v.encryption || 'starttls'
+        }
+        this.smtpHasPassword = !!v.has_password
+      })
+      // 全局设置弹窗里的"已配置"徽章由 settings 里带出的 _smtp_configured 驱动。
+      fetch('/api/settings').then(r => r.json()).then(d => {
+        if (d.success && d.data) this.globalSettings = d.data
+      })
+    },
+
+    async saveSMTP() {
+      this.smtpSaving = true
+      try {
+        const res = await fetch('/api/smtp', {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            host: this.smtpForm.host.trim(),
+            port: Number(this.smtpForm.port) || 0,
+            username: this.smtpForm.username.trim(),
+            password: this.smtpForm.password, // 留空 = 保留原值（服务端约定）
+            from: this.smtpForm.from.trim(),
+            from_name: this.smtpForm.from_name.trim(),
+            encryption: this.smtpForm.encryption
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('邮件设置已更新','Email settings updated'))
+          this.smtpHasPassword = !!this.smtpForm.password || this.smtpHasPassword
+          this.smtpForm.password = ''
+        } else {
+          showToast('danger', d.message || _t('保存失败','Save failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.smtpSaving = false }
+    },
+
+    async sendTestEmail() {
+      if (!this.smtpTestTo.trim()) {
+        showToast('warning', _t('请填写接收测试邮件的邮箱','Enter the email to receive the test'))
+        return
+      }
+      this.smtpTestSending = true
+      try {
+        const res = await fetch('/api/smtp/test', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ to: this.smtpTestTo.trim() })
+        })
+        const d = await res.json()
+        if (d.success) showToast('success', d.message || _t('测试邮件已发送','Test email sent'))
+        else showToast('danger', d.message || _t('发送失败','Send failed'))
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.smtpTestSending = false }
     },
 
     // 管理员在规则表单里换归属用户时，目标地址清空（管理员手填任意主机）。

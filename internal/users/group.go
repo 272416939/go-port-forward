@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go-port-forward/internal/email"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
 )
@@ -41,6 +42,9 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	}
 	if req.MaxRulesPerUser != nil {
 		next.MaxRulesPerUser = *req.MaxRulesPerUser
+	}
+	if req.EnableRegistration != nil {
+		next.EnableRegistration = *req.EnableRegistration
 	}
 	if req.DefaultGroupID != nil {
 		gid := strings.TrimSpace(*req.DefaultGroupID)
@@ -77,8 +81,50 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	logger.S.Infow("全局设置已更新 | global settings updated",
 		"port_range", fmt.Sprintf("%d-%d", next.PortRangeStart, next.PortRangeEnd),
 		"max_codes", next.MaxAccessCodesPerUser, "max_tunnels", next.MaxTunnelsPerUser,
-		"max_rules", next.MaxRulesPerUser)
+		"max_rules", next.MaxRulesPerUser, "registration", next.EnableRegistration)
 	return next, nil
+}
+
+// SMTPConfig 读取发信配置（可能为 nil = 未配置）。
+func (s *Service) SMTPConfig() (*models.SMTPConfig, error) { return s.store.SMTPConfig() }
+
+// testMailer 取当前发信实现（测试注入的 CodeIssuer 不持有 Mailer）。
+func (s *Service) testMailer() email.Mailer {
+	if v, ok := s.verifier.(*email.VerificationService); ok {
+		return v.Mailer
+	}
+	return nil
+}
+
+// UpdateSMTP 更新发信配置。
+func (s *Service) UpdateSMTP(req *models.UpdateSMTPRequest) (*models.SMTPConfig, error) {
+	cfg, err := s.store.UpdateSMTP(req)
+	if err != nil {
+		return nil, err
+	}
+	logger.S.Infow("邮件设置已更新 | email settings updated",
+		"host", cfg.Host, "port", cfg.Port, "configured", cfg.Configured())
+	return cfg, nil
+}
+
+// SendTestEmail 发一封测试邮件。
+func (s *Service) SendTestEmail(to string) error {
+	cfg, err := s.store.SMTPConfig()
+	if err != nil {
+		return err
+	}
+	if !cfg.Configured() {
+		return fmt.Errorf("%w: 邮件功能未配置，请先填写服务器与发件人 | email is not configured", ErrEmailNotConfigured)
+	}
+	m := s.testMailer()
+	if m == nil {
+		return fmt.Errorf("%w: 邮件功能未配置 | mailer is not available", ErrEmailNotConfigured)
+	}
+	body := "这是一封测试邮件。收到它说明 SMTP 配置正确，" +
+		"注册验证码与找回密码邮件将经由同一通道发送。\n\n" +
+		"If you received this, the SMTP settings work; " +
+		"registration and password-reset emails use the same channel."
+	return m.Send(to, "Port Forward 测试邮件 | test email", body)
 }
 
 // ListGroups 返回全部用户组（附带成员数）。

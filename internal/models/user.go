@@ -28,9 +28,12 @@ type User struct {
 
 	ID       string `json:"id"` // uuid
 	Username string `json:"username"`
-	Role     string `json:"role"`     // admin | user
+	Role     string `json:"role"`  // admin | user
 	GroupID  string `json:"group_id"` // 所属用户组；空值表示未分组（配额取全局默认）
-	Comment  string `json:"comment,omitempty"`
+	// Email 用于注册验证与找回密码。小写存储；可为空（SMTP 未配置时注册的
+	// 账号没有邮箱——收集了不验证等于没有）。
+	Email   string `json:"email,omitempty"`
+	Comment string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"-"` // bcrypt
 
@@ -76,6 +79,55 @@ type LoginRequest struct {
 type ChangePasswordRequest struct {
 	OldPassword string `json:"old_password"`
 	NewPassword string `json:"new_password"`
+}
+
+// RegisterRequest 是自助注册的请求。
+//
+// Email 与 Code 只在 SMTP 已配置时必填；未配置时提交了也会被忽略——收集了
+// 不验证的邮箱是假数据。
+type RegisterRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Email    string `json:"email"`
+	Code     string `json:"code"`
+}
+
+// EmailCodeRequest 是请求发验证码的请求。
+//
+// Purpose 绑定用途：注册用的验证码不能拿去重置密码，否则「注册一次的验证码」
+// 就成了「改任意账号密码的万能钥匙」。
+type EmailCodeRequest struct {
+	Email   string `json:"email"`
+	Purpose string `json:"purpose"` // register | reset
+}
+
+// ForgotPasswordRequest 是凭邮箱验证码重置密码的请求。
+type ForgotPasswordRequest struct {
+	Email       string `json:"email"`
+	Code        string `json:"code"`
+	NewPassword string `json:"new_password"`
+}
+
+// 验证码用途。
+const (
+	PurposeRegister = "register"
+	PurposeReset    = "reset"
+)
+
+// ValidateEmail 校验并规范化邮箱（小写、非空、含 @）。
+//
+// 只做形态校验，不验证可达性——验证码本身才是可达性验证，正则写得再严也
+// 挡不住 typo 域名。
+func ValidateEmail(s string) (string, error) {
+	email := strings.ToLower(strings.TrimSpace(s))
+	if email == "" {
+		return "", fmt.Errorf("邮箱不能为空 | email is required")
+	}
+	at := strings.IndexByte(email, '@')
+	if at <= 0 || at == len(email)-1 || strings.ContainsAny(email, " \t") {
+		return "", fmt.Errorf("邮箱格式无效 | invalid email format")
+	}
+	return email, nil
 }
 
 // CurrentUser 是 /api/auth/me 的响应：当前身份与其有效配额。

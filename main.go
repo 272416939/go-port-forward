@@ -11,6 +11,7 @@ import (
 
 	"go-port-forward/internal/auth"
 	"go-port-forward/internal/config"
+	"go-port-forward/internal/email"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/logger"
@@ -189,6 +190,16 @@ func (a *application) Start() error {
 		return fmt.Errorf("user service: %w", uerr)
 	}
 	a.users = usrs
+	// 邮件发信：SMTP 配置存 bbolt（面板热改），每次发送实时读取最新配置。
+	usrs.SetMailer(&email.SMTPMailer{Config: func() *models.SMTPConfig {
+		c, err := store.SMTPConfig()
+		if err != nil {
+			return nil
+		}
+		return c
+	}})
+	// 规则数计数（配额用量 0/5 展示的数据源之一）。
+	usrs.SetRulesCounter(mgr.CountRulesByUser)
 	if _, _, _, berr := usrs.Bootstrap(); berr != nil {
 		return fmt.Errorf("bootstrap admin: %w", berr)
 	}

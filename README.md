@@ -329,8 +329,8 @@ change it on first login; delete the file afterwards.
 - 组某项配额填 **0** 表示取全局默认；全局也为 0 表示不限。
 - 组的区间与上限**不能突破全局设置**（保存时校验）；收紧全局设置时若已有组
   越界会被拒绝并列出冲突的组名。
-- 「我的账号」页会显示当前有效配额及其来源（组 / 全局默认），用户不必来问
-  「为什么是这个数」。
+- 「我的账号」页与「我的访问码」页都会显示**当前用量与上限**（如 `1/3`）及其
+  来源（组 / 全局默认），用户不必来问「为什么是这个数」「还能建几个」。
 - 配额严格以组为准：给个别用户特殊待遇请为他建一个专属组，而不是在用户上
   塞配额字段。
 
@@ -338,7 +338,36 @@ Quotas have two layers: **Global Settings** (the ceiling — global port range, 
 code/tunnel/rule limits) and **User Groups** (the carrier — each group holds concrete
 quotas). A group value of 0 falls back to global; global 0 means unlimited. Group quotas
 may not exceed the ceiling; tightening the ceiling is refused while any group would
-breach it. Quota origins are surfaced in the account page.
+breach it. Usage vs. limit (e.g. `1/3`) and the quota origin are shown on the account
+and access-code pages.
+
+### 自助注册 | Self-service Registration
+
+「全局设置」里的**开放注册**开关控制登录页的注册入口，默认关闭。开启后，访客
+可自助创建账号：落入默认组、配额由组控制、注册即启用（管理员可随时停用）。
+
+- **SMTP 已配置**：注册必须填写邮箱并通过邮件验证码验证；「找回密码」可用。
+- **SMTP 未配置**：注册仍可开放（仅用户名 + 密码），但不收集邮箱——收集了
+  不验证的邮箱是假数据；此时找回密码只能由管理员重置。
+- 注册接口有 IP 限频（每小时 10 次），验证码发送有独立的邮箱限频。
+
+The **Open Registration** switch in Global Settings controls the sign-up entry on the
+login page (off by default). When on, visitors create accounts into the default group
+(quotas apply, accounts start enabled). With SMTP configured, signup requires an email
+verification code and password reset works; without SMTP, signup still works but no
+email is collected and only an admin can reset passwords.
+
+### 邮件（SMTP）| Email (SMTP)
+
+管理员在「全局设置 → 邮件（SMTP）」里配置发信服务器（主机、端口、加密方式
+STARTTLS/SSL、账号密码、发件人）。配置保存在服务端数据库，**密码保存后不再
+回显**（界面上只显示「已配置」状态）；更新时密码留空即保留原值。配置完成后
+可发一封测试邮件验证连通性。
+
+Admins configure the SMTP relay under Global Settings → Email (host, port, encryption
+STARTTLS/SSL, credentials, sender). The config lives in the server database and the
+**password is never shown again** after saving (only a "configured" badge); leaving it
+blank on update keeps the saved value. A test-email button verifies connectivity.
 
 ### 访问码与设备绑定 | Access Codes & Device Binding
 

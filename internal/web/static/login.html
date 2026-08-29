@@ -17,9 +17,11 @@
 </script>
 <style>
   body { min-height: 100vh; display: grid; place-items: center; background: var(--bs-tertiary-bg); }
-  .login-card { width: 100%; max-width: 22rem; }
+  .login-card { width: 100%; max-width: 24rem; }
   .login-card__brand { display: flex; align-items: center; gap: .6rem; justify-content: center; margin-bottom: 1.25rem; }
   .login-card__brand img { width: 2.25rem; height: 2.25rem; }
+  .pane { display: none; }
+  .pane.active { display: block; }
 </style>
 </head>
 <body>
@@ -31,19 +33,70 @@
   </div>
   <div class="card shadow-sm">
     <div class="card-body p-4">
-      <h1 class="h6 mb-3" id="title">登录</h1>
+      <ul class="nav nav-tabs mb-3" id="tabs">
+        <li class="nav-item"><button class="nav-link active" data-pane="login" id="tabLogin">登录</button></li>
+        <li class="nav-item"><button class="nav-link" data-pane="register" id="tabRegister" hidden>注册</button></li>
+        <li class="nav-item"><button class="nav-link" data-pane="forgot" id="tabForgot" hidden>找回密码</button></li>
+      </ul>
+
       <div class="alert alert-danger py-2 small d-none" id="error"></div>
-      <form id="form">
+      <div class="alert alert-success py-2 small d-none" id="okMsg"></div>
+
+      <!-- 登录 -->
+      <form id="formLogin" class="pane active">
         <div class="mb-3">
-          <label class="form-label small mb-1" for="username" id="lblUser">用户名</label>
-          <input class="form-control" id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required/>
+          <label class="form-label small mb-1" for="liUser" id="lblUser">用户名</label>
+          <input class="form-control" id="liUser" autocomplete="username" autocapitalize="off" spellcheck="false" required/>
         </div>
         <div class="mb-3">
-          <label class="form-label small mb-1" for="password" id="lblPass">密码</label>
-          <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" required/>
+          <label class="form-label small mb-1" for="liPass" id="lblPass">密码</label>
+          <input class="form-control" id="liPass" type="password" autocomplete="current-password" required/>
         </div>
         <button class="btn btn-primary w-100" type="submit" id="submit">登录</button>
       </form>
+
+      <!-- 注册 -->
+      <form id="formRegister" class="pane">
+        <div class="mb-3">
+          <label class="form-label small mb-1">用户名</label>
+          <input class="form-control" id="rgUser" autocomplete="username" autocapitalize="off" spellcheck="false" required/>
+          <div class="form-text" id="rgUserHint">3-32 位小写字母、数字或 _ - .</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small mb-1">密码</label>
+          <input class="form-control" id="rgPass" type="password" autocomplete="new-password" required minlength="8"/>
+          <div class="form-text">至少 8 位。</div>
+        </div>
+        <div class="mb-3" id="rgEmailBox" hidden>
+          <label class="form-label small mb-1">邮箱</label>
+          <input class="form-control" id="rgEmail" type="email" autocomplete="email"/>
+          <div class="input-group input-group-sm mt-2">
+            <input class="form-control" id="rgCode" placeholder="邮箱验证码" autocomplete="one-time-code"/>
+            <button class="btn btn-outline-secondary" type="button" id="btnCode">发送验证码</button>
+          </div>
+        </div>
+        <button class="btn btn-primary w-100" type="submit">注册</button>
+      </form>
+
+      <!-- 找回密码 -->
+      <form id="formForgot" class="pane">
+        <div class="mb-3">
+          <label class="form-label small mb-1">注册时的邮箱</label>
+          <input class="form-control" id="fgEmail" type="email" autocomplete="email"/>
+        </div>
+        <div class="mb-3">
+          <div class="input-group input-group-sm">
+            <input class="form-control" id="fgCode" placeholder="邮箱验证码" autocomplete="one-time-code"/>
+            <button class="btn btn-outline-secondary" type="button" id="btnCodeForgot">发送验证码</button>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small mb-1">新密码</label>
+          <input class="form-control" id="fgPass" type="password" autocomplete="new-password" required minlength="8"/>
+        </div>
+        <button class="btn btn-primary w-100" type="submit">重置密码</button>
+      </form>
+
       <div class="form-text mt-3" id="hint">
         首次使用请查看服务端启动日志或程序目录下的 admin-credentials.txt 获取初始管理员密码。
       </div>
@@ -52,57 +105,171 @@
 </div>
 
 <script>
-// 独立页面，不引入 Alpine：登录只有一个表单，一段原生 JS 比再拉一套框架更省事。
+// 独立页面，不引入 Alpine：登录/注册/找回各一个表单，一段原生 JS 比再拉一套框架省事。
 const isEn = (() => {
   try { const s = localStorage.getItem('app_lang'); if (s) return s === 'en' } catch (e) {}
   return !/^zh\b/i.test(navigator.language || '')
 })()
 
-if (isEn) {
-  document.documentElement.lang = 'en'
-  document.title = 'Sign in · Port Forward'
-  document.getElementById('title').textContent = 'Sign in'
-  document.getElementById('lblUser').textContent = 'Username'
-  document.getElementById('lblPass').textContent = 'Password'
-  document.getElementById('submit').textContent = 'Sign in'
-  document.getElementById('hint').textContent =
-    'On first run, find the initial administrator password in the server startup log or in admin-credentials.txt next to the executable.'
+const i18n = isEn ? {
+  tabs: { login: 'Sign in', register: 'Register', forgot: 'Reset password' },
+  user: 'Username', pass: 'Password', submit: 'Sign in',
+  userHint: '3-32 chars: lowercase letters, digits, _ - .',
+  passHint: 'At least 8 characters.', email: 'Email', code: 'Email code',
+  sendCode: 'Send code', register: 'Register', reset: 'Reset password',
+  emailUsed: 'Email used at registration', newPass: 'New password',
+  hint: 'On first run, find the initial administrator password in the server startup log or in admin-credentials.txt next to the executable.',
+  sent: 'The code has been sent (valid for 10 minutes).', registered: 'Registered — please sign in.',
+  resetDone: 'Password reset — sign in with the new password.', resendIn: 'Resend in {n}s',
+} : {
+  tabs: { login: '登录', register: '注册', forgot: '找回密码' },
+  user: '用户名', pass: '密码', submit: '登录',
+  userHint: '3-32 位小写字母、数字或 _ - .',
+  passHint: '至少 8 位。', email: '邮箱', code: '邮箱验证码',
+  sendCode: '发送验证码', register: '注册', reset: '重置密码',
+  emailUsed: '注册时的邮箱', newPass: '新密码',
+  hint: '首次使用请查看服务端启动日志或程序目录下的 admin-credentials.txt 获取初始管理员密码。',
+  sent: '验证码已发送（10 分钟内有效）。', registered: '注册成功，请登录。',
+  resetDone: '密码已重置，请用新密码登录。', resendIn: '{n}s 后重发',
 }
+
+document.title = isEn ? 'Sign in · Port Forward' : '登录 · Port Forward'
+document.getElementById('tabLogin').textContent = i18n.tabs.login
+document.getElementById('tabRegister').textContent = i18n.tabs.register
+document.getElementById('tabForgot').textContent = i18n.tabs.forgot
+document.getElementById('lblUser').textContent = i18n.user
+document.getElementById('lblPass').textContent = i18n.pass
+document.getElementById('submit').textContent = i18n.submit
+document.getElementById('rgUserHint').textContent = i18n.userHint
+document.getElementById('rgUser').previousElementSibling.textContent = i18n.user
+document.getElementById('rgPass').previousElementSibling.textContent = i18n.pass
+document.getElementById('rgPassHint') && 0
+document.getElementById('rgEmailBox').querySelector('label').textContent = i18n.email
+document.getElementById('rgCode').placeholder = i18n.code
+document.getElementById('btnCode').textContent = i18n.sendCode
+document.getElementById('formRegister').querySelector('button[type=submit]').textContent = i18n.register
+document.getElementById('fgEmail').previousElementSibling.textContent = i18n.emailUsed
+document.getElementById('fgCode').placeholder = i18n.code
+document.getElementById('btnCodeForgot').textContent = i18n.sendCode
+document.getElementById('fgPass').previousElementSibling.textContent = i18n.newPass
+document.getElementById('formForgot').querySelector('button[type=submit]').textContent = i18n.reset
+document.getElementById('hint').textContent = i18n.hint
+if (isEn) document.documentElement.lang = 'en'
 
 const errorBox = document.getElementById('error')
-function showError(msg) {
-  errorBox.textContent = msg
-  errorBox.classList.remove('d-none')
+const okBox = document.getElementById('okMsg')
+function showError(msg) { errorBox.textContent = msg; errorBox.classList.remove('d-none'); okBox.classList.add('d-none') }
+function showOk(msg) { okBox.textContent = msg; okBox.classList.remove('d-none'); errorBox.classList.add('d-none') }
+
+// --- 公开配置决定注册/找回入口是否可见 ---
+let emailReady = false
+;(async () => {
+  try {
+    const res = await fetch('/api/auth/public-config')
+    const d = await res.json()
+    if (d.success && d.data) {
+      emailReady = !!d.data.email_ready
+      document.getElementById('tabRegister').hidden = !d.data.registration_open
+      document.getElementById('tabForgot').hidden = !emailReady
+    }
+  } catch (e) { /* 拿不到就只显示登录，最坏情况可用 */ }
+})()
+
+// --- tab 切换 ---
+for (const btn of document.querySelectorAll('#tabs .nav-link')) {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#tabs .nav-link').forEach(x => x.classList.remove('active'))
+    btn.classList.add('active')
+    for (const p of document.querySelectorAll('.pane')) p.classList.remove('active')
+    document.getElementById('form' + btn.dataset.pane.charAt(0).toUpperCase() + btn.dataset.pane.slice(1)).classList.add('active')
+    errorBox.classList.add('d-none'); okBox.classList.add('d-none')
+  })
 }
 
-document.getElementById('form').addEventListener('submit', async (ev) => {
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  })
+  const d = await res.json().catch(() => ({}))
+  if (!d.success) throw new Error(d.message || (isEn ? 'Request failed' : '请求失败'))
+  return d
+}
+
+// --- 发码按钮 + 60s 倒计时 ---
+function wireCodeButton(btnId, emailId, purpose) {
+  const btn = document.getElementById(btnId)
+  btn.addEventListener('click', async () => {
+    if (btn.disabled) return
+    if (!emailReady) { showError(isEn ? 'Email is not configured on the server' : '服务端未配置邮件功能'); return }
+    const email = document.getElementById(emailId).value.trim()
+    if (!email) { showError(isEn ? 'Enter your email first' : '请先填写邮箱'); return }
+    btn.disabled = true
+    try {
+      await post('/api/auth/email-code', { email, purpose })
+      showOk(i18n.sent)
+      let n = 60
+      const orig = i18n.sendCode
+      const timer = setInterval(() => {
+        n--
+        btn.textContent = i18n.resendIn.replace('{n}', n)
+        if (n <= 0) { clearInterval(timer); btn.textContent = orig; btn.disabled = false }
+      }, 1000)
+    } catch (e) {
+      btn.disabled = false
+      showError(e.message)
+    }
+  })
+}
+wireCodeButton('btnCode', 'rgEmail', 'register')
+wireCodeButton('btnCodeForgot', 'fgEmail', 'reset')
+
+// --- 登录 ---
+document.getElementById('formLogin').addEventListener('submit', async (ev) => {
   ev.preventDefault()
-  errorBox.classList.add('d-none')
   const btn = document.getElementById('submit')
   btn.disabled = true
   try {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: document.getElementById('username').value.trim(),
-        password: document.getElementById('password').value
-      })
+    await post('/api/auth/login', {
+      username: document.getElementById('liUser').value.trim(),
+      password: document.getElementById('liPass').value
     })
-    const d = await res.json()
-    if (d.success) {
-      location.href = '/'
-      return
-    }
-    showError(d.message || (isEn ? 'Sign-in failed' : '登录失败'))
+    location.href = '/'
   } catch (e) {
-    showError((isEn ? 'Network error: ' : '网络错误: ') + e.message)
-  } finally {
-    btn.disabled = false
+    showError(e.message); btn.disabled = false
   }
 })
 
-document.getElementById('username').focus()
+// --- 注册 ---
+document.getElementById('formRegister').addEventListener('submit', async (ev) => {
+  ev.preventDefault()
+  try {
+    await post('/api/auth/register', {
+      username: document.getElementById('rgUser').value.trim(),
+      password: document.getElementById('rgPass').value,
+      email: emailReady ? document.getElementById('rgEmail').value.trim() : '',
+      code: emailReady ? document.getElementById('rgCode').value.trim() : ''
+    })
+    showOk(i18n.registered)
+    setTimeout(() => { document.getElementById('tabLogin').click() }, 1500)
+  } catch (e) { showError(e.message) }
+})
+
+// --- 找回密码 ---
+document.getElementById('formForgot').addEventListener('submit', async (ev) => {
+  ev.preventDefault()
+  try {
+    await post('/api/auth/forgot-password', {
+      email: document.getElementById('fgEmail').value.trim(),
+      code: document.getElementById('fgCode').value.trim(),
+      new_password: document.getElementById('fgPass').value
+    })
+    showOk(i18n.resetDone)
+    setTimeout(() => { document.getElementById('tabLogin').click() }, 1500)
+  } catch (e) { showError(e.message) }
+})
+
+document.getElementById('liUser').focus()
 </script>
 </body>
 </html>

@@ -38,6 +38,7 @@ type Store interface {
 	ListUsers() ([]*models.User, error)
 	GetUser(id string) (*models.User, error)
 	GetUserByName(name string) (*models.User, error)
+	GetUserByEmail(email string) (*models.User, error)
 	CreateUser(u *models.User) error
 	SaveUser(u *models.User) error
 	DeleteUser(id string) error
@@ -46,6 +47,10 @@ type Store interface {
 	// Global settings (singleton)
 	Settings() (models.Settings, error)
 	SaveSettings(cfg models.Settings) error
+	// SMTPConfig / UpdateSMTP：发信配置（第二键）。UpdateSMTP 的密码留空 =
+	// 保留原值（事务内读-改-写），整体清空 host = 删除配置。
+	SMTPConfig() (*models.SMTPConfig, error)
+	UpdateSMTP(req *models.UpdateSMTPRequest) (*models.SMTPConfig, error)
 
 	// User groups (quota carriers)
 	ListGroups() ([]*models.UserGroup, error)

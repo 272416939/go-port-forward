@@ -265,11 +265,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	h := &handler{mgr: s.manager, fw: s.fw, users: s.users, sessions: s.sessions, tunnel: s.tunnel}
 
-	// 认证（公开）
+	// 认证（公开 + 登录后）
 	mux.HandleFunc("POST /api/auth/login", h.login)
 	mux.HandleFunc("POST /api/auth/logout", h.logout)
 	mux.HandleFunc("GET /api/auth/me", s.authed(h.me))
 	mux.HandleFunc("POST /api/auth/password", s.authed(h.changePassword))
+
+	// 自助注册与找回密码（公开；注册受全局开关控制）
+	mux.HandleFunc("GET /api/auth/public-config", h.publicConfig)
+	mux.HandleFunc("POST /api/auth/register", h.register)
+	mux.HandleFunc("POST /api/auth/email-code", h.emailCode)
+	mux.HandleFunc("POST /api/auth/forgot-password", h.forgotPassword)
 
 	// REST API — 规则按归属过滤/校验，任何登录用户可访问
 	mux.HandleFunc("GET /api/rules", s.authed(h.listRules))
@@ -310,6 +316,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/groups/{id}", s.adminOnly(h.deleteGroup))
 	mux.HandleFunc("GET /api/settings", s.adminOnly(h.getSettings))
 	mux.HandleFunc("PUT /api/settings", s.adminOnly(h.updateSettings))
+
+	// SMTP 邮件设置（仅管理员；密码永不回显）
+	mux.HandleFunc("GET /api/smtp", s.adminOnly(h.getSMTP))
+	mux.HandleFunc("PUT /api/smtp", s.adminOnly(h.updateSMTP))
+	mux.HandleFunc("POST /api/smtp/test", s.adminOnly(h.testSMTP))
 
 	// 诊断与系统级操作（仅管理员）
 	mux.HandleFunc("GET /api/diagnostics", s.adminOnly(h.diagnostics))

@@ -17,10 +17,11 @@ var usersBucket = []byte("users")
 
 // 用户存储错误。
 var (
-	ErrUserNotFound   = errors.New("user not found")
-	ErrUserExists     = errors.New("username already exists")
-	ErrTunPoolFull    = errors.New("tunnel address pool exhausted")
-	ErrLastAdmin      = errors.New("cannot remove the last administrator")
+	ErrUserNotFound = errors.New("user not found")
+	ErrUserExists   = errors.New("username already exists")
+	ErrEmailExists  = errors.New("email already exists")
+	ErrTunPoolFull  = errors.New("tunnel address pool exhausted")
+	ErrLastAdmin    = errors.New("cannot remove the last administrator")
 )
 
 // userRecord 是用户的持久化形态。
@@ -39,6 +40,7 @@ type userRecord struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`
 	GroupID  string `json:"group_id,omitempty"`
+	Email    string `json:"email,omitempty"`
 	Comment  string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"password_hash"`
@@ -57,7 +59,7 @@ type userRecord struct {
 func toRecord(u *models.User) *userRecord {
 	return &userRecord{
 		CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
-		ID: u.ID, Username: u.Username, Role: u.Role, GroupID: u.GroupID, Comment: u.Comment,
+		ID: u.ID, Username: u.Username, Role: u.Role, GroupID: u.GroupID, Email: u.Email, Comment: u.Comment,
 		PasswordHash:       u.PasswordHash,
 		Disabled:           u.Disabled,
 		MustChangePassword: u.MustChangePassword,
@@ -67,7 +69,7 @@ func toRecord(u *models.User) *userRecord {
 func (r *userRecord) toModel() *models.User {
 	return &models.User{
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-		ID: r.ID, Username: r.Username, Role: r.Role, GroupID: r.GroupID, Comment: r.Comment,
+		ID: r.ID, Username: r.Username, Role: r.Role, GroupID: r.GroupID, Email: r.Email, Comment: r.Comment,
 		PasswordHash:       r.PasswordHash,
 		Disabled:           r.Disabled,
 		MustChangePassword: r.MustChangePassword,
@@ -139,31 +141,41 @@ func (s *boltStore) GetUserByName(name string) (*models.User, error) {
 	return out, nil
 }
 
-// CreateUser 在单个写事务内完成「用户名查重 + 落盘」。
+// CreateUser 在单个写事务内完成「用户名与邮箱查重 + 落盘」。
 //
 // 隧道地址不再在这里分配——它已下移到 AccessCode（见 CreateAccessCode）。
+// 邮箱查重必须在同一事务内：注册与找回密码都按邮箱定位唯一用户，两个并发
+// 注册若能绑定同一邮箱，找回密码就不知道该重置谁。
 func (s *boltStore) CreateUser(u *models.User) error {
 	if u.ID == "" {
 		return fmt.Errorf("storage: user id is required")
 	}
 	wantName := models.NormalizeUsername(u.Username)
+	wantEmail := strings.ToLower(strings.TrimSpace(u.Email))
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(usersBucket)
-		dup := false
+		dupName := false
+		dupEmail := false
 		if err := b.ForEach(func(_, v []byte) error {
 			var r userRecord
 			if err := json.Unmarshal(v, &r); err != nil {
 				return err
 			}
 			if models.NormalizeUsername(r.Username) == wantName {
-				dup = true
+				dupName = true
+			}
+			if wantEmail != "" && strings.EqualFold(strings.TrimSpace(r.Email), wantEmail) {
+				dupEmail = true
 			}
 			return nil
 		}); err != nil {
 			return err
 		}
-		if dup {
+		if dupName {
 			return fmt.Errorf("%w: %s", ErrUserExists, u.Username)
+		}
+		if dupEmail {
+			return fmt.Errorf("%w: %s", ErrEmailExists, wantEmail)
 		}
 
 		now := time.Now()
@@ -178,6 +190,39 @@ func (s *boltStore) CreateUser(u *models.User) error {
 		}
 		return b.Put([]byte(u.ID), data)
 	})
+}
+
+// GetUserByEmail 按邮箱查用户（找回密码用）。
+//
+// 邮箱唯一性由 CreateUser 在事务内保证，这里按全表扫描找第一个匹配即可。
+func (s *boltStore) GetUserByEmail(email string) (*models.User, error) {
+	want := strings.ToLower(strings.TrimSpace(email))
+	if want == "" {
+		return nil, fmt.Errorf("%w: empty email", ErrUserNotFound)
+	}
+	var out *models.User
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(usersBucket).ForEach(func(_, v []byte) error {
+			if out != nil {
+				return nil
+			}
+			var r userRecord
+			if err := json.Unmarshal(v, &r); err != nil {
+				return err
+			}
+			if strings.EqualFold(strings.TrimSpace(r.Email), want) {
+				out = r.toModel()
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, fmt.Errorf("%w: %s", ErrUserNotFound, want)
+	}
+	return out, nil
 }
 
 // SaveUser 覆盖写入已存在的用户（不改 CreatedAt）。

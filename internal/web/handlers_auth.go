@@ -58,16 +58,23 @@ func (h *handler) me(w http.ResponseWriter, r *http.Request) {
 	h.writeIdentity(w, me)
 }
 
-// writeIdentity 输出当前身份与其有效配额。
+// writeIdentity 输出当前身份与其有效配额（含用量）。
 //
 // 配额连来源一起给前端：用户看到「访问码上限 3」时要能知道这是组给的还是全局
-// 默认，否则只能来问管理员。
+// 默认，否则只能来问管理员。用量（Used）一并返回，界面才有 0/5 形态的展示。
 func (h *handler) writeIdentity(w http.ResponseWriter, u *models.User) {
 	quota, err := h.users.EffectiveQuota(u)
 	if err != nil {
 		// 配额解析失败不该让人登不进来（组被手工删掉之类），退化成不限。
 		logger.S.Warnw("解析用户配额失败 | failed to resolve quota", "user", u.Username, "err", err)
 		quota = models.Quota{}
+	}
+	// 管理员不受配额约束，用量对它是噪音；普通用户才需要看到自己用了多少。
+	if !u.IsAdmin() {
+		if filled, ferr := h.users.FillQuotaUsage(u.ID, quota); ferr == nil {
+			ok(w, u.View(filled))
+			return
+		}
 	}
 	ok(w, u.View(quota))
 }
