@@ -181,8 +181,12 @@
             <!-- 左组：配额速览（普通用户）+ 搜索框。必须包在同一个容器里：
                  toolbar 是 space-between，三直接子元素会把搜索框挤到中间。 -->
             <div class="table-container__toolbar-left">
+              <div class="table-container__search">
+                <i class="bi bi-search"></i>
+                <input class="form-control form-control-sm" type="search" :placeholder="t('搜索规则名称…','Search rules…')" x-model="search"/>
+              </div>
               <!-- 普通用户的配额速览（数据与 /api/auth/me 同源，随页面轮询刷新） -->
-              <div class="quota-strip small text-nowrap me-3" style="display:none" x-show="!isAdmin">
+              <div class="quota-strip small text-nowrap" style="display:none" x-show="!isAdmin">
                 <span class="quota-strip__item"><span class="text-muted" x-text="t('当前分组','Group')"></span>:
                   <span class="fw-semibold" x-text="me.group_name || t('默认组','default')"></span></span>
                 <span class="quota-strip__item"><span class="text-muted" x-text="t('在线隧道','Online Tunnels')"></span>
@@ -191,10 +195,6 @@
                 <span class="quota-strip__item"><span class="text-muted" x-text="t('规则数量','Rules')"></span>
                   <span class="badge rounded-pill ms-1" :class="quotaExceeded(me.quota,'max_rules','rules') ? 'text-bg-danger' : 'text-bg-secondary'"
                         x-text="quotaRatio(me.quota,'max_rules','rules')"></span></span>
-              </div>
-              <div class="table-container__search">
-                <i class="bi bi-search"></i>
-                <input class="form-control form-control-sm" type="search" :placeholder="t('搜索规则名称…','Search rules…')" x-model="search"/>
               </div>
             </div>
             <div class="table-container__actions">
