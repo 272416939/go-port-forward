@@ -9,13 +9,16 @@ import (
 	"syscall"
 	"time"
 
+	"go-port-forward/internal/auth"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/logger"
+	"go-port-forward/internal/models"
 	"go-port-forward/internal/storage"
-	"go-port-forward/internal/tunnelapp"
 	"go-port-forward/internal/svc"
+	"go-port-forward/internal/tunnelapp"
+	"go-port-forward/internal/users"
 	"go-port-forward/internal/web"
 	"go-port-forward/pkg/gc"
 	pkglogger "go-port-forward/pkg/logger"
@@ -109,13 +112,31 @@ const shutdownTimeout = 15 * time.Second
 
 // application wires all subsystems together and implements svc.Runner.
 type application struct {
-	store      storage.Store
-	cfg        *config.AppConfig
-	mgr        *forward.Manager
-	webSrv     *web.Server
-	gcSvc      *gc.Service
-	tunnelSrv  *tunnelapp.Server
-	configPath string
+	store       storage.Store
+	cfg         *config.AppConfig
+	mgr         *forward.Manager
+	webSrv      *web.Server
+	gcSvc       *gc.Service
+	tunnelSrv   *tunnelapp.Server
+	users       *users.Service
+	sessions    *auth.Store
+	sessionStop chan struct{}
+	configPath  string
+}
+
+// sweepSessions 周期清理已过期的会话。
+// 会话在查询时就会检查过期，这里只是防止长期运行下 map 只增不减。
+func sweepSessions(store *auth.Store, stop <-chan struct{}) {
+	tick := time.NewTicker(30 * time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			store.Sweep()
+		}
+	}
 }
 
 func (a *application) Start() error {
@@ -159,27 +180,48 @@ func (a *application) Start() error {
 	}
 	a.mgr = mgr
 
+	// 用户与会话（Web 账号 == 隧道身份）
+	a.sessions = auth.NewStore(cfg.Web.SecureCookie)
+	a.sessionStop = make(chan struct{})
+	go sweepSessions(a.sessions, a.sessionStop)
+	usrs, uerr := users.New(store, a.sessions, cfg.Tunnel.TunAddr, cfg.Tunnel.PublicAddr)
+	if uerr != nil {
+		return fmt.Errorf("user service: %w", uerr)
+	}
+	a.users = usrs
+	if _, _, _, berr := usrs.Bootstrap(); berr != nil {
+		return fmt.Errorf("bootstrap admin: %w", berr)
+	}
+	if cfg.Tunnel.PSK != "" {
+		logger.S.Warnw("配置项 tunnel.psk 已废弃并被忽略：多用户协议为每个用户分配独立密钥，请在面板的用户管理中获取接入码 | tunnel.psk is deprecated and ignored")
+	}
+
 	// 内置隧道服务端（配合 Windows pf-client，透明模式回程）
 	if cfg.Tunnel.Enabled {
 		tsrv, terr := tunnelapp.Start(tunnelapp.Config{
 			Enabled: true,
 			Listen:  cfg.Tunnel.Listen,
-			PSK:     cfg.Tunnel.PSK,
 			TunName: cfg.Tunnel.TunName,
 			TunAddr: cfg.Tunnel.TunAddr,
 			NAT:     cfg.Tunnel.NAT,
-		}, func() []string {
-			// 从活跃会话提取来源 IP（去重由调用方内部处理）
-			var ips []string
-			seen := map[string]bool{}
-			for _, s := range mgr.Sessions() {
-				if s.SrcIP != "" && !seen[s.SrcIP] {
-					seen[s.SrcIP] = true
-					ips = append(ips, s.SrcIP)
-				}
+		}, func(userID string) (tunnelapp.Identity, bool) {
+			// 服务端拿到的是握手包里声称的用户 ID；查到密钥后由协议层验 MAC。
+			u, gerr := usrs.Get(userID)
+			if gerr != nil {
+				return tunnelapp.Identity{}, false
 			}
-			return ips
-		})
+			tunIP, valid := models.ParseTunIP(u.TunIP)
+			if !valid {
+				return tunnelapp.Identity{}, false
+			}
+			return tunnelapp.Identity{
+				UserID:   u.ID,
+				UserName: u.Username,
+				Secret:   []byte(u.TunnelSecret),
+				TunIP:    tunIP,
+				Disabled: u.Disabled,
+			}, true
+		}, mgr.SessionIPsByUser)
 		if terr != nil {
 			return fmt.Errorf("tunnel server: %w", terr)
 		}
@@ -215,7 +257,11 @@ func (a *application) Start() error {
 
 	// Web server
 	fw := firewall.New()
-	srv := web.New(cfg.Web, mgr, fw)
+	var tunStatus web.TunnelStatus
+	if a.tunnelSrv != nil {
+		tunStatus = a.tunnelSrv
+	}
+	srv := web.New(cfg.Web, mgr, fw, a.users, a.sessions, tunStatus)
 	if err := srv.Start(); err != nil {
 		return fmt.Errorf("web server: %w", err)
 	}
@@ -235,6 +281,10 @@ func (a *application) Stop() error {
 	}
 	if a.mgr != nil {
 		a.mgr.Shutdown()
+	}
+	if a.sessionStop != nil {
+		close(a.sessionStop)
+		a.sessionStop = nil
 	}
 	if a.tunnelSrv != nil {
 		a.tunnelSrv.Stop()

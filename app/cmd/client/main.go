@@ -16,20 +16,16 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 
 	"pfapp/internal/syssetup"
 )
 
 const (
-	defaultPSK     = "pfapp-default-psk-v1" // 与服务端配置保持一致，可修改
 	tunName        = "Port Forward"
-	tunClientIP    = "10.66.0.2"
-	tunServerIP    = "10.66.0.1"
-	tunCIDRMask    = "255.255.255.0"
 	handshakeTries = 8
+	// defaultTunnelPort 是隧道服务端默认监听端口（与服务端 tunnel.listen 一致）。
+	defaultTunnelPort = 7947
 )
 
 func main() {
@@ -45,9 +41,10 @@ func main() {
 	// 单实例保护：在提权之前先探测。提权会启动新进程、旧进程退出，若把检查
 	// 放在提权之后，重复双击会先弹一次多余的 UAC 才发现自己该退出。
 	//
-	// 多实例在本程序里是硬故障：服务端只有一个会话槽位和一个 peer 地址，
-	// 多个客户端会互相抢占，peer 被反复改写，回包发到上一轮的端口——表现为
-	// 包在往返但进不去游戏。托盘化之后关窗不再退出进程，这种堆积很容易发生。
+	// 多用户版服务端已按用户分槽，同机多实例不再互相抢占隧道会话；但它们仍会
+	// 撞在一批机器级的全局资源上——虚拟网卡名、按名删除的防火墙规则、系统
+	// 路由表条目、pf-client.conf。任何一个实例退出都会连带删掉另一个的防火墙
+	// 规则与路由，症状仍是「包在往返但进不去游戏」。所以单实例保留。
 	if instanceRunning() {
 		diag("已有实例在运行，唤起其窗口后退出")
 		activateExistingInstance()
@@ -92,12 +89,16 @@ func main() {
 		eng.logf("[!] 当前未以管理员身份运行，无法建立隧道。")
 	}
 
-	// 自动连接上次使用的地址，正常使用无需任何输入。
-	if last := loadLastAddr(); last != "" && syssetup.IsElevated() {
-		eng.logf("正在连接上次使用的地址：%s", last)
+	// 自动连接上次使用的凭据，正常使用无需任何输入。
+	if last := loadConfig(); last.complete() && syssetup.IsElevated() {
+		eng.logf("正在连接上次使用的地址：%s", last.Addr)
 		if err := eng.Start(last); err != nil {
 			eng.logf("自动连接失败：%v", err)
 		}
+	} else if last.Addr != "" && !last.complete() {
+		// 旧版配置只有地址。凭据缺失时不要静默停在「未连接」，否则用户会以为
+		// 程序坏了。
+		eng.logf("[!] 配置里没有接入凭据（可能是旧版本升级上来的）。请在面板的用户管理中复制接入码，粘贴到上方输入框。")
 	}
 
 	// 托盘菜单「退出程序」与界面上的退出按钮走同一条路径。
@@ -128,26 +129,4 @@ func exePath() string {
 func windowsVersion() string {
 	major, minor, build := rtlGetNtVersionNumbers()
 	return fmtVersion(major, minor, build)
-}
-
-// --- 本地配置：记住上次使用的中转机地址 ---
-
-func confPath() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "pf-client.conf"
-	}
-	return filepath.Join(filepath.Dir(exe), "pf-client.conf")
-}
-
-func loadLastAddr() string {
-	b, err := os.ReadFile(confPath())
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
-
-func saveLastAddr(addr string) {
-	_ = os.WriteFile(confPath(), []byte(strings.TrimSpace(addr)), 0o644)
 }

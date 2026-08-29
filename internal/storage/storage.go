@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go-port-forward/internal/models"
 	"go-port-forward/pkg/serializer/json"
+	"net/netip"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -32,6 +33,16 @@ type Store interface {
 	ListConnLogs(limit int) ([]*models.ConnLogEntry, error)
 	TrimConnLogs(maxEntries int) (int, error)
 
+	// Users (web accounts + tunnel identities)
+	ListUsers() ([]*models.User, error)
+	GetUser(id string) (*models.User, error)
+	GetUserByName(name string) (*models.User, error)
+	// CreateUser 在同一写事务内查重并分配隧道地址（见 user.go 的说明）。
+	CreateUser(u *models.User, pool netip.Prefix, gateway netip.Addr) error
+	SaveUser(u *models.User) error
+	DeleteUser(id string) error
+	CountUsers() (int, error)
+
 	Close() error
 }
 
@@ -47,7 +58,7 @@ func Open(path string) (Store, error) {
 	}
 	// Ensure buckets exist
 	if err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{rulesBucket, aclBucket, connLogsBucket} {
+		for _, b := range [][]byte{rulesBucket, aclBucket, connLogsBucket, usersBucket} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}

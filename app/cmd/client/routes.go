@@ -66,15 +66,20 @@ type routeManager struct {
 	// relayIP 是中转机地址。绝不能为它安装回程路由——那会把隧道自己的
 	// UDP 流量导进 TUN 形成环路，整条隧道立刻断掉。
 	relayIP string
-	logf    func(string, ...any)
+	// addressing 是服务端下发的隧道内地址。网关是 /32 路由的下一跳；本机与
+	// 网关地址都必须排除在可安装地址之外（同上，会形成环路）。
+	// 多用户之前这两个地址是编译期常量，现在每个用户各不相同。
+	addressing tunnelAddressing
+	logf       func(string, ...any)
 }
 
-func newRouteManager(relayIP string, logf func(string, ...any)) *routeManager {
+func newRouteManager(relayIP string, addressing tunnelAddressing, logf func(string, ...any)) *routeManager {
 	m := &routeManager{
-		states:   make(map[string]*routeState),
-		removals: make(chan string, removeQueue),
-		relayIP:  relayIP,
-		logf:     logf,
+		states:     make(map[string]*routeState),
+		removals:   make(chan string, removeQueue),
+		relayIP:    relayIP,
+		addressing: addressing,
+		logf:       logf,
 	}
 	go m.removeWorker()
 	return m
@@ -100,7 +105,8 @@ func (m *routeManager) view() []RouteEntry {
 // 中转机自身、隧道网段、私网/回环/组播一律排除——任何一条误装都可能把
 // 隧道流量或本机正常流量导进 TUN。
 func (m *routeManager) eligible(ip string) bool {
-	if ip == "" || ip == m.relayIP || ip == tunServerIP || ip == tunClientIP {
+	if ip == "" || ip == m.relayIP ||
+		ip == m.addressing.Gateway || ip == m.addressing.ClientIP {
 		return false
 	}
 	v4 := net.ParseIP(ip).To4()
@@ -165,7 +171,7 @@ func (m *routeManager) ensure(ip string) *routeState {
 	m.states[ip] = st
 	m.mu.Unlock()
 
-	if err := syssetup.AddRoute(ip, tunServerIP); err != nil {
+	if err := syssetup.AddRoute(ip, m.addressing.Gateway); err != nil {
 		m.mu.Lock()
 		delete(m.states, ip) // 安装失败，下一个包会重试
 		m.mu.Unlock()

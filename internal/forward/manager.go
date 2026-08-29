@@ -161,14 +161,106 @@ func (m *Manager) DeleteACLEntry(id string) error {
 	return nil
 }
 
-// ConnLogs returns up to limit most recent connection events.
-func (m *Manager) ConnLogs(limit int) ([]*models.ConnLogEntry, error) {
-	return m.store.ListConnLogs(limit)
+// SessionsForUser 返回归属于某用户的规则上的活跃会话。
+// userID 为空时返回全部（管理员视图）。
+func (m *Manager) SessionsForUser(userID string) []models.SessionEntry {
+	all := m.svc.sessions.snapshot()
+	if userID == "" {
+		return all
+	}
+	owned := m.ruleOwners()
+	out := make([]models.SessionEntry, 0, len(all))
+	for _, s := range all {
+		if owned[s.RuleID] == userID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
-// Sessions snapshots the currently active client sessions.
-func (m *Manager) Sessions() []models.SessionEntry {
-	return m.svc.sessions.snapshot()
+// SessionIPsByUser 按归属用户分组活跃会话的来源 IP。
+//
+// 这是隧道回程路由推送的数据源。分组是隔离的一部分：把全部玩家 IP 推给每个
+// 隧道客户端，等于让 A 为 B 的玩家安装 /32 回程路由，也把 B 的玩家地址泄漏
+// 给了 A。无归属的规则（管理员维护）归到空字符串键下，不会被推给任何用户。
+func (m *Manager) SessionIPsByUser() map[string][]string {
+	owned := m.ruleOwners()
+	out := make(map[string][]string)
+	seen := make(map[string]map[string]bool)
+	for _, s := range m.svc.sessions.snapshot() {
+		if s.SrcIP == "" {
+			continue
+		}
+		uid := owned[s.RuleID]
+		if uid == "" {
+			continue
+		}
+		if seen[uid] == nil {
+			seen[uid] = make(map[string]bool)
+		}
+		if seen[uid][s.SrcIP] {
+			continue
+		}
+		seen[uid][s.SrcIP] = true
+		out[uid] = append(out[uid], s.SrcIP)
+	}
+	return out
+}
+
+// ruleOwners 返回「规则 ID → 归属用户 ID」快照。
+func (m *Manager) ruleOwners() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]string, len(m.rules))
+	for id, r := range m.rules {
+		out[id] = r.UserID
+	}
+	return out
+}
+
+// CountRulesByUser 返回某用户名下的规则数（配额校验用）。
+func (m *Manager) CountRulesByUser(userID string) int {
+	if userID == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, r := range m.rules {
+		if r.UserID == userID {
+			n++
+		}
+	}
+	return n
+}
+
+// ConnLogsForUser 返回某用户名下规则的连接日志。
+//
+// 先取更多行再过滤：日志是全局倒序表，按用户过滤后行数会缩水，直接取 limit
+// 行会让规则少的用户几乎看不到自己的记录。
+func (m *Manager) ConnLogsForUser(userID string, limit int) ([]*models.ConnLogEntry, error) {
+	if userID == "" {
+		return m.store.ListConnLogs(limit)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	raw, err := m.store.ListConnLogs(limit * 20)
+	if err != nil {
+		return nil, err
+	}
+	owned := m.ruleOwners()
+	out := make([]*models.ConnLogEntry, 0, limit)
+	for _, e := range raw {
+		if owned[e.RuleID] != userID {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *Manager) reloadACL() {
@@ -210,6 +302,7 @@ func (m *Manager) AddRule(req *models.CreateRuleRequest) (*models.ForwardRule, e
 		Protocol:      normalized.Protocol,
 		TargetAddr:    normalized.TargetAddr,
 		TargetPort:    normalized.TargetPort,
+		UserID:        normalized.UserID,
 		AddFirewall:   normalized.AddFirewall,
 		ProxyProtocol: normalized.ProxyProtocol,
 		Transparent:   normalized.Transparent,
@@ -331,9 +424,38 @@ func (m *Manager) ListRules() ([]*models.ForwardRule, error) {
 	return rules, nil
 }
 
+// ListRulesForUser returns rules owned by userID with live stats merged in.
+// userID 为空时返回全部（管理员视图）。
+func (m *Manager) ListRulesForUser(userID string) ([]*models.ForwardRule, error) {
+	all, err := m.ListRules()
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		return all, nil
+	}
+	out := make([]*models.ForwardRule, 0, len(all))
+	for _, r := range all {
+		if r.UserID == userID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // Snapshot returns current rules together with aggregated stats derived from the same snapshot.
 func (m *Manager) Snapshot() ([]*models.ForwardRule, *models.Stats, error) {
 	rules, err := m.ListRules()
+	if err != nil {
+		return nil, nil, err
+	}
+	return rules, buildStats(rules), nil
+}
+
+// SnapshotForUser 是 Snapshot 的按用户视图：统计只覆盖该用户自己的规则，
+// 否则普通用户会在仪表盘上看到全站流量。
+func (m *Manager) SnapshotForUser(userID string) ([]*models.ForwardRule, *models.Stats, error) {
+	rules, err := m.ListRulesForUser(userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -871,6 +993,9 @@ func applyUpdate(r *models.ForwardRule, req *models.UpdateRuleRequest) {
 	if req.TargetPort != nil {
 		r.TargetPort = *req.TargetPort
 	}
+	if req.UserID != nil {
+		r.UserID = *req.UserID
+	}
 	if req.AddFirewall != nil {
 		r.AddFirewall = *req.AddFirewall
 	}
@@ -892,6 +1017,9 @@ func requiresForwarderRestart(before, after *models.ForwardRule) bool {
 	if before == nil || after == nil {
 		return true
 	}
+	// UserID 不在此列：归属只影响「谁能看到/改这条规则」与回程路由推送的
+	// 分组，转发器本身不读它。为一次纯元数据变更重启转发器会掐掉所有在线
+	// 玩家，代价与收益完全不成比例。
 	return before.Enabled != after.Enabled ||
 		models.NormalizeListenAddr(before.ListenAddr) != models.NormalizeListenAddr(after.ListenAddr) ||
 		before.ListenPort != after.ListenPort ||

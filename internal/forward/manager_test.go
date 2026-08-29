@@ -3,6 +3,7 @@ package forward
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -443,6 +444,20 @@ func (s *countingStore) DeleteACLEntry(id string) error                         
 func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error         { return nil }
 func (s *countingStore) ListConnLogs(limit int) ([]*models.ConnLogEntry, error) { return nil, nil }
 func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)               { return 0, nil }
+
+// --- User stubs required by the extended Store interface ---
+
+func (s *countingStore) ListUsers() ([]*models.User, error)        { return nil, nil }
+func (s *countingStore) GetUser(id string) (*models.User, error)   { return nil, storage.ErrUserNotFound }
+func (s *countingStore) GetUserByName(n string) (*models.User, error) {
+	return nil, storage.ErrUserNotFound
+}
+func (s *countingStore) CreateUser(u *models.User, pool netip.Prefix, gw netip.Addr) error {
+	return nil
+}
+func (s *countingStore) SaveUser(u *models.User) error { return nil }
+func (s *countingStore) DeleteUser(id string) error    { return nil }
+func (s *countingStore) CountUsers() (int, error)      { return 0, nil }
 
 func (s *countingStore) listCalls() int {
 	s.mu.Lock()

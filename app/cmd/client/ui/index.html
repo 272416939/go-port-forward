@@ -33,11 +33,32 @@
     <section class="card">
       <h2>连接</h2>
       <label class="field">
-        <span>中转机地址</span>
-        <input id="addr" type="text" placeholder="例如 1.2.3.4:7947" spellcheck="false"
-               autocomplete="off" inputmode="url">
+        <span>接入码</span>
+        <input id="code" type="text" placeholder="粘贴以 pf1. 开头的接入码" spellcheck="false"
+               autocomplete="off">
       </label>
-      <p class="hint">省略端口时默认使用 7947。地址会自动记住，下次打开直接连接。</p>
+      <p class="hint">接入码由管理员在服务端面板的「用户管理」里生成，一次粘贴即包含地址与凭据。粘贴后会自动记住，下次打开直接连接。</p>
+
+      <details id="manualBox">
+        <summary>没有接入码？手动填写</summary>
+        <label class="field">
+          <span>中转机地址</span>
+          <input id="addr" type="text" placeholder="例如 1.2.3.4:7947" spellcheck="false"
+                 autocomplete="off" inputmode="url">
+        </label>
+        <label class="field">
+          <span>用户 ID</span>
+          <input id="userId" type="text" placeholder="面板用户管理里的用户 ID" spellcheck="false"
+                 autocomplete="off">
+        </label>
+        <label class="field">
+          <span>隧道密钥</span>
+          <input id="secret" type="password" placeholder="面板用户管理里的密钥" spellcheck="false"
+                 autocomplete="off">
+        </label>
+        <p class="hint">省略端口时默认使用 7947。三项都填对才能建立隧道。</p>
+      </details>
+
       <div class="actions">
         <button id="btnConnect" class="btn btn-primary" type="button">连接</button>
         <button id="btnDisconnect" class="btn" type="button" hidden>断开</button>
@@ -49,6 +70,7 @@
     <section class="card">
       <h2>运行状态</h2>
       <dl class="stats">
+        <div><dt>当前身份</dt><dd id="identity">—</dd></div>
         <div><dt>虚拟网卡</dt><dd id="tunIP">—</dd></div>
         <div><dt>已连接时长</dt><dd id="uptime">—</dd></div>
         <div>

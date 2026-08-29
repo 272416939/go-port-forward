@@ -38,10 +38,14 @@ type ForwardRule struct {
 	Protocol   Protocol `json:"protocol"`
 	TargetAddr string   `json:"target_addr"`
 	Comment    string   `json:"comment"`
+	// UserID 是规则的归属用户（隧道用户 == Web 账号）。空值表示由管理员
+	// 直接维护的共享规则，不受任何用户配额约束。
+	UserID string `json:"user_id,omitempty"`
 
 	// Runtime stats — not persisted
 	Status        RuleStatus `json:"status"`
 	ErrorMsg      string     `json:"error_msg,omitempty"` // reason the forwarder failed to start
+	UserName      string     `json:"user_name,omitempty"` // 归属用户名（展示用，不持久化）
 	ListenPort    int        `json:"listen_port"`
 	TargetPort    int        `json:"target_port"`
 	BytesIn       int64      `json:"bytes_in"`
@@ -187,6 +191,7 @@ type CreateRuleRequest struct {
 	Protocol      Protocol `json:"protocol"`
 	TargetAddr    string   `json:"target_addr"`
 	Comment       string   `json:"comment"`
+	UserID        string   `json:"user_id"`
 	ListenPort    int      `json:"listen_port"`
 	TargetPort    int      `json:"target_port"`
 	AddFirewall   bool     `json:"add_firewall"`
@@ -203,6 +208,7 @@ type UpdateRuleRequest struct {
 	Protocol      *Protocol `json:"protocol"`
 	TargetAddr    *string   `json:"target_addr"`
 	TargetPort    *int      `json:"target_port"`
+	UserID        *string   `json:"user_id"`
 	AddFirewall   *bool     `json:"add_firewall"`
 	ProxyProtocol *bool     `json:"proxy_protocol"`
 	Transparent   *bool     `json:"transparent"`

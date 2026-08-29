@@ -7,9 +7,11 @@ const el = (id) => document.getElementById(id);
 const ui = {
   pill: el('statePill'), stateText: el('stateText'),
   elevateWarn: el('elevateWarn'), errBox: el('errBox'),
-  addr: el('addr'), connect: el('btnConnect'), disconnect: el('btnDisconnect'),
+  code: el('code'), addr: el('addr'), userId: el('userId'), secret: el('secret'),
+  manualBox: el('manualBox'),
+  connect: el('btnConnect'), disconnect: el('btnDisconnect'),
   quit: el('btnQuit'),
-  tunIP: el('tunIP'), uptime: el('uptime'),
+  identity: el('identity'), tunIP: el('tunIP'), uptime: el('uptime'),
   bytesUp: el('bytesUp'), bytesDown: el('bytesDown'),
   rateUp: el('rateUp'), rateDown: el('rateDown'), pktLine: el('pktLine'),
   routeRows: el('routeRows'), routeCount: el('routeCount'), logs: el('logs'),
@@ -19,13 +21,18 @@ const STATE_TEXT = {
   idle: '未连接', connecting: '正在连接…', connected: '已连接', error: '连接失败',
 };
 
-// addrDirty 为真时不要用服务端返回的地址覆盖用户正在输入的内容。
-let addrDirty = false;
+// dirty 为真时不要用服务端返回的值覆盖用户正在输入的内容。
+const dirty = { addr: false, userId: false };
 let busy = false;
 // stopped 在用户主动退出后置位：此后不再轮询，避免把"进程已退出"报成故障。
 let stopped = false;
 
-ui.addr.addEventListener('input', () => { addrDirty = true; });
+ui.addr.addEventListener('input', () => { dirty.addr = true; });
+ui.userId.addEventListener('input', () => { dirty.userId = true; });
+// 粘贴接入码时手工填的三项就没意义了，自动折起来避免冲突。
+ui.code.addEventListener('input', () => {
+  if (ui.code.value.trim()) ui.manualBox.open = false;
+});
 
 async function api(path, options) {
   const sep = path.includes('?') ? '&' : '?';
@@ -125,16 +132,21 @@ function render(s) {
   ui.stateText.textContent = STATE_TEXT[s.state] || s.state;
   ui.elevateWarn.hidden = s.elevated;
 
-  if (!addrDirty && s.addr) ui.addr.value = s.addr;
+  if (!dirty.addr && s.addr) ui.addr.value = s.addr;
+  if (!dirty.userId && s.user_id) ui.userId.value = s.user_id;
+  // 已保存过凭据时，密钥框留空即表示「沿用已保存的」，不回显密钥本身。
+  if (s.has_cred && !ui.secret.value) ui.secret.placeholder = '已保存（留空即沿用）';
 
   const running = s.state === 'connected' || s.state === 'connecting';
   ui.connect.hidden = running;
   ui.disconnect.hidden = !running;
-  ui.addr.disabled = running;
+  for (const input of [ui.code, ui.addr, ui.userId, ui.secret]) input.disabled = running;
   ui.connect.disabled = busy || !s.elevated;
   ui.disconnect.disabled = busy;
 
-  ui.tunIP.textContent = s.state === 'connected' ? s.tun_ip : '—';
+  ui.identity.textContent = s.user_id ? s.user_id : '—';
+  ui.tunIP.textContent = s.state === 'connected' && s.tun_ip
+    ? `${s.tun_ip}（网关 ${s.gateway || '—'}）` : '—';
   ui.uptime.textContent = formatUptime(s.uptime_sec);
 
   const rates = computeRates(s);
@@ -173,9 +185,18 @@ ui.connect.addEventListener('click', async () => {
     await api('/api/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ addr: ui.addr.value.trim() }),
+      body: JSON.stringify({
+        code: ui.code.value.trim(),
+        addr: ui.addr.value.trim(),
+        user_id: ui.userId.value.trim(),
+        secret: ui.secret.value.trim(),
+      }),
     });
-    addrDirty = false;
+    // 连接成功后清掉输入框里的凭据：它们已经落盘，界面上留着只是泄漏面。
+    ui.code.value = '';
+    ui.secret.value = '';
+    dirty.addr = false;
+    dirty.userId = false;
   } catch (err) {
     showError(err.message);
   } finally {

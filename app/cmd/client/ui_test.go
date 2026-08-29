@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// testAddressing 模拟服务端下发的隧道地址（多用户版不再有编译期常量）。
+var testAddressing = tunnelAddressing{ClientIP: "10.66.0.7", Mask: "255.255.255.0", Gateway: "10.66.0.1"}
+
 // startUI 必须能真正提供页面与接口，并且写操作要拒绝错误的 token——
 // 这是这个本地控制面唯一的访问控制，不能回归。
 func TestUIServerServesAndGuards(t *testing.T) {
@@ -54,8 +57,10 @@ func TestUIServerServesAndGuards(t *testing.T) {
 		if snap.State != StateIdle {
 			t.Errorf("初始状态 = %q, 期望 %q", snap.State, StateIdle)
 		}
-		if snap.TunIP != tunClientIP {
-			t.Errorf("tun_ip = %q, 期望 %q", snap.TunIP, tunClientIP)
+		// 未连接时隧道地址是空的：多用户版由服务端在握手应答里下发，
+		// 客户端不再有编译期常量可以先填。
+		if snap.TunIP != "" {
+			t.Errorf("未连接时 tun_ip = %q, 期望空（地址由服务端下发）", snap.TunIP)
 		}
 		// 未连接时 routes 必须是 []，不能是 null——前端直接 for..of 遍历。
 		if snap.Routes == nil {
@@ -76,15 +81,25 @@ func TestUIServerServesAndGuards(t *testing.T) {
 		}
 	})
 
-	t.Run("连接接口拒绝非法地址", func(t *testing.T) {
-		res, err := http.Post(base+"/api/connect?t="+token, "application/json",
-			strings.NewReader(`{"addr":""}`))
-		if err != nil {
-			t.Fatalf("connect: %v", err)
-		}
-		res.Body.Close()
-		if res.StatusCode != http.StatusBadRequest {
-			t.Errorf("空地址 = %d, 期望 400", res.StatusCode)
+	t.Run("连接接口拒绝缺凭据的请求", func(t *testing.T) {
+		// 空请求、只有地址没有凭据、损坏的接入码：都必须 400 而不是
+		// 带着空凭据去握手（那样服务端只会静默丢包，用户看到的是「无应答」）。
+		for _, body := range []string{
+			`{}`,
+			`{"addr":""}`,
+			`{"addr":"1.2.3.4:7947"}`,
+			`{"code":"pf1.!!!broken"}`,
+			`{"code":"not-an-access-code"}`,
+		} {
+			res, err := http.Post(base+"/api/connect?t="+token, "application/json",
+				strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("connect %s: %v", body, err)
+			}
+			res.Body.Close()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s = %d, 期望 400", body, res.StatusCode)
+			}
 		}
 	})
 
@@ -103,12 +118,12 @@ func TestUIServerServesAndGuards(t *testing.T) {
 // eligible 是防止把隧道自身流量或本机流量导进 TUN 的唯一守卫。
 func TestRouteEligibility(t *testing.T) {
 	relay := "203.0.113.9"
-	m := newRouteManager(relay, func(string, ...any) {})
+	m := newRouteManager(relay, testAddressing, func(string, ...any) {})
 
 	rejected := []string{
-		relay,       // 中转机自己：会形成隧道环路
-		tunServerIP, // 隧道网段
-		tunClientIP,
+		relay,                    // 中转机自己：会形成隧道环路
+		testAddressing.Gateway,   // 隧道网关（服务端下发）
+		testAddressing.ClientIP,  // 本机隧道地址
 		"127.0.0.1",
 		"10.1.2.3",
 		"192.168.1.1",
@@ -146,7 +161,7 @@ func ipv4(src, dst [4]byte, total int) []byte {
 // 字节必须按方向归到正确的 IP 上：入站看源地址，回程看目的地址。方向搞反
 // 会让两列数字互换，而界面上看起来一切正常。
 func TestPerIPByteAttribution(t *testing.T) {
-	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
 
 	// 预置两条状态，避免 ensure() 真的去跑 route.exe 改动系统路由表。
 	alice, bob := "111.29.236.135", "8.8.8.8"
@@ -186,7 +201,7 @@ func TestPerIPByteAttribution(t *testing.T) {
 // countOutbound 绝不能安装路由：它在 TUN 读循环里逐包调用，而安装要起
 // route.exe 子进程（几十毫秒），会拖垮吞吐。
 func TestCountOutboundNeverInstallsRoute(t *testing.T) {
-	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
 	m.countOutbound(ipv4([4]byte{10, 66, 0, 2}, [4]byte{8, 8, 8, 8}, 100))
 	if len(m.states) != 0 {
 		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", len(m.states))
@@ -195,7 +210,7 @@ func TestCountOutboundNeverInstallsRoute(t *testing.T) {
 
 // 非 IPv4 或过短的包不能让计数逻辑 panic（隧道里出现畸形包不该拖垮客户端）。
 func TestCountIgnoresMalformedPackets(t *testing.T) {
-	m := newRouteManager("203.0.113.9", func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
 	for _, pkt := range [][]byte{
 		nil,
 		{},

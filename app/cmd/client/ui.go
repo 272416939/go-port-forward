@@ -83,7 +83,11 @@ func (s *uiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	snap := s.eng.Snapshot()
 	if snap.Addr == "" {
-		snap.Addr = loadLastAddr()
+		// 尚未连接过：把上次记住的凭据回填给界面，用户不必重新粘贴接入码。
+		last := loadConfig()
+		snap.Addr = last.Addr
+		snap.UserID = last.UserID
+		snap.HasCred = last.complete()
 	}
 	writeJSON(w, http.StatusOK, snap)
 }
@@ -94,25 +98,40 @@ func (s *uiServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Addr string `json:"addr"`
+		Code   string `json:"code"`
+		Addr   string `json:"addr"`
+		UserID string `json:"user_id"`
+		Secret string `json:"secret"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	addr := strings.TrimSpace(req.Addr)
-	if addr == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写中转机地址"})
-		return
+	// 三个字段都空时沿用已保存的凭据（界面上的「连接」按钮不必每次重填）。
+	if strings.TrimSpace(req.Code) == "" && strings.TrimSpace(req.UserID) == "" && strings.TrimSpace(req.Secret) == "" {
+		saved := loadConfig()
+		if saved.complete() {
+			if a := strings.TrimSpace(req.Addr); a != "" {
+				saved.Addr = a
+			}
+			s.start(w, saved)
+			return
+		}
 	}
-	if !strings.Contains(addr, ":") {
-		addr += ":7947"
-	}
-	if err := s.eng.Start(addr); err != nil {
+	conf, err := parseConnectInput(req.Code, req.Addr, req.UserID, req.Secret)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"addr": addr})
+	s.start(w, conf)
+}
+
+func (s *uiServer) start(w http.ResponseWriter, conf clientConfig) {
+	if err := s.eng.Start(conf); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"addr": conf.normalized().Addr})
 }
 
 func (s *uiServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {

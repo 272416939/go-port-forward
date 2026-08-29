@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"go-port-forward/internal/auth"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
@@ -23,7 +24,7 @@ func TestCreateRuleRejectsUnknownJSONFields(t *testing.T) {
 	h, cleanup := newTestHandler(t)
 	defer cleanup()
 
-	req := httptest.NewRequest("POST", "/api/rules", strings.NewReader(`{"name":"demo","listen_port":18080,"protocol":"tcp","target_addr":"127.0.0.1","target_port":80,"extra":true}`))
+	req := adminReq(httptest.NewRequest("POST", "/api/rules", strings.NewReader(`{"name":"demo","listen_port":18080,"protocol":"tcp","target_addr":"127.0.0.1","target_port":80,"extra":true}`)))
 	rec := httptest.NewRecorder()
 
 	h.createRule(rec, req)
@@ -51,7 +52,7 @@ func TestCreateRuleMapsConflictTo409(t *testing.T) {
 		t.Fatalf("seed rule: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/api/rules", strings.NewReader(`{"name":"dup","listen_addr":"127.0.0.1","listen_port":`+strconv.Itoa(port)+`,"protocol":"tcp","target_addr":"127.0.0.1","target_port":8080}`))
+	req := adminReq(httptest.NewRequest("POST", "/api/rules", strings.NewReader(`{"name":"dup","listen_addr":"127.0.0.1","listen_port":`+strconv.Itoa(port)+`,"protocol":"tcp","target_addr":"127.0.0.1","target_port":8080}`)))
 	rec := httptest.NewRecorder()
 
 	h.createRule(rec, req)
@@ -78,7 +79,7 @@ func TestToggleRuleRequiresEnabledField(t *testing.T) {
 		t.Fatalf("seed rule: %v", err)
 	}
 
-	req := httptest.NewRequest("PUT", "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{}`))
+	req := adminReq(httptest.NewRequest("PUT", "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{}`)))
 	req.SetPathValue("id", rule.ID)
 	rec := httptest.NewRecorder()
 
@@ -97,7 +98,7 @@ func TestServerStartReturnsErrorWhenPortIsOccupied(t *testing.T) {
 	defer ln.Close()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	srv := New(config.WebConfig{Host: "127.0.0.1", Port: port}, nil, nil)
+	srv := New(config.WebConfig{Host: "127.0.0.1", Port: port}, nil, nil, nil, nil, nil)
 	if err := srv.Start(); err == nil {
 		t.Fatal("expected Start to fail when port is occupied")
 	}
@@ -122,7 +123,7 @@ func TestToggleRuleSyncsFirewallOnEnableAndDisable(t *testing.T) {
 		t.Fatalf("seed rule: %v", err)
 	}
 
-	enableReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{"enabled":true}`))
+	enableReq := adminReq(httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{"enabled":true}`)))
 	enableReq.SetPathValue("id", rule.ID)
 	enableRec := httptest.NewRecorder()
 	h.toggleRule(enableRec, enableReq)
@@ -133,7 +134,7 @@ func TestToggleRuleSyncsFirewallOnEnableAndDisable(t *testing.T) {
 		t.Fatalf("firewall add calls = %d, want 1", len(fw.added))
 	}
 
-	disableReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{"enabled":false}`))
+	disableReq := adminReq(httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID+"/toggle", strings.NewReader(`{"enabled":false}`)))
 	disableReq.SetPathValue("id", rule.ID)
 	disableRec := httptest.NewRecorder()
 	h.toggleRule(disableRec, disableReq)
@@ -165,7 +166,7 @@ func TestUpdateRuleSyncsFirewallWhenEndpointChanges(t *testing.T) {
 	}
 
 	newPort := freePort(t)
-	req := httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID, strings.NewReader(`{"listen_port":`+strconv.Itoa(newPort)+`}`))
+	req := adminReq(httptest.NewRequest(http.MethodPut, "/api/rules/"+rule.ID, strings.NewReader(`{"listen_port":`+strconv.Itoa(newPort)+`}`)))
 	req.SetPathValue("id", rule.ID)
 	rec := httptest.NewRecorder()
 
@@ -199,7 +200,7 @@ func TestWSLCapabilityEndpointReturnsCapabilityPayload(t *testing.T) {
 	}
 	defer func() { wslDetectCapability = oldDetect }()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/wsl/capability", nil)
+	req := adminReq(httptest.NewRequest(http.MethodGet, "/api/wsl/capability", nil))
 	rec := httptest.NewRecorder()
 
 	h.wslCapability(rec, req)
@@ -230,7 +231,7 @@ func TestDashboardReturnsRulesAndStatsInSinglePayload(t *testing.T) {
 		t.Fatalf("seed rule: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	req := adminReq(httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
 	rec := httptest.NewRecorder()
 
 	h.dashboard(rec, req)
@@ -278,7 +279,7 @@ func TestDiagnosticsReturnsRuntimePoolAndManagerSnapshot(t *testing.T) {
 		t.Fatalf("seed error rule: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil)
+	req := adminReq(httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil))
 	rec := httptest.NewRecorder()
 
 	h.diagnostics(rec, req)
@@ -316,6 +317,19 @@ func newTestHandlerWithFirewall(t *testing.T, fw firewall.Manager) (*handler, fu
 		mgr.Shutdown()
 		_ = store.Close()
 	}
+}
+
+// adminReq 给测试请求附上一个管理员身份。
+// 多用户改造后 handler 从上下文读当前用户来决定数据作用域，缺了身份会一律
+// 按「未登录」处理。
+func adminReq(r *http.Request) *http.Request {
+	return r.WithContext(auth.WithUser(r.Context(),
+		&models.User{ID: "test-admin", Username: "admin", Role: models.RoleAdmin}))
+}
+
+// userReq 给测试请求附上一个普通用户身份。
+func userReq(r *http.Request, u *models.User) *http.Request {
+	return r.WithContext(auth.WithUser(r.Context(), u))
 }
 
 func freePort(t *testing.T) int {

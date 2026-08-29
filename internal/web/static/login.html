@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-bs-theme="light">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>登录 · Port Forward</title>
+<link rel="icon" href="/images/favicon.ico"/>
+<link rel="stylesheet" href="/css/lib/bootstrap.min.css"/>
+<link rel="stylesheet" href="/css/lib/bootstrap-icons.css"/>
+<link rel="stylesheet" href="/css/theme.css"/>
+<script>
+  // 主题预设：与主页面同一套判定，避免登录页闪一下白底。
+  ;(function(){
+    var theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-bs-theme', theme);
+  })();
+</script>
+<style>
+  body { min-height: 100vh; display: grid; place-items: center; background: var(--bs-tertiary-bg); }
+  .login-card { width: 100%; max-width: 22rem; }
+  .login-card__brand { display: flex; align-items: center; gap: .6rem; justify-content: center; margin-bottom: 1.25rem; }
+  .login-card__brand img { width: 2.25rem; height: 2.25rem; }
+</style>
+</head>
+<body>
+
+<div class="login-card">
+  <div class="login-card__brand">
+    <img src="/images/logo.png" alt="logo"/>
+    <span class="fs-5 fw-bold">Port Forward</span>
+  </div>
+  <div class="card shadow-sm">
+    <div class="card-body p-4">
+      <h1 class="h6 mb-3" id="title">登录</h1>
+      <div class="alert alert-danger py-2 small d-none" id="error"></div>
+      <form id="form">
+        <div class="mb-3">
+          <label class="form-label small mb-1" for="username" id="lblUser">用户名</label>
+          <input class="form-control" id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required/>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small mb-1" for="password" id="lblPass">密码</label>
+          <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" required/>
+        </div>
+        <button class="btn btn-primary w-100" type="submit" id="submit">登录</button>
+      </form>
+      <div class="form-text mt-3" id="hint">
+        首次使用请查看服务端启动日志或程序目录下的 admin-credentials.txt 获取初始管理员密码。
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 独立页面，不引入 Alpine：登录只有一个表单，一段原生 JS 比再拉一套框架更省事。
+const isEn = (() => {
+  try { const s = localStorage.getItem('app_lang'); if (s) return s === 'en' } catch (e) {}
+  return !/^zh\b/i.test(navigator.language || '')
+})()
+
+if (isEn) {
+  document.documentElement.lang = 'en'
+  document.title = 'Sign in · Port Forward'
+  document.getElementById('title').textContent = 'Sign in'
+  document.getElementById('lblUser').textContent = 'Username'
+  document.getElementById('lblPass').textContent = 'Password'
+  document.getElementById('submit').textContent = 'Sign in'
+  document.getElementById('hint').textContent =
+    'On first run, find the initial administrator password in the server startup log or in admin-credentials.txt next to the executable.'
+}
+
+const errorBox = document.getElementById('error')
+function showError(msg) {
+  errorBox.textContent = msg
+  errorBox.classList.remove('d-none')
+}
+
+document.getElementById('form').addEventListener('submit', async (ev) => {
+  ev.preventDefault()
+  errorBox.classList.add('d-none')
+  const btn = document.getElementById('submit')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value
+      })
+    })
+    const d = await res.json()
+    if (d.success) {
+      location.href = '/'
+      return
+    }
+    showError(d.message || (isEn ? 'Sign-in failed' : '登录失败'))
+  } catch (e) {
+    showError((isEn ? 'Network error: ' : '网络错误: ') + e.message)
+  } finally {
+    btn.disabled = false
+  }
+})
+
+document.getElementById('username').focus()
+</script>
+</body>
+</html>

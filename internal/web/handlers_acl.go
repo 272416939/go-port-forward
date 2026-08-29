@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"go-port-forward/internal/auth"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/models"
 )
@@ -56,7 +57,7 @@ func (h *handler) listConnLogs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	logs, err := h.mgr.ConnLogs(limit)
+	logs, err := h.mgr.ConnLogsForUser(scopeOf(auth.UserFrom(r.Context())), limit)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -66,7 +67,7 @@ func (h *handler) listConnLogs(w http.ResponseWriter, r *http.Request) {
 
 // listSessions handles GET /api/sessions
 func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := h.mgr.Sessions()
+	sessions := h.mgr.SessionsForUser(scopeOf(auth.UserFrom(r.Context())))
 	if sessions == nil {
 		sessions = []models.SessionEntry{}
 	}

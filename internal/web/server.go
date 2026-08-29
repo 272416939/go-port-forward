@@ -2,14 +2,15 @@ package web
 
 import (
 	"context"
-	"crypto/subtle"
 	"embed"
 	"errors"
 	"fmt"
+	"go-port-forward/internal/auth"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/logger"
+	"go-port-forward/internal/users"
 	"io/fs"
 	"net"
 	"net/http"
@@ -203,15 +204,25 @@ var staticFiles embed.FS
 
 // Server is the HTTP API + UI server.
 type Server struct {
-	fw      firewall.Manager
-	manager *forward.Manager
-	httpSrv *http.Server
-	cfg     config.WebConfig
+	fw       firewall.Manager
+	manager  *forward.Manager
+	users    *users.Service
+	sessions *auth.Store
+	tunnel   TunnelStatus
+	httpSrv  *http.Server
+	cfg      config.WebConfig
+}
+
+// TunnelStatus 暴露隧道服务端的在线状态（避免 web 直接依赖 tunnelapp）。
+type TunnelStatus interface {
+	PeerCount() int
+	PeerUserIDs() []string
 }
 
 // New creates a configured Server.
-func New(cfg config.WebConfig, mgr *forward.Manager, fw firewall.Manager) *Server {
-	return &Server{cfg: cfg, manager: mgr, fw: fw}
+func New(cfg config.WebConfig, mgr *forward.Manager, fw firewall.Manager,
+	usrs *users.Service, sessions *auth.Store, tun TunnelStatus) *Server {
+	return &Server{cfg: cfg, manager: mgr, fw: fw, users: usrs, sessions: sessions, tunnel: tun}
 }
 
 // Start begins listening on the configured address (non-blocking).
@@ -250,31 +261,45 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	h := &handler{mgr: s.manager, fw: s.fw}
+	h := &handler{mgr: s.manager, fw: s.fw, users: s.users, sessions: s.sessions, tunnel: s.tunnel}
 
-	// REST API
-	mux.HandleFunc("GET /api/rules", h.listRules)
-	mux.HandleFunc("POST /api/rules", h.createRule)
-	mux.HandleFunc("GET /api/rules/{id}", h.getRule)
-	mux.HandleFunc("PUT /api/rules/{id}", h.updateRule)
-	mux.HandleFunc("DELETE /api/rules/{id}", h.deleteRule)
-	mux.HandleFunc("PUT /api/rules/{id}/toggle", h.toggleRule)
-	mux.HandleFunc("GET /api/dashboard", h.dashboard)
-	mux.HandleFunc("GET /api/diagnostics", h.diagnostics)
-	mux.HandleFunc("GET /api/stats", h.globalStats)
+	// 认证（公开）
+	mux.HandleFunc("POST /api/auth/login", h.login)
+	mux.HandleFunc("POST /api/auth/logout", h.logout)
+	mux.HandleFunc("GET /api/auth/me", s.authed(h.me))
+	mux.HandleFunc("POST /api/auth/password", s.authed(h.changePassword))
+
+	// REST API — 规则按归属过滤/校验，任何登录用户可访问
+	mux.HandleFunc("GET /api/rules", s.authed(h.listRules))
+	mux.HandleFunc("POST /api/rules", s.authed(h.createRule))
+	mux.HandleFunc("GET /api/rules/{id}", s.authed(h.getRule))
+	mux.HandleFunc("PUT /api/rules/{id}", s.authed(h.updateRule))
+	mux.HandleFunc("DELETE /api/rules/{id}", s.authed(h.deleteRule))
+	mux.HandleFunc("PUT /api/rules/{id}/toggle", s.authed(h.toggleRule))
+	mux.HandleFunc("GET /api/dashboard", s.authed(h.dashboard))
+	mux.HandleFunc("GET /api/stats", s.authed(h.globalStats))
 
 	// 访问控制 / 连接日志 / 活跃会话
-	mux.HandleFunc("GET /api/acl", h.listACL)
-	mux.HandleFunc("POST /api/acl", h.createACL)
-	mux.HandleFunc("DELETE /api/acl/{id}", h.deleteACL)
-	mux.HandleFunc("GET /api/logs", h.listConnLogs)
-	mux.HandleFunc("GET /api/sessions", h.listSessions)
+	mux.HandleFunc("GET /api/acl", s.adminOnly(h.listACL))
+	mux.HandleFunc("POST /api/acl", s.adminOnly(h.createACL))
+	mux.HandleFunc("DELETE /api/acl/{id}", s.adminOnly(h.deleteACL))
+	mux.HandleFunc("GET /api/logs", s.authed(h.listConnLogs))
+	mux.HandleFunc("GET /api/sessions", s.authed(h.listSessions))
 
-	// WSL
-	mux.HandleFunc("GET /api/wsl/capability", h.wslCapability)
-	mux.HandleFunc("GET /api/wsl/distros", h.wslListDistros)
-	mux.HandleFunc("GET /api/wsl/ports/{distro}", h.wslListPorts)
-	mux.HandleFunc("POST /api/wsl/import", h.wslImport)
+	// 用户管理（仅管理员）
+	mux.HandleFunc("GET /api/users", s.adminOnly(h.listUsers))
+	mux.HandleFunc("POST /api/users", s.adminOnly(h.createUser))
+	mux.HandleFunc("PUT /api/users/{id}", s.adminOnly(h.updateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", s.adminOnly(h.deleteUser))
+	mux.HandleFunc("GET /api/users/{id}/access-code", s.adminOnly(h.userAccessCode))
+	mux.HandleFunc("POST /api/users/{id}/regenerate-secret", s.adminOnly(h.regenerateSecret))
+
+	// 诊断与系统级操作（仅管理员）
+	mux.HandleFunc("GET /api/diagnostics", s.adminOnly(h.diagnostics))
+	mux.HandleFunc("GET /api/wsl/capability", s.adminOnly(h.wslCapability))
+	mux.HandleFunc("GET /api/wsl/distros", s.adminOnly(h.wslListDistros))
+	mux.HandleFunc("GET /api/wsl/ports/{distro}", s.adminOnly(h.wslListPorts))
+	mux.HandleFunc("POST /api/wsl/import", s.adminOnly(h.wslImport))
 
 	// Embedded SPA — wrap with fixMIME to guarantee correct Content-Type
 	staticFS, _ := fs.Sub(staticFiles, "static")
@@ -319,30 +344,15 @@ func (w *mimeLockedWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// middlewareChain wraps the mux with logging and optional basic auth.
+// middlewareChain wraps the mux with logging and security headers.
+//
+// 认证不再放在这里：多用户下「谁在访问」决定了「能看到什么数据」，判定必须
+// 发生在能拿到 handler 上下文的地方（见 authed/adminOnly）。原先的全局
+// Basic Auth 退位为仅回环生效的应急后门。
 func (s *Server) middlewareChain(next http.Handler) http.Handler {
-	// Basic auth
-	if s.cfg.Username != "" {
-		next = basicAuth(s.cfg.Username, s.cfg.Password, next)
-	}
-	// Request logger
 	next = requestLogger(next)
 	next = securityHeaders(next)
 	return next
-}
-
-func basicAuth(user, pass string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(user)) == 1
-		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(pass)) == 1
-		if !ok || !userOK || !passOK {
-			w.Header().Set("WWW-Authenticate", `Basic realm="go-port-forward"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func requestLogger(next http.Handler) http.Handler {

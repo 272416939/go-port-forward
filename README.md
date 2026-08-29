@@ -60,6 +60,8 @@ A high-performance cross-platform TCP/UDP port forwarder with a built-in Web UI.
   Access control — IP/CIDR black/whitelist, connection logs and a live session view (works for any TCP/UDP service)
 - **隧道组件与透明模式** — 自研迷你加密隧道（app/，Linux 服务端 + Windows 客户端）配合规则级透明模式，跨公网实现后端零插件看到玩家真实 IP
   Tunnel app & transparent mode — a mini encrypted tunnel (app/) plus per-rule transparent mode delivers real client IPs across the public internet with zero backend plugins
+- **多用户与隔离** — 面板账号即隧道身份：登录后只见自己的规则，每个用户独立密钥与隧道地址，一张 TUN 服务全部用户且互不可见
+  Multi-user isolation — a panel account is also a tunnel identity: per-user keys and tunnel addresses, own-rules-only visibility, one TUN device serving everyone without cross-talk
 
 ## 🎯 痛点分析 | Pain Points
 
@@ -118,6 +120,7 @@ go-port-forward/
 ├── main.go                  # 程序入口 | Entry point
 ├── config.yaml              # 配置文件 | Configuration
 ├── internal/
+│   ├── auth/                # 密码哈希 + 内存会话表 | Password hashing & session store
 │   ├── config/              # 配置加载 (Viper) | Config loading
 │   ├── firewall/            # 跨平台防火墙管理 | Cross-platform firewall
 │   │   ├── firewall.go      # 接口定义 | Interface
@@ -132,18 +135,26 @@ go-port-forward/
 │   ├── models/              # 数据模型 | Data models
 │   ├── storage/             # bbolt 持久化 | bbolt persistence
 │   ├── svc/                 # 系统服务封装 | System service wrapper
+│   ├── tunnelapp/           # 内置隧道服务端（多用户会话表）| Built-in tunnel server
+│   ├── users/               # 用户服务（账号 == 隧道身份）| User service
 │   └── web/                 # Web 服务 + 嵌入式静态资源 | Web server + embedded static
 │       ├── server.go
 │       ├── handlers.go
+│       ├── handlers_auth.go
+│       ├── handlers_users.go
 │       ├── handlers_wsl.go
 │       └── static/          # 前端资源 (Alpine.js, Bootstrap, HTMX)
 ├── pkg/
+│   ├── accesscode/          # pf-client 接入码编解码 | Access code codec
 │   ├── gc/                  # GC 管理服务 | GC management
 │   ├── pool/                # 协程池封装 (ants) | Goroutine pool
 │   ├── retry/               # 重试机制 | Retry utilities
 │   ├── logger/              # 全局日志桥接 | Global logger bridge
 │   ├── serializer/          # JSON 序列化 (sonic/jsoniter) | JSON serialization
+│   ├── tunnel/              # 隧道协议（握手 + 每包加密）| Tunnel protocol
+│   ├── tunnet/              # TUN 设备抽象 | TUN device abstraction
 │   └── os/                  # OS 工具 (WSL 发现等) | OS utilities
+├── app/                     # Windows 隧道客户端 pf-client（独立 module）| Tunnel client
 └── data/
     └── rules.db             # bbolt 数据库文件 | Database file
 ```
@@ -236,8 +247,9 @@ A default `config.yaml` is auto-generated in the same directory as the executabl
 web:
   host: 127.0.0.1          # Web UI 监听地址 | Listen address
   port: 8989                # Web UI 端口 | Port
-  # username: admin         # Basic Auth 用户名 (留空禁用) | Username (leave empty to disable)
-  # password: secret        # Basic Auth 密码 | Password
+  secure_cookie: false      # 会话 cookie 加 Secure 标记（仅 HTTPS 访问时开启）| Mark session cookie Secure (HTTPS only)
+  # username: admin         # 应急后门账号，仅本机回环生效 | Rescue account, loopback only
+  # password: secret        # 见「多用户与账号」章节 | see the multi-user section
 
 storage:
   path: data/rules.db       # 数据库路径 | Database path
@@ -256,6 +268,14 @@ forward:
   udp_timeout: 30           # UDP 会话空闲超时 (秒) | UDP session idle timeout (seconds)
   pool_size: 0              # 协程池大小 (0 = 自动) | Goroutine pool size (0 = auto)
 
+tunnel:
+  enabled: false            # 内置隧道服务端（配合 pf-client）| Built-in tunnel server
+  listen: ":7947"           # 隧道 UDP 监听 | Tunnel UDP listen
+  tun_name: pftun0          # TUN 设备名 | TUN device name
+  tun_addr: 10.66.0.1/24    # 服务端隧道地址 + 客户端地址池 | Server address + client pool
+  public_addr: ""           # 写进接入码的中转机地址，如 1.2.3.4:7947 | Relay address embedded in access codes
+  nat: true                 # 自动配置回程路径 | Auto-configure the return path
+
 gc:
   enabled: true
   interval_seconds: 300     # GC 间隔 (秒) | GC interval (seconds)
@@ -263,6 +283,77 @@ gc:
   memory_threshold_mb: 100  # 内存阈值 (MB) | Memory threshold (MB)
   enable_monitoring: true
 ```
+
+> `tunnel.psk` 已废弃：多用户协议为每个用户分配独立密钥。旧配置文件仍能加载，
+> 但该项被忽略并在启动时告警一次。
+> `tunnel.psk` is deprecated — every tunnel user now carries its own key. Old config
+> files still load; the field is ignored and warned about once at startup.
+
+## 👥 多用户与账号 | Multi-user & Accounts
+
+一个用户同时是 **面板账号** 与 **隧道身份**。他登录后只能看到自己的转发规则，
+隧道也只接受用他的接入码建立的连接——两种身份合并成一个对象，是为了避免
+「谁的规则能指向谁的隧道」变成一张需要单独维护的关联表。
+
+A user is both a **panel account** and a **tunnel identity**: they only see their own
+forwarding rules, and the tunnel only accepts connections made with their access code.
+
+### 首次启动 | First Run
+
+用户表为空时会自动创建管理员 `admin`，随机初始密码同时写入：
+
+- 启动日志（一条 warn）
+- 可执行文件同目录的 `admin-credentials.txt`（权限 0600）
+
+首次登录会被要求立即改密。改完请删除该文件。
+
+On first run an `admin` account is created with a random password, written both to the
+startup log and to `admin-credentials.txt` (mode 0600) next to the executable. You must
+change it on first login; delete the file afterwards.
+
+### 权限边界 | Permissions
+
+| 能力 Capability | 管理员 Admin | 普通用户 User |
+|---|---|---|
+| 转发规则增删改查 CRUD on rules | 全部规则 All | 仅自己名下 Own only |
+| 监听端口 Listen port | 不限 Unlimited | 必须落在分配的端口区间内 Within the assigned range |
+| 转发目标 Target address | 任意主机 Any host | **只能是自己的隧道地址** Own tunnel address only |
+| 规则数量 Rule count | 不限 Unlimited | 受 `max_rules` 约束 Bounded by `max_rules` |
+| 活跃会话 / 连接日志 Sessions & logs | 全站 All | 仅自己规则上的 Own rules only |
+| IP 黑白名单 / 运行诊断 / WSL 导入 | ✅ | ❌ |
+| 用户管理 User management | ✅ | ❌ |
+
+普通用户的转发目标被锁定为自己的隧道地址不是形式主义：不限制的话，他可以建一条
+指向 `127.0.0.1:22` 或内网任意主机的转发，把中转机变成一个对外开放的跳板。
+
+### 接入码 | Access Codes
+
+管理员在「用户管理」里创建用户后，界面会直接给出该用户的**接入码**——一个
+`pf1.` 开头的字符串，内含中转机地址、用户 ID 与隧道密钥。用户把它粘贴进
+pf-client 的输入框即可连接，不必手抄 44 字符的 base64 密钥。
+
+接入码等同于密码，请通过可信渠道下发。密钥泄漏时用「重新生成密钥」按钮，
+旧接入码立即失效。若 `tunnel.public_addr` 未配置，接入码里的地址会取自你访问
+面板时用的主机名——从 `localhost` 访问面板时无法推断，此时接口会明确报错。
+
+### 安全提示 | Security Notes
+
+多租户意味着面板必须对外可达（`web.host` 不再是 `127.0.0.1`），这带来两点：
+
+- **明文 HTTP 下会话 cookie 是裸奔的**。请把面板放在 TLS 反向代理之后，
+  并把 `web.secure_cookie` 设为 `true`（非 HTTPS 下开启会导致浏览器拒存 cookie、
+  登录直接失败）。
+- `web.username` / `web.password` 退位为**应急后门**，仅在从**本机回环**访问时生效
+  （忘记管理员密码时可 SSH 到中转机上重置）。它是一对明文存在配置文件里的凭据，
+  对公网生效就是整个多租户体系上的一个洞，所以这个限制不可配置。
+
+会话存在内存里，进程重启即全部失效；改密码或停用账号会立刻注销该用户在所有
+设备上的登录。
+
+Multi-tenancy requires the panel to be reachable, so put it behind a TLS reverse proxy and
+set `web.secure_cookie: true`. The `web.username`/`web.password` pair is now a
+**loopback-only rescue account** for password recovery. Sessions live in memory and are
+dropped on restart, on password change, and when an account is disabled.
 
 ## 🩺 运行诊断 | Diagnostics
 
@@ -407,23 +498,36 @@ The **Active Sessions** panel lists all current client sessions (protocol / sour
 ```
 玩家P ──► [中转 Linux VPS]                          [Windows / BDS]
           go-port-forward（透明模式：                    ▲ pf-client
-            源地址=P真实IP）──► 路由进 TUN ══加密隧道═════╝ (10.66.0.2)
+            源地址=P真实IP）──► 路由进 TUN ══加密隧道═════╝ (10.66.0.x)
           内置隧道服务端 (TUN 10.66.0.1)
           策略路由把回包交回透明 socket ──► 玩家P ◄──────┘
 ```
+
+隧道是**多用户**的：一张 TUN 服务全部用户，每个隧道用户分到一个独立的
+`10.66.0.x` 地址。出向按目的地址分流到对应会话，入向校验源地址必须等于该会话
+分到的地址——这条校验是用户隔离的实际执行点，缺了它一个用户可以伪造另一个的
+源地址，去劫持对方的回程流量。
+
+The tunnel is **multi-user**: one TUN device serves everyone, each user gets its own
+`10.66.0.x`. Outbound packets are demultiplexed by destination address; inbound packets are
+dropped unless the source matches the address assigned to that session.
 
 ### 部署步骤 | Deployment
 
 1. **构建**：`bash app/build.sh` → 产物在 `app/bin/`，只有两个文件：`pf-client.exe` + `wintun.dll`。
    客户端目标机**无需 Go 环境**，两个文件同目录分发即可。
    （中转机侧不需要单独进程，隧道服务端已内置在主程序里。）
-2. **中转机（Linux，root）**：`config.yaml` 里开 `tunnel.enabled: true`，启动主程序即可；
+2. **中转机（Linux，root）**：`config.yaml` 里开 `tunnel.enabled: true`，
+   并把 `tunnel.public_addr` 填成客户端要连的公网地址（如 `1.2.3.4:7947`），启动主程序；
    防火墙放行 UDP 7947。
-3. **后端机（Windows）**：双击 `pf-client.exe` → 自动请求管理员权限 → 打开图形界面 →
-   填中转机地址（IP:7947，会记住，下次自动连接）→ 自动创建虚拟网卡（10.66.0.2）
-   并按会话动态维护回程路由。关闭窗口收进右下角托盘继续运行，托盘菜单可退出。
+3. **建用户拿接入码**：面板侧边栏「用户管理」→ 创建用户（填端口区间与规则上限）→
+   界面直接给出该用户的接入码，复制发给他。
+4. **后端机（Windows）**：双击 `pf-client.exe` → 自动请求管理员权限 → 打开图形界面 →
+   粘贴接入码 → 自动创建虚拟网卡（地址由服务端下发）并按会话动态维护回程路由。
+   凭据会记住，下次打开直接连接。关闭窗口收进右下角托盘继续运行，托盘菜单可退出。
    **首次在 Windows Server 2019/2016 上使用需先装 WebView2 运行时**（见下方注意事项）。
-4. **go-port-forward**：添加/编辑规则，目标地址填 **10.66.0.2**（客户端虚拟 IP），开启 **透明模式** 开关。
+5. **go-port-forward**：添加/编辑规则，目标地址填该用户的隧道地址（用户管理里可见；
+   管理员在规则表单里选「所属用户」会自动带出），开启 **透明模式** 开关。
    仅 Linux+root 可用；Windows 上该开关的规则会启动失败并给出明确原因（fail-closed）。
 
 > `app/bin/pf-client.exe` 是唯一的正式客户端产物。若你直接跑过 `go build ./cmd/client/`，
@@ -432,16 +536,22 @@ The **Active Sessions** panel lists all current client sessions (protocol / sour
 
 ### 回程路由原理（不影响其它流量）| Dynamic Return Routing
 
-服务端每 10 秒把 go-port-forward 活跃会话的来源 IP 经加密控制通道推给客户端；
-客户端另外在收到玩家入站包时即时补齐路由（探测器这类"一来一回"的交互等不到下一次推送）。
-**只对这些 IP 添加 /32 路由**进隧道，空闲超过 5 分钟才回收。
+服务端每 10 秒把活跃会话的来源 IP 经加密控制通道推给客户端，**按规则归属分组**——
+每个客户端只收到自己名下规则上的玩家 IP，不会替别人的玩家装路由，也看不到别人的
+玩家地址。客户端另外在收到玩家入站包时即时补齐路由（探测器这类"一来一回"的交互
+等不到下一次推送）。**只对这些 IP 添加 /32 路由**进隧道，空闲超过 5 分钟才回收。
 Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接访问"的流量完全不经过隧道。
 
 ### 注意事项 | Notes
 
 - 透明模式与 PROXY 协议透传互斥（二选一）；两者都保留，按拓扑任选。
 - 透明模式**仅支持 UDP 规则**（TCP 的回包无法送达透明 socket），协议含 TCP 时开关会被拒绝；UDP 场景（如基岩版 19132/58618）完全覆盖。
-- 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟；PSK 建议修改默认值。
+- 隧道为 UDP 传输（对游戏 UDP 最友好）；两端时钟偏差需 < 10 分钟。
+- **多用户版握手协议（v2）与旧版不兼容**：旧 pf-client 会被服务端拒绝，日志给出
+  「协议版本过旧，请升级」的明确提示，而不是一个查不出原因的认证失败。升级请同时
+  更新两端。
+- `tun_addr` 的网段就是客户端地址池（`/24` 提供 253 个位置，扣掉网关）。地址一旦
+  分配就与用户绑定，删除用户后才会被回收复用。
 - Windows 端需要管理员权限（wintun 驱动 + 路由管理），未提权时程序会主动弹 UAC。
 - 客户端界面由系统自带的 Edge WebView2 渲染。Win11 与近年更新过的 Win10 均已预装，但
   **Windows Server 2019 / 2016 与部分精简版 Windows 10 不带**，需先安装「常青版独立安装
@@ -454,35 +564,58 @@ Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接�
 | 现象 | 检查 |
 |------|------|
 | pf-client 双击没反应 | 看 exe 同目录 `pf-client.log`；最常见是缺 WebView2 运行时（Server 2019/2016 不预装）。日志显示"已有实例在运行"属正常（单实例，窗口会被唤回前台） |
-| 隧道时断时续、进不去游戏 | 确认后端机只有**一个** `pf-client.exe` 进程；多实例会互相抢占服务端唯一的会话槽位 |
-| pf-client 一直握手失败 | 中转机 `tunnel.enabled` 是否开启、UDP 7947 是否放行、psk 是否与服务端一致 |
+| 隧道时断时续、进不去游戏 | 确认这台后端机只有**一个** `pf-client.exe` 进程。服务端已按用户分槽不再互相抢占，但同机多实例仍会撞在虚拟网卡名、按名删除的防火墙规则、系统路由表这些机器级资源上 |
+| pf-client 一直握手失败 | 中转机 `tunnel.enabled` 是否开启、UDP 7947 是否放行；服务端日志若提示「协议版本过旧」说明客户端要升级，若提示「握手认证失败」说明接入码已失效（在面板重新获取） |
+| 服务端日志「丢弃源地址不匹配的隧道包」 | 客户端配的虚拟网卡地址与服务端分配的不一致。正常情况下地址由握手下发不会错，出现这条要查是否有人手工改过网卡地址 |
 | 隧道已建立但业务不通 | 客户端界面「活跃玩家流量」是否出现玩家 IP，上下行字节是否同时增长；只有一个方向说明回程路由或策略路由有问题 |
 | 规则开启透明模式变红 | 非 Linux 或非 root 运行（需 root 或给进程 CAP_NET_ADMIN） |
 | 能进游戏但服务器列表探测失败 | 客户端版本过旧：入站首包即时补路由是后来才加的，旧版只靠 10 秒周期推送，短交互赶不上 |
+| 「取接入码」报错说无法确定中转机地址 | `tunnel.public_addr` 没配，且你是从 `localhost` 访问面板的（推断不出公网地址） |
 | 中转机日志刷屏 | 例行推送已降为 debug；仍刷屏说明 `log.level` 设成了 debug |
 
 ## 🔌 REST API
 
 | 方法 Method | 路径 Path | 描述 Description |
 |----------|---------------------------|----------------|
-| `GET`    | `/api/rules`              | 列出所有转发规则 List all forwarding rules |
+| `POST`   | `/api/auth/login`         | 登录，签发会话 cookie Sign in, issues the session cookie |
+| `POST`   | `/api/auth/logout`        | 登出 Sign out |
+| `GET`    | `/api/auth/me`            | 当前身份与配额 Current identity & quotas |
+| `POST`   | `/api/auth/password`      | 修改自身密码 Change own password |
+| `GET`    | `/api/rules`              | 列出转发规则（按归属过滤）List forwarding rules (scoped to the caller) |
 | `POST`   | `/api/rules`              | 创建转发规则 Create a forwarding rule |
 | `GET`    | `/api/rules/{id}`         | 获取单条规则 Get a single rule |
 | `PUT`    | `/api/rules/{id}`         | 更新规则 Update a rule |
 | `DELETE` | `/api/rules/{id}`         | 删除规则 Delete a rule |
 | `PUT`    | `/api/rules/{id}/toggle`  | 启用/禁用规则 Enable/disable a rule |
 | `GET`    | `/api/dashboard`          | 获取规则列表与聚合统计 Get rule list & aggregated stats |
-| `GET`    | `/api/acl`                | 列出访问控制条目 List IP access-control entries |
-| `POST`   | `/api/acl`                | 添加 IP 黑白名单条目 Add an IP allow/deny entry |
-| `DELETE` | `/api/acl/{id}`           | 删除访问控制条目 Delete an access-control entry |
 | `GET`    | `/api/logs`               | 查询连接日志 Query connection logs |
 | `GET`    | `/api/sessions`           | 活跃会话（TCP/UDP 通用）Active client sessions |
 | `GET`    | `/api/stats`              | 获取全局统计 Get global statistics |
-| `GET`    | `/api/diagnostics`        | 获取运行诊断快照 Get runtime diagnostics snapshot |
-| `GET`    | `/api/wsl/capability`     | 获取 WSL2 能力探测结果 Get WSL2 capability probe result |
-| `GET`    | `/api/wsl/distros`        | 列出 WSL2 发行版 List WSL2 distros |
-| `GET`    | `/api/wsl/ports/{distro}` | 列出发行版监听端口 List distro listening ports |
-| `POST`   | `/api/wsl/import`         | 批量导入 WSL2 端口 Batch import WSL2 ports |
+| `GET`    | `/api/users` 🔒            | 列出用户 List users |
+| `POST`   | `/api/users` 🔒            | 创建用户 Create a user |
+| `PUT`    | `/api/users/{id}` 🔒       | 更新用户（角色/配额/停用）Update a user |
+| `DELETE` | `/api/users/{id}` 🔒       | 删除用户 Delete a user |
+| `GET`    | `/api/users/{id}/access-code` 🔒 | 取该用户的接入码 Get the user's access code |
+| `POST`   | `/api/users/{id}/regenerate-secret` 🔒 | 重新生成隧道密钥 Regenerate the tunnel key |
+| `GET`    | `/api/acl` 🔒              | 列出访问控制条目 List IP access-control entries |
+| `POST`   | `/api/acl` 🔒              | 添加 IP 黑白名单条目 Add an IP allow/deny entry |
+| `DELETE` | `/api/acl/{id}` 🔒         | 删除访问控制条目 Delete an access-control entry |
+| `GET`    | `/api/diagnostics` 🔒      | 获取运行诊断快照 Get runtime diagnostics snapshot |
+| `GET`    | `/api/wsl/capability` 🔒   | 获取 WSL2 能力探测结果 Get WSL2 capability probe result |
+| `GET`    | `/api/wsl/distros` 🔒      | 列出 WSL2 发行版 List WSL2 distros |
+| `GET`    | `/api/wsl/ports/{distro}` 🔒 | 列出发行版监听端口 List distro listening ports |
+| `POST`   | `/api/wsl/import` 🔒       | 批量导入 WSL2 端口 Batch import WSL2 ports |
+
+> 🔒 = 仅管理员。除 `/api/auth/login` 外全部接口都要求已登录，未登录返回 `401`。
+> 数据类接口按调用者身份收敛作用域：普通用户只能读写自己名下的规则、会话与日志；
+> 访问别人的规则 ID 返回 `404`（而不是 `403`，确认某个 ID 存在本身就是信息泄漏）。
+> 🔒 = admin only. Every endpoint except login requires authentication (`401` otherwise).
+> Data endpoints are scoped to the caller; touching another user's rule ID returns `404`.
+
+> 写操作要求同源：会话 cookie 是 `SameSite=Strict`，服务端另外对带 `Origin`/`Referer`
+> 的非 GET 请求做一次同源校验。用 curl 等不带这些头的客户端调用不受影响。
+> Writes are same-origin checked (the session cookie is `SameSite=Strict`); clients that send
+> no `Origin`/`Referer` (curl, scripts) are unaffected.
 
 > 说明：WSL 相关接口仅在 Windows 上可用；在 Linux/macOS 上会返回 `501 Not Implemented`。
 > Note: WSL-related APIs are only available on Windows; on Linux/macOS they return `501 Not Implemented`.
