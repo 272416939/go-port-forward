@@ -26,8 +26,9 @@ import (
 // 没有这条 IP 限频就是敞开灌号。
 const RegistrationRateLimit = 10
 
-// rateLimiter 是极简的内存滑动窗口限频器（key → 历次时间戳）。
-type rateLimiter struct {
+// RateLimiter 是极简的内存滑动窗口限频器（key → 历次时间戳）。
+// 注册限频、登录防爆破（web 层）与验证码端点 per-IP 限频共用这一个实现。
+type RateLimiter struct {
 	mu     sync.Mutex
 	events map[string][]time.Time
 	limit  int
@@ -35,8 +36,14 @@ type rateLimiter struct {
 	now    func() time.Time
 }
 
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{
+// maxLimiterKeys 是触发全表清扫的键数上限。登录限频按用户名计数，键来自
+// 请求输入：不设上限的话，攻击者用随机用户名灌失败计数就是一场内存 DoS。
+// 清扫只删「窗口内再无记录」的键，正常在窗口内的键不受影响。
+const maxLimiterKeys = 8192
+
+// NewRateLimiter 创建限频器：window 内最多 limit 次。
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
 		events: make(map[string][]time.Time),
 		limit:  limit,
 		window: window,
@@ -44,23 +51,61 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	}
 }
 
-// Allow 记录并判定一次请求。超限返回 false（该次不计入）。
-func (r *rateLimiter) Allow(key string) bool {
-	now := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// pruneLocked 清掉窗口内已无记录的键（仅在键数超限时做全表清扫）。
+func (r *RateLimiter) pruneLocked(now time.Time) {
+	if len(r.events) <= maxLimiterKeys {
+		return
+	}
+	for k, times := range r.events {
+		if len(times) == 0 || now.Sub(times[len(times)-1]) >= r.window {
+			delete(r.events, k)
+		}
+	}
+}
+
+// trimLocked 摘掉单个键里已出窗的记录。
+func (r *RateLimiter) trimLocked(key string, now time.Time) []time.Time {
 	times := r.events[key][:0]
 	for _, t := range r.events[key] {
 		if now.Sub(t) < r.window {
 			times = append(times, t)
 		}
 	}
+	return times
+}
+
+// Allow 记录并判定一次请求。超限返回 false（该次不计入）。
+func (r *RateLimiter) Allow(key string) bool {
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneLocked(now)
+	times := r.trimLocked(key, now)
 	if len(times) >= r.limit {
 		r.events[key] = times
 		return false
 	}
 	r.events[key] = append(times, now)
 	return true
+}
+
+// Allowed 只查询不记录：超限返回 false。登录限频用它做「先看再验」——
+// 锁定期间连 bcrypt 校验都不该做，限频本身也是资源保护。
+func (r *RateLimiter) Allowed(key string) bool {
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneLocked(now)
+	times := r.trimLocked(key, now)
+	r.events[key] = times
+	return len(times) < r.limit
+}
+
+// Reset 清零一个键（登录成功后清该用户名的失败计数）。
+func (r *RateLimiter) Reset(key string) {
+	r.mu.Lock()
+	delete(r.events, key)
+	r.mu.Unlock()
 }
 
 // RegisterRequest 是注册的输入（web 层解析后传入）。

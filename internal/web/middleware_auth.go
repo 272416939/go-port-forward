@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	"go-port-forward/internal/auth"
-	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
 	"go-port-forward/internal/storage"
 	"go-port-forward/internal/users"
@@ -158,7 +157,6 @@ func writeUserError(w http.ResponseWriter, err error) {
 	case isErr(err, storage.ErrLastAdmin), isErr(err, storage.ErrTunPoolFull), isErr(err, users.ErrInvalidUser):
 		fail(w, http.StatusBadRequest, err.Error())
 	default:
-		logger.S.Warnw("用户接口失败 | user endpoint failed", "err", err)
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 	}
 }

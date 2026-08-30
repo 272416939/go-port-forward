@@ -24,16 +24,29 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "用户服务未就绪 | user service unavailable")
 		return
 	}
+	ip := clientIP(r)
+	// 防爆破：先查不记录——锁定期间连 bcrypt 校验都不做（限频也是资源保护）；
+	// 只对失败记录计数，成功登录清该用户名的失败计数（IP 计数靠窗口自然过期，
+	// 共享出口 IP 的办公环境不会被单人拖垮）。文案不区分 IP/用户名两种命中，
+	// 也不区分用户名是否存在，避免限频本身变成新的枚举面。
+	if !h.loginIPFail.Allowed(ip) || !h.loginUserFail.Allowed(req.Username) {
+		logger.S.Warnw("登录被限频 | login rate limited", "username", req.Username, "remote", r.RemoteAddr)
+		fail(w, http.StatusTooManyRequests, "尝试过于频繁，请稍后再试 | too many attempts, please try again later")
+		return
+	}
 	u, err := h.users.Authenticate(req.Username, req.Password)
 	if err != nil {
+		h.loginIPFail.Allow(ip)
+		h.loginUserFail.Allow(req.Username)
 		// 登录失败一律记 warn：这是唯一能看出爆破尝试的地方。
 		logger.S.Warnw("登录失败 | login failed", "username", req.Username, "remote", r.RemoteAddr)
 		writeUserError(w, err)
 		return
 	}
+	h.loginUserFail.Reset(req.Username)
 	token, err := h.sessions.Issue(u.ID)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	h.sessions.SetCookie(w, token)

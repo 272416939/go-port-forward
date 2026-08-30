@@ -17,7 +17,7 @@ func (h *handler) diagnostics(w http.ResponseWriter, _ *http.Request) {
 	}
 	mgrDiag, err := h.mgr.Diagnostics()
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	ok(w, models.DiagnosticsResponse{

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go-port-forward/internal/auth"
 	"go-port-forward/internal/config"
@@ -87,7 +88,11 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 		return u
 	}
 	f := &tenantFixture{
-		h:      &handler{mgr: mgr, users: svc, sessions: sessions},
+		h: &handler{mgr: mgr, users: svc, sessions: sessions,
+			loginIPFail:   users.NewRateLimiter(1000, 15*time.Minute),
+			loginUserFail: users.NewRateLimiter(1000, 15*time.Minute),
+			emailCodeIP:   users.NewRateLimiter(1000, time.Hour),
+		},
 		svc:    svc,
 		admin:  mk("admin", models.RoleAdmin, ""),
 		groups: map[string]*models.UserGroup{},

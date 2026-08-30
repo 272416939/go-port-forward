@@ -80,6 +80,6 @@ func writeACLError(w http.ResponseWriter, err error) {
 	case errors.Is(err, forward.ErrInvalidRule):
 		fail(w, http.StatusBadRequest, err.Error())
 	default:
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 	}
 }

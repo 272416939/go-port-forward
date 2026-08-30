@@ -7,7 +7,6 @@ package web
 
 import (
 	"errors"
-	"net"
 	"net/http"
 
 	"go-port-forward/internal/logger"
@@ -20,7 +19,7 @@ import (
 func (h *handler) publicConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.users.PublicConfig()
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	ok(w, cfg)
@@ -37,10 +36,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
+	ip := clientIP(r)
 	u, uerr := h.users.Register(users.RegisterInput{
 		Username: req.Username,
 		Password: req.Password,
@@ -66,6 +62,15 @@ func (h *handler) emailCode(w http.ResponseWriter, r *http.Request) {
 	var req models.EmailCodeRequest
 	if err := decodeBody(w, r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// 服务层的限频按邮箱维度，攻击者轮换收件邮箱即可绕过——把中转机的 SMTP
+	// 当垃圾邮件中继。per-IP 限发送总量（成功与否都计）。反代部署下 RemoteAddr
+	// 是代理 IP，会一刀切限所有用户：本项目刻意不信任 X-Forwarded-For（可伪造），
+	// 走反代时需在代理层补限频，这是已知的取舍。
+	if !h.emailCodeIP.Allow(clientIP(r)) {
+		logger.S.Warnw("验证码请求被限频 | email code rate limited", "remote", r.RemoteAddr)
+		fail(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试 | too many requests, please try again later")
 		return
 	}
 	if err := h.users.SendEmailCode(req.Email, req.Purpose); err != nil {

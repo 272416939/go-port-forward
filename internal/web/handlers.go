@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 
 	"go-port-forward/internal/auth"
@@ -25,6 +26,12 @@ type handler struct {
 	users    *users.Service
 	sessions *auth.Store
 	tunnel   TunnelStatus
+
+	// 防滥用限频（键为源 IP / 用户名）：登录防爆破 + 公开验证码端点防垃圾
+	// 邮件中继。实例在 registerRoutes 创建，字段只读，无需加锁。
+	loginIPFail   *users.RateLimiter // 登录失败按源 IP 计数
+	loginUserFail *users.RateLimiter // 登录失败按用户名计数
+	emailCodeIP   *users.RateLimiter // 验证码发送按源 IP 计数（成功请求也计）
 }
 
 type dashboardResponse struct {
@@ -56,6 +63,15 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, models.APIResponse{Success: false, Message: msg})
 }
 
+// clientIP 从 RemoteAddr 取出去端口后的源 IP（限频用）。
+func clientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	return ip
+}
+
 func decodeBody[T any](w http.ResponseWriter, r *http.Request, dst *T) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	defer r.Body.Close()
@@ -84,6 +100,14 @@ func decodeBodyError(err error) error {
 	}
 }
 
+// internalError 记录服务端错误并返回不含细节的通用响应：内部错误文本可能带出
+// 存储路径、bucket 名等实现细节，正文一律通用化，原文只进日志。
+func internalError(w http.ResponseWriter, err error) {
+	logger.S.Errorw("接口内部错误 | internal handler error", "err", err)
+	fail(w, http.StatusInternalServerError,
+		"服务器内部错误，请稍后重试或查看服务端日志 | internal server error, see server logs for details")
+}
+
 func writeAPIError(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
@@ -97,7 +121,7 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	case errors.Is(err, wsl.ErrNotSupported):
 		fail(w, http.StatusNotImplemented, err.Error())
 	default:
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 	}
 }
 
@@ -189,7 +213,7 @@ func (h *handler) listRules(w http.ResponseWriter, r *http.Request) {
 	me := auth.UserFrom(r.Context())
 	rules, err := h.mgr.ListRulesForUser(scopeOf(me))
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	ok(w, h.withOwnerNames(rules))
@@ -323,7 +347,7 @@ func (h *handler) globalStats(w http.ResponseWriter, r *http.Request) {
 	me := auth.UserFrom(r.Context())
 	_, stats, err := h.mgr.SnapshotForUser(scopeOf(me))
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	ok(w, stats)
@@ -333,7 +357,7 @@ func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	me := auth.UserFrom(r.Context())
 	rules, stats, err := h.mgr.SnapshotForUser(scopeOf(me))
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+		internalError(w, err)
 		return
 	}
 	ok(w, dashboardResponse{Rules: h.withOwnerNames(rules), Stats: stats})

@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go-port-forward/pkg/os/wsl"
 )
@@ -350,6 +352,39 @@ func NormalizeListenAddr(addr string) string {
 	return addr
 }
 
+// maxRuleNameRunes 限制规则名长度。防火墙同步会把 "go-port-forward: <名>"
+// 写进 iptables --comment（单条注释 128 字节上限）与 netsh 规则名，超长名
+// 会造成「加得进、清理时对不上」的规则残留。
+const maxRuleNameRunes = 64
+
+// ruleNameAllowedPunct 是规则名允许的标点。WSL 导入自动生成
+// "发行版:进程:tcp/端口" 形态的名字，冒号与斜杠必须放行；全角括号/冒号是
+// 中文命名常见字符。引号、反斜杠、$、; 等会进 iptables/netsh/pfctl 的参数
+// （argv 直传没有 shell 注入风险，但这些工具自己的解析层可能被搅乱），白名单一次性排除。
+const ruleNameAllowedPunct = "._-:/()（）【】:：、"
+
+// ValidateRuleName 校验规则名：非空、长度上限、字符白名单。
+func ValidateRuleName(name string) error {
+	if name == "" {
+		return fmt.Errorf("规则名称不能为空 | name is required")
+	}
+	if n := utf8.RuneCountInString(name); n > maxRuleNameRunes {
+		return fmt.Errorf("规则名称过长（最多 %d 个字符）| name is too long (max %d characters)", maxRuleNameRunes, maxRuleNameRunes)
+	}
+	for _, r := range name {
+		// 空白只放行普通空格：\t\n\r 属于 unicode.IsSpace，但控制字符进
+		// 防火墙工具的参数值没有意义，统一拒绝。
+		if r == ' ' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		if strings.ContainsRune(ruleNameAllowedPunct, r) {
+			continue
+		}
+		return fmt.Errorf("规则名称含有不允许的字符 %q（可用：中英文、数字、空格与 ._-:/()）| name contains unsupported character %q", r, r)
+	}
+	return nil
+}
+
 // ValidateCreateRuleRequest normalizes and validates a create request in-place.
 func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 	if req == nil {
@@ -364,8 +399,8 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 		req.Protocol = ProtocolTCP
 	}
 
-	if req.Name == "" {
-		return fmt.Errorf("规则名称不能为空 | name is required")
+	if err := ValidateRuleName(req.Name); err != nil {
+		return err
 	}
 	if req.TargetAddr == "" {
 		return fmt.Errorf("目标地址不能为空 | target_addr is required")
@@ -401,8 +436,8 @@ func ValidateForwardRule(rule *ForwardRule) error {
 	rule.Comment = strings.TrimSpace(rule.Comment)
 	rule.Protocol = NormalizeProtocol(rule.Protocol)
 
-	if rule.Name == "" {
-		return fmt.Errorf("规则名称不能为空 | name is required")
+	if err := ValidateRuleName(rule.Name); err != nil {
+		return err
 	}
 	if rule.TargetAddr == "" {
 		return fmt.Errorf("目标地址不能为空 | target_addr is required")

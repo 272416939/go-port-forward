@@ -263,7 +263,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	h := &handler{mgr: s.manager, fw: s.fw, users: s.users, sessions: s.sessions, tunnel: s.tunnel}
+	h := &handler{
+		mgr:     s.manager,
+		fw:      s.fw,
+		users:   s.users,
+		sessions: s.sessions,
+		tunnel:  s.tunnel,
+		// 登录防爆破：IP 维度放宽些（办公室 NAT 后多人共用），用户名维度收紧；
+		// 验证码端点按 IP 限发送量，防被当垃圾邮件中继。
+		loginIPFail:   users.NewRateLimiter(30, 15*time.Minute),
+		loginUserFail: users.NewRateLimiter(10, 15*time.Minute),
+		emailCodeIP:   users.NewRateLimiter(20, time.Hour),
+	}
 
 	// 认证（公开 + 登录后）
 	mux.HandleFunc("POST /api/auth/login", h.login)

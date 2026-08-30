@@ -58,7 +58,7 @@ type Service struct {
 	rulesCounter func(userID string) int
 
 	// registerLimiter 限制同一 IP 的注册频率（SMTP 未配置时的主要防线）。
-	registerLimiter *rateLimiter
+	registerLimiter *RateLimiter
 	// verifier 是邮箱验证码服务（接口由本包定义，email.VerificationService 实现）；
 	// Mailer 由装配层注入（SMTP 配置在 bbolt 里，面板改完即生效）。
 	verifier CodeIssuer
@@ -86,7 +86,7 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 		tunGateway: gw,
 		publicAddr: strings.TrimSpace(publicAddr),
 		detectAddr: detector.Detect,
-		registerLimiter: newRateLimiter(RegistrationRateLimit, time.Hour),
+		registerLimiter: NewRateLimiter(RegistrationRateLimit, time.Hour),
 		verifier:        email.NewVerificationService(nil), // Mailer 由装配层注入
 	}, nil
 }
