@@ -128,17 +128,13 @@ func (h *handler) checkTargetScope(me *models.User, targetAddr string) error {
 // checkPublicTarget 校验通用模式规则的目标地址：任意公网地址放行，内网/
 // 回环/本机地址拒绝。
 //
-// 通用模式的转发目标不再锁定为访问码隧道地址（用户可以转发到任意公网服务），
-// 但「把中转机当内网跳板」的口子不能开：私网、CGNAT、回环、链路本地（含
-// 云元数据 169.254.169.254）、组播与本机网卡地址一律拒绝。指向自己访问码
-// 隧道地址仍放行——那是 TCP 经隧道到后端的唯一通路（透明模式仅 UDP）。
-//
-// 隧道网段内的其它地址在命中通用私网检查前先单独拦截，并给出「去用透明
-// 模式」的引导——这是最常见的误用，只报「不能是内网地址」用户会一头雾水。
+// 通用模式与隧道彻底无关（目标必须是公网地址，不需要客户端）。隧道网段内
+// 的地址一律拒绝——包括自己的隧道地址：指向它的通用规则是「TCP 经隧道」的
+// 旧通路，已随网关例外一起移除（透明模式仅 UDP，TCP 无法经隧道转发）。
 //
 // 主机名不做解析校验：创建时解析存在 TOCTOU，且公网域名是合法用例；解析成
-// 隧道网段地址的包会被数据面丢弃（tunnelapp 的用户隔离检查），API 层不是
-// 这条边界的执行点。
+// 隧道网段地址的包由数据面丢弃（tunnelapp 的用户隔离检查）——API 层不是
+// 这条边界的执行点，只是把最常见的误用在提交时就拦下并指路。
 func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 	target := strings.TrimSpace(targetAddr)
 	ip := net.ParseIP(target)
@@ -148,15 +144,8 @@ func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 		}
 		return nil // 主机名放行
 	}
-	// 自己访问码的隧道地址放行（隧道地址在私网段，会被下面的检查误伤）。
-	allowed, err := h.users.TunIPsOf(me.ID)
-	if err != nil {
-		return err
-	}
-	if _, ok := allowed[target]; ok {
-		return nil
-	}
-	// 隧道网段内、但不属于自己：大概率是想走隧道填错了模式，给出引导。
+	// 隧道网段内：大概率是想走隧道填错了模式，给出引导（自己的地址也在内，
+	// 通用模式已经不承接任何隧道流量）。
 	if v4 := ip.To4(); v4 != nil {
 		pool, _ := h.users.TunnelPrefix()
 		if pool.IsValid() && pool.Contains(netip.AddrFrom4([4]byte(v4))) {

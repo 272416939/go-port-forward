@@ -356,10 +356,11 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 				s.logSpoof(ps, src)
 				continue
 			}
-			// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（网关除外，
-			// 通用模式经网关往返隧道地址是合法流量）。客户端掩码是 /16，整个
-			// 网段在每台客户端机器上都是直连网段，不拦的话 A 可以直接访问 B
-			// 后端机上所有绑 0.0.0.0 的服务。
+			// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（零例外，
+			// 网关也不行——通用模式目标填隧道地址已整体禁用，网关上没有任何
+			// 服务需要被隧道访问）。客户端掩码是 /16，整个网段在每台客户端
+			// 机器上都是直连网段，不拦的话 A 可以直接访问 B 后端机上所有绑
+			// 0.0.0.0 的服务。
 			dst, ok := dstIP4(plain)
 			if ok && s.isTunnelInternal(dst) {
 				s.logTunnelInternal(ps, dst, "目的")
@@ -524,10 +525,11 @@ func (s *Server) logSpoof(ps *peerSession, src netip.Addr) {
 }
 
 // isTunnelInternal 报告该地址是否属于「隧道内部、不许互相访问」的地址：
-// 网段内但不是网关。网关要放行——通用模式经网关往返隧道地址是合法流量
-// （中转机以网关为源去连隧道地址，回包目的地址也是网关）。
+// 网段内即命中，零例外。网关（中转机在 TUN 上的地址）同样命中——它上面的
+// 服务对隧道用户不可达是 INPUT 收紧后的既定语义，这里在用户态对齐，别让
+// 包先进内核再被丢。
 func (s *Server) isTunnelInternal(ip netip.Addr) bool {
-	return ip.IsValid() && s.tunPool.Contains(ip) && ip != s.gateway
+	return ip.IsValid() && s.tunPool.Contains(ip)
 }
 
 // logTunnelInternal 限频记录隧道内互访的拦截。direction 是被拦地址在 IP 头里
@@ -586,8 +588,8 @@ func (s *Server) pumpTunToClient(dev *tunnet.Device, udpConn *net.UDPConn) {
 			continue
 		}
 		// 用户隔离的对称执行语句：发往客户端的包，源地址不得是隧道网段内的
-		// 地址（网关除外）。合法来源只有玩家公网 IP（透明）与网关（通用）；
-		// 出现隧道内地址说明有人正在隧道里访问别人，不能替他递送。
+		// 地址（零例外，含网关）。合法来源只有玩家公网 IP；出现隧道内地址
+		// 说明有人正在隧道里访问别人，不能替他递送。
 		if src, ok := srcIP4(buf[:n]); ok && s.isTunnelInternal(src) {
 			s.logTunnelInternal(ps, src, "源")
 			continue

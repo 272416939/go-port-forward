@@ -305,7 +305,8 @@ func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 
 // 通用模式目标填隧道网段地址：这是「想走隧道但选错模式」的最常见误用，
 // 文案必须引导去透明模式，而不是笼统的「不能是内网地址」。自己的隧道地址
-// 仍放行——TCP 经隧道到后端只有这一条路（透明模式仅 UDP）。
+// 同样拒绝——通用模式不承接任何隧道流量（TCP 无法经隧道转发，透明模式仅
+// UDP），网关例外已随 TCP 隧道一起移除。
 func TestGeneralTargetTunnelSubnetGuidesToTransparent(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
@@ -327,12 +328,12 @@ func TestGeneralTargetTunnelSubnetGuidesToTransparent(t *testing.T) {
 		t.Fatalf("网段内未分配地址应引导去透明模式，status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	// 自己的隧道地址 + TCP：放行。
+	// 自己的隧道地址（TCP）：同样拒绝——零例外，通用模式与隧道彻底无关。
 	body = `{"name":"tcp-tun","listen_addr":"127.0.0.1","listen_port":20042,"protocol":"tcp","target_addr":"` + f.aliceCode.TunIP + `","target_port":25565}`
 	rec = httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("自己的隧道地址 + TCP 应放行，status = %d, body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "透明") {
+		t.Fatalf("自己的隧道地址 + TCP 也应被拒并引导，status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -392,8 +393,7 @@ func TestCreateRuleForcesOwnership(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
 
-	body := `{"name":"forged","listen_addr":"127.0.0.1","listen_port":20040,"protocol":"udp","target_addr":"` +
-		f.aliceCode.TunIP + `","target_port":19132,"user_id":"` + f.bob.ID + `"}`
+	body := `{"name":"forged","listen_addr":"127.0.0.1","listen_port":20040,"protocol":"udp","target_addr":"198.51.100.9","target_port":19132,"user_id":"` + f.bob.ID + `"}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusCreated {

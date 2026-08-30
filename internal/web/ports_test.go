@@ -74,8 +74,7 @@ func TestPortConflictMaskedForUser(t *testing.T) {
 	// 直接把她的组区间改成含 21001）。
 	f.resizeGroup(t, f.alice, 20000, 21099)
 
-	body := `{"name":"probe","listen_addr":"0.0.0.0","listen_port":21001,"protocol":"udp","target_addr":"` +
-		f.aliceCode.TunIP + `","target_port":19132}`
+	body := `{"name":"probe","listen_addr":"0.0.0.0","listen_port":21001,"protocol":"udp","target_addr":"198.51.100.9","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusConflict {

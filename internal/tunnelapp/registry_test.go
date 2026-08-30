@@ -359,9 +359,10 @@ func TestParseTunAddr(t *testing.T) {
 	}
 }
 
-// 隧道内互访的判定：网段内但不是网关。客户端掩码是 /16，整个网段在每台
-// 客户端机器上都是直连网段——不拦的话 A 可以直接访问 B 后端机上所有绑
-// 0.0.0.0 的服务。网关必须放行：通用模式经网关往返隧道地址是合法流量。
+// 隧道内互访的判定：网段内即命中，零例外（含网关）。客户端掩码是 /16，
+// 整个网段在每台客户端机器上都是直连网段——不拦的话 A 可以直接访问 B
+// 后端机上所有绑 0.0.0.0 的服务。网关也不放行：通用模式目标填隧道地址已
+// 整体禁用，网关上的服务对隧道用户不可达是既定语义（INPUT 同步收紧）。
 func TestIsTunnelInternal(t *testing.T) {
 	pool, gw, err := parseTunAddr("10.66.0.1/16")
 	if err != nil {
@@ -370,7 +371,7 @@ func TestIsTunnelInternal(t *testing.T) {
 	s := &Server{tunPool: pool, gateway: gw}
 
 	cases := map[netip.Addr]bool{
-		netip.MustParseAddr("10.66.0.1"):   false, // 网关放行
+		netip.MustParseAddr("10.66.0.1"):   true,  // 网关同样命中（零例外）
 		netip.MustParseAddr("10.66.1.8"):   true,  // 别人的隧道地址
 		netip.MustParseAddr("10.66.0.4"):   true,  // 自己的隧道地址也不许当互访目标出现
 		netip.MustParseAddr("10.66.0.250"): true,  // 网段内未分配的地址
