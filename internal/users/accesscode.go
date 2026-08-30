@@ -191,15 +191,15 @@ func (s *Service) UnbindDevice(id string) (*models.AccessCode, error) {
 
 // AccessCodeText 生成某访问码的接入码文本。
 //
-// fallbackAddr 用于 publicAddr 未配置时（通常取自 HTTP 请求的 Host，因为服务端
-// 无从知晓自己的公网地址）。
-func (s *Service) AccessCodeText(id, fallbackAddr string) (models.AccessCodeView, error) {
+// 中转机地址由 accessCodeAddr 统一决定（全局设置 > config > 公网 IP 探测），
+// 不再从请求 Host 推导——面板域名被 CDN/反代接管时那个地址是错的。
+func (s *Service) AccessCodeText(id string) (models.AccessCodeView, error) {
 	var out models.AccessCodeView
 	c, err := s.store.GetAccessCode(id)
 	if err != nil {
 		return out, err
 	}
-	addr, err := s.accessCodeAddr(fallbackAddr)
+	addr, err := s.accessCodeAddr()
 	if err != nil {
 		return out, err
 	}

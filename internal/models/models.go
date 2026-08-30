@@ -382,6 +382,11 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 	if req.Transparent && req.ProxyProtocol {
 		return fmt.Errorf("透明模式与 PROXY 协议互斥，只能二选一 | transparent and proxy_protocol are mutually exclusive")
 	}
+	// 透明模式 UDP-only 在创建时就拒绝，而不是等启动转发器时进 error 态——
+	// TCP 的回包无法送达透明 socket，这样的规则从来不可能工作。
+	if req.Transparent && req.Protocol != ProtocolUDP {
+		return fmt.Errorf("透明模式仅支持 UDP 规则（TCP 回包无法送达透明 socket）| transparent mode only supports UDP rules")
+	}
 	return nil
 }
 
@@ -413,6 +418,9 @@ func ValidateForwardRule(rule *ForwardRule) error {
 	}
 	if rule.Transparent && rule.ProxyProtocol {
 		return fmt.Errorf("透明模式与 PROXY 协议互斥，只能二选一 | transparent and proxy_protocol are mutually exclusive")
+	}
+	if rule.Transparent && rule.Protocol != ProtocolUDP {
+		return fmt.Errorf("透明模式仅支持 UDP 规则（TCP 回包无法送达透明 socket）| transparent mode only supports UDP rules")
 	}
 	return nil
 }

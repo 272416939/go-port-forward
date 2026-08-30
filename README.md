@@ -274,7 +274,7 @@ tunnel:
   tun_name: pftun0          # TUN 设备名 | TUN device name
   tun_addr: 10.66.0.1/16    # 服务端隧道地址 + 访问码地址池 | Server address + code pool
   # /16 提供约 6.5 万个地址：每个访问码占一个，/24 的 253 个位置在几十个用户时就会耗尽
-  public_addr: ""           # 写进接入码的中转机地址，如 1.2.3.4:7947 | Relay address embedded in access codes
+  public_addr: ""           # 兜底用：写进接入码的中转机地址，如 1.2.3.4:7947。优先用面板「全局设置」里的中转机地址；两处都未配置时自动探测公网 IP | Fallback relay address embedded in access codes; prefer the panel's global settings; auto-detects the public IP when neither is set
   nat: true                 # 自动配置回程路径 | Auto-configure the return path
 
 gc:
@@ -609,9 +609,10 @@ dropped unless the source matches the address assigned to that session.
 1. **构建**：`bash app/build.sh` → 产物在 `app/bin/`，只有两个文件：`pf-client.exe` + `wintun.dll`。
    客户端目标机**无需 Go 环境**，两个文件同目录分发即可。
    （中转机侧不需要单独进程，隧道服务端已内置在主程序里。）
-2. **中转机（Linux，root）**：`config.yaml` 里开 `tunnel.enabled: true`，
-   并把 `tunnel.public_addr` 填成客户端要连的公网地址（如 `1.2.3.4:7947`），启动主程序；
-   防火墙放行 UDP 7947。
+2. **中转机（Linux，root）**：`config.yaml` 里开 `tunnel.enabled: true`，启动主程序；
+   防火墙放行 UDP 7947。在面板「全局设置」里把**中转机地址**填成客户端要连的公网地址
+   （如 `1.2.3.4` 或 `1.2.3.4:7947`）——留空则自动探测公网 IP。面板域名若经 CDN/反代，
+   务必显式配置，否则接入码里的地址不可达。
 3. **建用户拿接入码**：面板侧边栏「用户管理」→ 创建用户（填端口区间与规则上限）→
    界面直接给出该用户的接入码，复制发给他。
 4. **后端机（Windows）**：双击 `pf-client.exe` → 自动请求管理员权限 → 打开图形界面 →
@@ -662,7 +663,7 @@ Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接�
 | 隧道已建立但业务不通 | 客户端界面「活跃玩家流量」是否出现玩家 IP，上下行字节是否同时增长；只有一个方向说明回程路由或策略路由有问题 |
 | 规则开启透明模式变红 | 非 Linux 或非 root 运行（需 root 或给进程 CAP_NET_ADMIN） |
 | 能进游戏但服务器列表探测失败 | 客户端版本过旧：入站首包即时补路由是后来才加的，旧版只靠 10 秒周期推送，短交互赶不上 |
-| 「取接入码」报错说无法确定中转机地址 | `tunnel.public_addr` 没配，且你是从 `localhost` 访问面板的（推断不出公网地址） |
+| 「取接入码」报错说无法确定中转机地址 | 全局设置与 `tunnel.public_addr` 都没配，且公网 IP 自动探测失败（NAT 云主机可能探测不到出口）——在面板「全局设置」里显式填写中转机地址 |
 | 中转机日志刷屏 | 例行推送已降为 debug；仍刷屏说明 `log.level` 设成了 debug |
 
 ## 🔌 REST API

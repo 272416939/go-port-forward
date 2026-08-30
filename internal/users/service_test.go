@@ -338,7 +338,7 @@ func TestRegenerateSecretInvalidatesOldCode(t *testing.T) {
 	u := f.mustUser(t, "alice", models.RoleUser, "")
 	c := f.mustCode(t, u, "home")
 
-	before, err := f.svc.AccessCodeText(c.ID, "")
+	before, err := f.svc.AccessCodeText(c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestRegenerateSecretInvalidatesOldCode(t *testing.T) {
 	if _, err := f.svc.RegenerateSecret(c.ID); err != nil {
 		t.Fatal(err)
 	}
-	after, err := f.svc.AccessCodeText(c.ID, "")
+	after, err := f.svc.AccessCodeText(c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestAccessCodeTextRoundTrip(t *testing.T) {
 	u := f.mustUser(t, "alice", models.RoleUser, "")
 	c := f.mustCode(t, u, "home")
 
-	got, err := f.svc.AccessCodeText(c.ID, "")
+	got, err := f.svc.AccessCodeText(c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +376,93 @@ func TestAccessCodeTextRoundTrip(t *testing.T) {
 	}
 	if decoded.Addr != "203.0.113.9:7947" {
 		t.Fatalf("接入码地址 = %q，应取 public_addr", decoded.Addr)
+	}
+}
+
+// 中转机地址的优先级：全局设置 relay_addr > config 的 tunnel.public_addr >
+// 公网 IP 探测 > 报错。按请求 Host 推导域名已被刻意移除——面板域名挂 CDN
+// 时推导结果指向 CDN，客户端从此连不上隧道。
+func TestAccessCodeAddrPriority(t *testing.T) {
+	logger.L = zap.NewNop()
+	logger.S = logger.L.Sugar()
+
+	open := func(t *testing.T, publicAddr string) (*Service, storage.Store) {
+		t.Helper()
+		store, err := storage.Open(filepath.Join(t.TempDir(), "settings.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		svc, err := New(store, auth.NewStore(false), "10.66.0.1/24", publicAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return svc, store
+	}
+	code := func(t *testing.T, svc *Service, username string) string {
+		t.Helper()
+		u, err := svc.Create(&models.CreateUserRequest{Username: username, Password: "password123", Role: models.RoleUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := svc.CreateAccessCode(u, &models.CreateAccessCodeRequest{Name: "home"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.ID
+	}
+
+	// 全局设置 > config 兜底。
+	svc, store := open(t, "203.0.113.9:7947")
+	st := models.DefaultSettings()
+	st.RelayAddr = "relay.example.com:7947"
+	if err := store.SaveSettings(st); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.AccessCodeText(code(t, svc, "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Addr != "relay.example.com:7947" {
+		t.Fatalf("应优先取全局设置 relay_addr：%q", view.Addr)
+	}
+
+	// 全局设置留空 → config 兜底。
+	st.RelayAddr = ""
+	if err := store.SaveSettings(st); err != nil {
+		t.Fatal(err)
+	}
+	view, err = svc.AccessCodeText(code(t, svc, "dave"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Addr != "203.0.113.9:7947" {
+		t.Fatalf("应回落 config public_addr：%q", view.Addr)
+	}
+
+	// config 也留空 → 公网 IP 探测。
+	svc2, store2 := open(t, "")
+	if err := store2.SaveSettings(models.DefaultSettings()); err != nil {
+		t.Fatal(err)
+	}
+	detectCalls := 0
+	svc2.detectAddr = func() string { detectCalls++; return "198.51.100.7" }
+	view, err = svc2.AccessCodeText(code(t, svc2, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Addr != "198.51.100.7" || detectCalls != 1 {
+		t.Fatalf("应取公网 IP 探测结果：%q（探测 %d 次）", view.Addr, detectCalls)
+	}
+
+	// 全都留空 → 报错。
+	svc3, store3 := open(t, "")
+	if err := store3.SaveSettings(models.DefaultSettings()); err != nil {
+		t.Fatal(err)
+	}
+	svc3.detectAddr = func() string { return "" }
+	if _, err := svc3.AccessCodeText(code(t, svc3, "carol")); err == nil {
+		t.Fatal("无法确定中转机地址时应报错")
 	}
 }
 

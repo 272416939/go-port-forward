@@ -4,9 +4,7 @@ package web
 
 import (
 	"fmt"
-	"net"
 	"net/http"
-	"strings"
 
 	"go-port-forward/internal/auth"
 	"go-port-forward/internal/models"
@@ -83,22 +81,4 @@ func (h *handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	okWithMessage(w, nil, "用户及其访问码已删除 | user and access codes deleted")
-}
-
-// relayHostFrom 从请求推断中转机地址，作为 tunnel.public_addr 未配置时的兜底。
-//
-// 面板与隧道跑在同一台机器上，管理员访问面板用的主机名/IP 通常就是客户端要
-// 连的地址。端口不同（面板 8989、隧道 7947），所以只取主机部分，让接入码
-// 落在客户端侧补默认端口。
-func relayHostFrom(r *http.Request) string {
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.TrimSpace(host)
-	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		// 本机地址对客户端毫无意义，宁可报错让管理员去配 public_addr。
-		return ""
-	}
-	return host
 }

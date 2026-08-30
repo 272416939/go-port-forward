@@ -46,8 +46,12 @@ type Service struct {
 	mu         sync.RWMutex
 	tunPool    netip.Prefix
 	tunGateway netip.Addr
-	publicAddr string        // 写进接入码的中转机地址（config 的 tunnel.public_addr）
+	publicAddr string        // 写进接入码的中转机地址（config 的 tunnel.public_addr 兜底）
 	evictor    TunnelEvictor // 隧道服务端；未启用隧道时为 nil
+
+	// detectAddr 是公网 IP 探测（publicip.go），publicAddr 与全局设置都未
+	// 配置时的最后兜底；测试注入替身时直接替换这个字段。
+	detectAddr func() string
 
 	// rulesCounter 是「某用户名下规则数」的查询（forward.Manager 注入），
 	// 配额用量 0/5 展示的数据源之一。
@@ -74,12 +78,14 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 	if err != nil {
 		return nil, err
 	}
+	detector := &publicIPDetector{}
 	return &Service{
 		store:      store,
 		sessions:   sessions,
 		tunPool:    pool,
 		tunGateway: gw,
 		publicAddr: strings.TrimSpace(publicAddr),
+		detectAddr: detector.Detect,
 		registerLimiter: newRateLimiter(RegistrationRateLimit, time.Hour),
 		verifier:        email.NewVerificationService(nil), // Mailer 由装配层注入
 	}, nil
@@ -410,15 +416,25 @@ var (
 )
 
 // accessCodeAddr 返回写进接入码的中转机地址。
-func (s *Service) accessCodeAddr(fallback string) (string, error) {
+//
+// 优先级：全局设置 relay_addr（存 bbolt，面板改完即时生效）→ config 的
+// tunnel.public_addr（旧配置兼容兜底）→ 自动探测本机公网 IP → 报错。
+// 刻意不做任何「按请求 Host 推导域名」：面板域名被 CDN/反代接管时，推导
+// 出来的地址指向 CDN 而不是真实节点，客户端从此连不上隧道。
+func (s *Service) accessCodeAddr() (string, error) {
+	if st, serr := s.store.Settings(); serr == nil {
+		if addr := strings.TrimSpace(st.RelayAddr); addr != "" {
+			return addr, nil
+		}
+	}
 	s.mu.RLock()
 	addr := s.publicAddr
 	s.mu.RUnlock()
-	if addr == "" {
-		addr = strings.TrimSpace(fallback)
+	if addr == "" && s.detectAddr != nil {
+		addr = s.detectAddr()
 	}
 	if addr == "" {
-		return "", fmt.Errorf("%w: 无法确定中转机地址，请在 config.yaml 配置 tunnel.public_addr | cannot determine relay address", ErrInvalidUser)
+		return "", fmt.Errorf("%w: 无法确定中转机地址，请在面板「全局设置」填写，或在 config.yaml 配置 tunnel.public_addr | cannot determine relay address; set it in admin panel global settings or config.yaml", ErrInvalidUser)
 	}
 	return addr, nil
 }

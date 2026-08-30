@@ -309,7 +309,40 @@
       <div class="modal-body">
         <!-- Error alert -->
         <div class="alert alert-danger py-2 small mb-3" x-show="formError" x-text="formError"></div>
-        <div class="row g-3">
+
+        <!-- 代理模式选择：先选模式再出表单。模式不落库——规则里的 transparent
+             字段就是唯一真相：透明模式 = transparent:true + 仅 UDP。 -->
+        <div class="row g-2 mb-2">
+          <div class="col-md-6">
+            <div class="card h-100 user-select-none" role="button" tabindex="0"
+                 :class="form.mode==='transparent' ? 'border-primary' : ''"
+                 @click="setRuleMode('transparent')" @keydown.enter="setRuleMode('transparent')">
+              <div class="card-body py-2 px-3">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi" :class="form.mode==='transparent' ? 'bi-check-circle-fill text-primary' : 'bi-circle'"></i>
+                  <span class="fw-semibold"><i class="bi bi-shield-check me-1"></i><span x-text="t('透明代理模式','Transparent Proxy')"></span></span>
+                </div>
+                <div class="small text-muted mt-1" x-text="t('仅 UDP · 目标必须是访问码隧道 · 后端零插件看到玩家真实 IP','UDP only · target must be an access-code tunnel · backend sees real player IPs without plugins')"></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card h-100 user-select-none" role="button" tabindex="0"
+                 :class="form.mode==='general' ? 'border-primary' : ''"
+                 @click="setRuleMode('general')" @keydown.enter="setRuleMode('general')">
+              <div class="card-body py-2 px-3">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi" :class="form.mode==='general' ? 'bi-check-circle-fill text-primary' : 'bi-circle'"></i>
+                  <span class="fw-semibold"><i class="bi bi-hdd-network me-1"></i><span x-text="t('通用代理模式','General Proxy')"></span></span>
+                </div>
+                <div class="small text-muted mt-1" x-text="t('TCP / UDP / both · 目标可填任意公网地址','TCP / UDP / both · target can be any public address')"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="form-text mb-2" x-show="!form.mode" x-cloak x-text="t('请先选择代理模式。','Pick a proxy mode first.')"></div>
+
+        <div class="row g-3" x-show="form.mode" x-cloak>
           <div class="col-12">
             <label class="form-label"><span x-text="t('规则名称','Rule Name')"></span> <span class="text-danger">*</span></label>
             <input class="form-control" :placeholder="t('如：nginx-8080','e.g. nginx-8080')" x-model="form.name"/>
@@ -339,7 +372,11 @@
           </div>
           <div class="col-md-4">
             <label class="form-label" x-text="t('协议','Protocol')"></label>
-            <select class="form-select" x-model="form.protocol">
+            <!-- 透明模式仅 UDP：TCP 回包无法送达透明 socket（服务端创建时同样拒绝）。 -->
+            <select class="form-select" disabled x-show="form.mode==='transparent'" style="display:none">
+              <option selected>UDP</option>
+            </select>
+            <select class="form-select" x-model="form.protocol" x-show="form.mode!=='transparent'" style="display:none">
               <option value="tcp">TCP</option>
               <option value="udp">UDP</option>
               <option value="both">TCP + UDP</option>
@@ -347,22 +384,27 @@
           </div>
           <div class="col-md-5">
             <label class="form-label"><span x-text="t('目标地址','Target Address')"></span> <span class="text-danger">*</span></label>
-            <!-- 普通用户：从自己的访问码里选（target_addr 是「这条规则喂给哪条隧道」的唯一真相，
-                 必须是自己某个启用中访问码的隧道地址）。管理员仍可填任意主机。 -->
-            <select class="form-select" x-model="form.target_addr" x-show="!isAdmin" style="display:none">
+            <!-- 透明模式：目标是「喂给哪条隧道」的唯一真相，只能从访问码里选。
+                 管理员可选所有用户的码，选中即把规则归属联动到该码的用户——
+                 回程路由按规则归属分组推送，归属与隧道不一致数据面会断。 -->
+            <select class="form-select" x-model="form.target_addr" @change="onTargetCodeChange()" x-show="form.mode==='transparent'" style="display:none">
               <option value="" x-text="t('— 选择访问码 —','— Select an access code —')"></option>
-              <template x-for="c in myCodes" :key="c.id">
-                <option :value="c.tun_ip" x-text="c.name + ' (' + c.tun_ip + ')'" :disabled="c.disabled"></option>
+              <template x-for="c in transparentCodeOptions()" :key="c.id">
+                <option :value="c.tun_ip" x-text="c.name + (isAdmin && c.user_name ? ' · ' + c.user_name : '') + ' (' + c.tun_ip + ')'"></option>
               </template>
             </select>
-            <input class="form-control" x-model="form.target_addr" placeholder="192.168.1.100" x-show="isAdmin" style="display:none"/>
-            <div class="form-text" x-show="!isAdmin" x-text="t('转发目标固定为你某个访问码的隧道地址。','Your target is fixed to one of your access code tunnel addresses.')"></div>
+            <!-- 通用模式：任意公网地址（内网/回环/本机地址会被服务端拒绝）。 -->
+            <input class="form-control" x-model="form.target_addr"
+                   :placeholder="t('1.2.3.4 或 example.com','1.2.3.4 or example.com')"
+                   x-show="form.mode!=='transparent'" style="display:none"/>
+            <div class="form-text" x-show="form.mode==='transparent'" x-text="t('转发目标固定为某个访问码的隧道地址，透明流量经该隧道送达后端。','Target is fixed to an access-code tunnel address; transparent traffic is delivered through it.')"></div>
+            <div class="form-text" x-show="form.mode!=='transparent'" x-text="t('可填任意公网 IP 或域名；内网、回环与本机地址会被拒绝。','Any public IP or hostname; private, loopback and host-local addresses are rejected.')"></div>
           </div>
           <div class="col-md-3">
             <label class="form-label"><span x-text="t('目标端口','Target Port')"></span> <span class="text-danger">*</span></label>
             <input class="form-control" type="number" min="1" max="65535" x-model.number="form.target_port" placeholder="80"/>
           </div>
-          <div class="col-md-4" style="display:none" x-show="isAdmin">
+          <div class="col-md-4" style="display:none" x-show="isAdmin && form.mode!=='transparent'">
             <label class="form-label" x-text="t('所属用户','Owner')"></label>
             <select class="form-select" x-model="form.user_id" @change="onOwnerChange()">
               <option value="" x-text="t('— 管理员共享规则 —','— Shared (admin) —')"></option>
@@ -382,22 +424,16 @@
               <label class="form-check-label" for="chkEnabled" x-text="t('立即启用','Enable Now')"></label>
             </div>
           </div>
-          <div class="col-md-6" style="display:none" x-show="isAdmin">
+          <div class="col-md-6" style="display:none" x-show="isAdmin && form.mode!=='transparent'">
             <div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" x-model="form.add_firewall" id="chkFw"/>
               <label class="form-check-label" for="chkFw" x-text="t('自动添加防火墙规则','Auto-add Firewall Rule')"></label>
             </div>
           </div>
-          <div class="col-md-6">
+          <div class="col-md-6" style="display:none" x-show="form.mode!=='transparent'">
             <div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" x-model="form.proxy_protocol" id="chkProxyProto"/>
               <label class="form-check-label" for="chkProxyProto" :title="t('向目标服务器注入 PROXY Protocol v2 头以透传客户端真实 IP，需后端支持该协议，否则会把头当作应用数据','Prepends a PROXY Protocol v2 header carrying the real client IP toward the target. The backend must support it, otherwise the header is treated as payload')" x-text="t('启用真实IP透传','Real IP Passthrough (PROXY v2)')"></label>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" x-model="form.transparent" id="chkTransparent"/>
-              <label class="form-check-label" for="chkTransparent" :title="t('以客户端真实 IP:端口 为源地址转发（仅 Linux+root）。需配合隧道组件 app：后端机运行 pf-client，转发目标填其虚拟 IP。与「真实IP透传」互斥。','Forwards with the real client IP:port as source (Linux+root only). Requires the tunnel app on the backend host; set the rule target to its virtual IP. Mutually exclusive with PROXY passthrough.')" x-text="t('透明模式','Transparent Mode')"></label>
             </div>
           </div>
         </div>
@@ -1297,6 +1333,12 @@
             <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_rules_per_user"/>
           </div>
           <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('中转机地址（写入接入码，供客户端连接隧道）','Relay address (embedded in access codes)')"></label>
+            <input class="form-control form-control-sm" x-model="settingsForm.relay_addr"
+                   :placeholder="t('如 124.221.181.159 或 relay.example.com:7947','e.g. 203.0.113.9 or relay.example.com:7947')"/>
+            <div class="form-text" x-text="t('留空则自动使用本机公网 IP（网卡公网地址，或公网回显服务探测）。config.yaml 的 tunnel.public_addr 仍作兜底。面板域名若经 CDN/反代，请务必显式配置。','Leave empty to auto-detect the public IP (NIC address, or public echo services). config.yaml tunnel.public_addr still works as a fallback. If the panel domain sits behind a CDN/reverse proxy, set this explicitly.')"></div>
+          </div>
+          <div class="col-12">
             <div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" x-model="settingsForm.enable_registration" id="chkRegistration"/>
               <label class="form-check-label small" for="chkRegistration">
@@ -1628,6 +1670,7 @@ function portForwardApp() {
 	    users: [],
 	    groups: [],
 	    myCodes: [],          // 规则表单用的本人访问码（普通用户）
+	    allCodes: [],         // 透明模式目标下拉用的全部访问码（管理员）
 	    codes: [],            // 访问码弹窗列表
 	    codesScopeUserId: '', // 弹窗当前的作用域（空=全部/本人）
 	    codeForm: { name:'', user_id:'' },
@@ -1639,7 +1682,7 @@ function portForwardApp() {
 	    groupForm: { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false },
 	    groupSaving: false,
 	    groupEdit: { id:'', name:'', port_range_start:0, port_range_end:0, max_access_codes:0, max_tunnels:0, max_rules:0 },
-	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, enable_registration:false },
+	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, enable_registration:false, relay_addr:'' },
 	    settingsSaving: false,
 	    globalSettings: null, // 组页面回退值展示用
 	    smtpForm: { host:'', port:587, username:'', password:'', from:'', from_name:'', encryption:'starttls' },
@@ -1928,6 +1971,50 @@ function portForwardApp() {
       } catch { /* 静默 */ }
     },
 
+    // 透明模式目标下拉用：管理员要能选所有用户的访问码（选中即联动归属）。
+    async loadAllCodes() {
+      if (!this.isAdmin) return
+      try {
+        const res = await fetch('/api/access-codes')
+        const d = await res.json()
+        if (d.success) this.allCodes = d.data || []
+      } catch { /* 静默：下拉为空时用户自会看到没有可选项 */ }
+    },
+
+    // 透明模式目标下拉的可选项：只列启用中的访问码。
+    transparentCodeOptions() {
+      const src = this.isAdmin ? this.allCodes : this.myCodes
+      return src.filter(c => !c.disabled && c.tun_ip)
+    },
+
+    // 透明模式选中目标访问码后联动规则归属——回程路由按规则归属分组推送，
+    // 归属与隧道不一致时数据面不通。
+    onTargetCodeChange() {
+      if (!this.isAdmin || this.form.mode !== 'transparent') return
+      const c = this.allCodes.find(x => x.tun_ip === this.form.target_addr)
+      if (c) this.form.user_id = c.user_id || ''
+    },
+
+    // 切换代理模式。切到透明时固化仅 UDP、清掉互斥开关；目标地址若不是
+    // 任何可选访问码的隧道地址则重置。
+    async setRuleMode(m) {
+      if (this.form.mode === m) return
+      this.form.mode = m
+      if (m === 'transparent') {
+        if (this.isAdmin) await this.loadAllCodes()
+        const opts = this.transparentCodeOptions()
+        if (!opts.some(c => c.tun_ip === this.form.target_addr)) {
+          this.form.target_addr = this.isAdmin ? '' : this.defaultCodeTunIP()
+          this.onTargetCodeChange()
+        }
+        this.form.protocol = 'udp'
+        this.form.transparent = true
+        this.form.proxy_protocol = false
+      } else {
+        this.form.transparent = false
+      }
+    },
+
     codeOwnerName(id) {
       const u = this.users.find(x => x.id === id)
       return u ? u.username : id
@@ -2198,7 +2285,8 @@ function portForwardApp() {
             max_access_codes_per_user: Number(this.settingsForm.max_access_codes_per_user) || 0,
             max_tunnels_per_user: Number(this.settingsForm.max_tunnels_per_user) || 0,
             max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0,
-            enable_registration: !!this.settingsForm.enable_registration
+            enable_registration: !!this.settingsForm.enable_registration,
+            relay_addr: (this.settingsForm.relay_addr || '').trim()
           })
         })
         const d = await res.json()
@@ -2422,26 +2510,28 @@ function portForwardApp() {
       }
     },
 
-    showAddModal() {
-      this.formError = ''
+	    showAddModal() {
+	      this.formError = ''
 	      this.form = this.newRuleForm()
-      this._ruleModal.show()
-    },
+	      this._ruleModal.show()
+	    },
 
-    editRule(r) {
-      this.formError = ''
+	    editRule(r) {
+	      this.formError = ''
 	      this.form = this.editableRuleForm(r)
-      this._ruleModal.show()
-    },
+	      if (this.form.mode === 'transparent' && this.isAdmin) this.loadAllCodes()
+	      this._ruleModal.show()
+	    },
 
 	    newRuleForm() {
 	      return {
 	        id: '',
+	        mode: '', // 代理模式：'' 未选 / 'transparent' 透明 / 'general' 通用；不落库，编辑时由 transparent 反推
 	        name:'',
 	        listen_addr:'0.0.0.0',
 	        listen_port: null,
 	        protocol:'tcp',
-	        target_addr: this.isAdmin ? '' : this.defaultCodeTunIP(),
+	        target_addr: '',
 	        target_port: null,
 	        comment:'',
 	        user_id: this.isAdmin ? '' : this.me.id,
@@ -2455,6 +2545,7 @@ function portForwardApp() {
 	    editableRuleForm(rule = {}) {
 	      return {
 	        id: rule.id || '',
+	        mode: rule.transparent ? 'transparent' : 'general', // 存量规则按 transparent 自动归类，零迁移
 	        name: rule.name || '',
 	        listen_addr: rule.listen_addr || '0.0.0.0',
 	        listen_port: rule.listen_port ?? null,
@@ -2471,19 +2562,20 @@ function portForwardApp() {
 	    },
 
 	    buildRulePayload() {
+	      const transparent = this.form.mode === 'transparent'
 	      return {
 	        name: this.form.name,
 	        listen_addr: this.form.listen_addr,
 	        listen_port: Number(this.form.listen_port),
-	        protocol: this.form.protocol,
+	        protocol: transparent ? 'udp' : this.form.protocol,
 	        target_addr: this.form.target_addr,
 	        target_port: Number(this.form.target_port),
 	        comment: this.form.comment || '',
 	        user_id: this.form.user_id || '',
 	        enabled: !!this.form.enabled,
 	        add_firewall: !!this.form.add_firewall,
-	        proxy_protocol: !!this.form.proxy_protocol,
-	        transparent: !!this.form.transparent,
+	        proxy_protocol: transparent ? false : !!this.form.proxy_protocol,
+	        transparent: transparent,
 	      }
 	    },
 
@@ -2522,6 +2614,7 @@ function portForwardApp() {
 
     async saveRule() {
       this.formError = ''
+      if (!this.form.mode) { this.formError = _t('请先选择代理模式', 'Pick a proxy mode first'); return }
       if (!this.form.name) { this.formError = _t('请填写规则名称', 'Rule name is required'); return }
       if (!this.form.target_addr) { this.formError = _t('请填写目标地址', 'Target address is required'); return }
       if (!this.form.listen_port) { this.formError = _t('请填写监听端口', 'Listen port is required'); return }

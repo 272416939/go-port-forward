@@ -41,7 +41,7 @@ tunnel:
   enabled: true
   listen: ":7947"
   tun_addr: 10.66.0.1/24     # 服务端地址 + 客户端地址池
-  public_addr: "1.2.3.4:7947" # 写进接入码的公网地址
+  public_addr: "1.2.3.4:7947" # 兜底用：写进接入码的公网地址。优先用面板「全局设置」里的中转机地址，两处都未配置时自动探测公网 IP
   nat: true                   # 自动配 ip_forward + 策略路由 + FORWARD/INPUT 放行
 ```
 

@@ -116,7 +116,7 @@ func (h *handler) accessCodeText(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	view, err := h.users.AccessCodeText(c.ID, relayHostFrom(r))
+	view, err := h.users.AccessCodeText(c.ID)
 	if err != nil {
 		writeUserError(w, err)
 		return
@@ -133,7 +133,7 @@ func (h *handler) regenerateAccessCode(w http.ResponseWriter, r *http.Request) {
 		writeUserError(w, err)
 		return
 	}
-	view, err := h.users.AccessCodeText(c.ID, relayHostFrom(r))
+	view, err := h.users.AccessCodeText(c.ID)
 	if err != nil {
 		writeUserError(w, err)
 		return

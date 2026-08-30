@@ -55,6 +55,9 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 		}
 		next.DefaultGroupID = gid
 	}
+	if req.RelayAddr != nil {
+		next.RelayAddr = strings.TrimSpace(*req.RelayAddr)
+	}
 	if err := models.ValidateSettings(&next); err != nil {
 		return cur, fmt.Errorf("%w: %v", ErrInvalidUser, err)
 	}
@@ -81,7 +84,8 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	logger.S.Infow("全局设置已更新 | global settings updated",
 		"port_range", fmt.Sprintf("%d-%d", next.PortRangeStart, next.PortRangeEnd),
 		"max_codes", next.MaxAccessCodesPerUser, "max_tunnels", next.MaxTunnelsPerUser,
-		"max_rules", next.MaxRulesPerUser, "registration", next.EnableRegistration)
+		"max_rules", next.MaxRulesPerUser, "registration", next.EnableRegistration,
+		"relay_addr", next.RelayAddr)
 	return next, nil
 }
 

@@ -2,6 +2,8 @@ package models
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +36,12 @@ type Settings struct {
 	// 是把「创建账号」的权力交给公网，不开就是不开，绝不该有「未配置即开放」。
 	EnableRegistration bool `json:"enable_registration"`
 
+	// RelayAddr 是写进接入码的中转机地址（host 或 host:port，如 1.2.3.4 或
+	// relay.example.com:7947）。留空 = 自动探测本机公网 IP。它必须在这里或
+	// config.yaml 显式给出：面板域名可能被 CDN/反代接管，按请求 Host 推导
+	// 会把接入码指向 CDN 而不是真实节点，客户端从此连不上隧道。
+	RelayAddr string `json:"relay_addr"`
+
 	// SchemaVersion 记录数据已迁移到哪个版本，迁移逻辑据此保持幂等。
 	SchemaVersion int `json:"schema_version"`
 }
@@ -62,6 +70,7 @@ type UpdateSettingsRequest struct {
 	MaxRulesPerUser       *int    `json:"max_rules_per_user"`
 	DefaultGroupID        *string `json:"default_group_id"`
 	EnableRegistration    *bool   `json:"enable_registration"`
+	RelayAddr             *string `json:"relay_addr"`
 }
 
 // ValidateSettings 校验全局设置自身的合法性。
@@ -77,6 +86,35 @@ func ValidateSettings(s *Settings) error {
 		if v < 0 {
 			return fmt.Errorf("%s 不能为负 | must not be negative", name)
 		}
+	}
+	if err := ValidateRelayAddr(s.RelayAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateRelayAddr 校验中转机地址：允许留空（= 自动探测公网 IP），否则必须
+// 是 host 或 host:port。裸 IPv6（多冒号）要求写成 [::1]:7947 形式——接入码
+// 里的地址面向客户端补默认端口，歧义格式宁可拒绝。
+func ValidateRelayAddr(s string) error {
+	addr := strings.TrimSpace(s)
+	if addr == "" {
+		return nil
+	}
+	if strings.ContainsAny(addr, " \t\r\n/@\\") || strings.Contains(addr, "://") {
+		return fmt.Errorf("中转机地址只能是 host 或 host:port，如 1.2.3.4 或 relay.example.com:7947 | relay address must be host or host:port")
+	}
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		if host == "" {
+			return fmt.Errorf("中转机地址缺少主机部分 | relay address is missing the host part")
+		}
+		if p, perr := strconv.Atoi(port); perr != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("中转机地址端口无效 | invalid port in relay address")
+		}
+		return nil
+	}
+	if strings.Contains(addr, ":") {
+		return fmt.Errorf("IPv6 地址请写成 [地址]:端口 形式 | use [addr]:port form for IPv6")
 	}
 	return nil
 }

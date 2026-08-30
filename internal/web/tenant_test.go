@@ -254,8 +254,9 @@ func TestCreateRuleRejectsPortOutsideQuota(t *testing.T) {
 	}
 }
 
-// 目标地址必须锁定为自己访问码的隧道地址。不限制的话普通用户可以建一条指向
-// 127.0.0.1:22 或内网任意主机的转发，把中转机变成跳板。
+// 目标地址校验按代理模式分流：透明规则必须锁定为自己访问码的隧道地址（数据
+// 面按 target_addr 分流隧道，指向别处无处可发）；通用规则允许任意公网地址，
+// 但内网/回环/本机地址拒绝——否则普通用户能把中转机当内网跳板。
 func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
@@ -272,22 +273,37 @@ func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 		rec := httptest.NewRecorder()
 		f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("%s 目标应被拒，status = %d, body=%s", name, rec.Code, rec.Body.String())
+			t.Fatalf("通用模式 %s 目标应被拒，status = %d, body=%s", name, rec.Code, rec.Body.String())
 		}
 		port++
 	}
 
-	// 自己的访问码地址可以。
-	body := `{"name":"ok","listen_addr":"127.0.0.1","listen_port":20020,"protocol":"udp","target_addr":"` +
-		f.aliceCode.TunIP + `","target_port":19132}`
+	// 公网地址在通用模式下放行。
+	body := `{"name":"public","listen_addr":"127.0.0.1","listen_port":20020,"protocol":"udp","target_addr":"198.51.100.7","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("自己的隧道地址应被接受，status = %d, body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("通用模式公网目标应被接受，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 透明模式仍锁定自己的隧道地址：别人的隧道被拒，自己的可以。
+	body = `{"name":"probe-t","listen_addr":"127.0.0.1","listen_port":20021,"protocol":"udp","transparent":true,"target_addr":"` +
+		f.bobCode.TunIP + `","target_port":19132}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "访问码") {
+		t.Fatalf("透明模式别人的隧道应被拒且提示访问码，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body = `{"name":"ok","listen_addr":"127.0.0.1","listen_port":20022,"protocol":"udp","transparent":true,"target_addr":"` +
+		f.aliceCode.TunIP + `","target_port":19132}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("透明模式自己的隧道地址应被接受，status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-// 没有访问码的用户 fail-closed：不能让规则指向一个不存在的隧道。
+// 没有访问码的用户建透明规则 fail-closed：不能让规则指向一个不存在的隧道。
 func TestUserWithoutAccessCodeCannotCreate(t *testing.T) {
 	f := newTenantFixture(t)
 	defer f.cleanup()
@@ -296,7 +312,7 @@ func TestUserWithoutAccessCodeCannotCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"name":"nope","listen_addr":"127.0.0.1","listen_port":20030,"protocol":"udp","target_addr":"10.66.0.200","target_port":19132}`
+	body := `{"name":"nope","listen_addr":"127.0.0.1","listen_port":20030,"protocol":"udp","transparent":true,"target_addr":"10.66.0.200","target_port":19132}`
 	rec := httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", body, carol))
 	if rec.Code != http.StatusBadRequest {
@@ -304,6 +320,37 @@ func TestUserWithoutAccessCodeCannotCreate(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "访问码") {
 		t.Fatalf("错误信息应指向「先建访问码」：%s", rec.Body.String())
+	}
+}
+
+// 通用模式不要求先有访问码：目标是任意公网地址，不依赖隧道。
+func TestUserWithoutAccessCodeCanCreateGeneral(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+	carol, err := f.svc.Create(&models.CreateUserRequest{Username: "carol", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"name":"gen","listen_addr":"127.0.0.1","listen_port":20031,"protocol":"tcp","target_addr":"198.51.100.7","target_port":443}`
+	rec := httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, carol))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("通用模式公网目标应被接受，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 透明模式仅支持 UDP：在创建时就拒绝，而不是等启动转发器时进 error 态。
+func TestTransparentRequiresUDP(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	body := `{"name":"t-tcp","listen_addr":"127.0.0.1","listen_port":20032,"protocol":"tcp","transparent":true,"target_addr":"` +
+		f.aliceCode.TunIP + `","target_port":19132}`
+	rec := httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "UDP") {
+		t.Fatalf("透明+TCP 应在创建时被拒，status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
 
