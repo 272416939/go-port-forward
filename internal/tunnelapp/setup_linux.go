@@ -100,8 +100,20 @@ func setupReturnPath(tunName string) error {
 	if _, err := run("ip", "route", "replace", "local", "default", "dev", "lo", "table", returnTable); err != nil {
 		return fmt.Errorf("配置本机投递路由表失败: %w", err)
 	}
-	// 回包进入 INPUT（目的是玩家 IP），云镜像的 INPUT 策略可能拦下它。
-	if err := ensureRule("filter", "INPUT", "-i", tunName, "-j", "ACCEPT"); err != nil {
+	// 回包进入 INPUT（目的是玩家 IP 或网关），云镜像的 INPUT 策略可能拦下它。
+	//
+	// ⚠️ 但**不能**全放行：TUN 上的地址对客户端是可达的（掩码 /16，网段全
+	// on-link），全放行等于把中转机上所有绑 0.0.0.0 的服务（管理面板、sshd、
+	// 数据库）暴露给隧道用户——访问 https://<网关>/login.html 就能摸到面板。
+	// 只放行**既有连接的回包**：透明回程与通用模式的回包都是中转机主动发起
+	// 的流的 REPLY（conntrack 状态 ESTABLISHED/RELATED），而客户端**主动**
+	// 发起的新连接没有任何合法用途（隧道协议本身走公网 UDP，不经过 TUN），
+	// 一律丢弃。
+	//
+	// 两条都必须 -I 插到链首：追加的话排在云镜像的 dport 放行规则（面板端口
+	// 几乎必然有一条 ACCEPT）之后，等于没拦。先删后插：旧版本的「全放行」
+	// 规则与可能错序的残留都要清掉，-C 判定「已存在」会保留错误顺序。
+	if err := lockInputOnInterface(tunName); err != nil {
 		return err
 	}
 	// 隧道内互访的内核兜底：用户态检查（tunnelapp.go isTunnelInternal）之外，
@@ -115,6 +127,28 @@ func setupReturnPath(tunName string) error {
 		return err
 	}
 	return ensureRule("filter", "FORWARD", "-o", tunName, "-j", "ACCEPT")
+}
+
+// lockInputOnInterface 把 TUN 接口的 INPUT 收紧为「只放行既有连接的回包」。
+//
+// 最终顺序（链首起）：ESTABLISHED,RELATED ACCEPT → DROP → 其余原有规则。
+// 插入顺序是先 DROP(1) 再 ESTABLISHED(1)——后者把前者顶到 2。
+// 旧版的全放行 ACCEPT 一并删除：它若还在（且位置靠前），新连接照样通。
+func lockInputOnInterface(tunName string) error {
+	est := []string{"-i", tunName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+	drop := []string{"-i", tunName, "-j", "DROP"}
+
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, est...)...)
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, drop...)...)
+	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT")
+
+	if _, err := run("iptables", append([]string{"-t", "filter", "-I", "INPUT", "1"}, drop...)...); err != nil {
+		return fmt.Errorf("收紧 TUN 入站（DROP）失败: %w", err)
+	}
+	if _, err := run("iptables", append([]string{"-t", "filter", "-I", "INPUT", "1"}, est...)...); err != nil {
+		return fmt.Errorf("收紧 TUN 入站（放行回包）失败: %w", err)
+	}
+	return nil
 }
 
 // ensureIPRule 添加 fwmark → 专用路由表的策略路由规则。
@@ -134,7 +168,9 @@ func teardownReturnPath(tunName string) {
 	_, _ = run("ip", "rule", "del", "fwmark", returnMark, "lookup", returnTable)
 	_, _ = run("ip", "route", "flush", "table", returnTable)
 	_, _ = run("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", tunName, "-p", "udp", "-j", "MARK", "--set-mark", returnMark)
-	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT")
+	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "DROP")
+	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT") // 旧版全放行规则
 	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-o", tunName, "-j", "DROP")
 	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-j", "ACCEPT")
 	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-o", tunName, "-j", "ACCEPT")

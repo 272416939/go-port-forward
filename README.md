@@ -662,7 +662,8 @@ Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接�
   **Windows Server 2019 / 2016 与部分精简版 Windows 10 不带**，需先安装「常青版独立安装
   程序」（<https://go.microsoft.com/fwlink/p/?LinkId=2124703>）；缺失时程序会弹窗说明。
   启动异常时看 exe 同目录的 `pf-client.log`（记录系统版本、提权状态、WebView2 版本与各步骤结果）。
-- 服务端 `tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward + 策略路由 + FORWARD/INPUT 放行，**不使用 MASQUERADE**（透明模式下正向首包走 OUTPUT 不匹配 NAT，conntrack 会判定整流不改写）。
+- 服务端 `tunnel.enabled: true` 即随主程序常驻，自动配 ip_forward + 策略路由 + FORWARD/INPUT 规则，**不使用 MASQUERADE**（透明模式下正向首包走 OUTPUT 不匹配 NAT，conntrack 会判定整流不改写）。TUN 接口的入站**只放行既有连接的回包**（conntrack ESTABLISHED/RELATED），新连接一律丢弃——隧道用户无法借网关地址访问中转机上的面板、ssh 等服务；两种模式的回包都是中转机主动发起的流的 REPLY，不受影响。
+- 隧道内互访被四层拦截：前端引导（通用模式目标填隧道地址）、API 层引导文案、数据面源/目的双向检查、内核 hairpin DROP。隧道用户之间（以及与中转机）在链路层互相不可达。
 
 ### 排查清单 | Troubleshooting
 
@@ -677,6 +678,8 @@ Windows 机器的其它上网/RDP 流量、以及"通过后端公网 IP 直接�
 | 能进游戏但服务器列表探测失败 | 客户端版本过旧：入站首包即时补路由是后来才加的，旧版只靠 10 秒周期推送，短交互赶不上 |
 | 用过代理之后，同一玩家直连后端公网 IP 进不去（等几分钟才好） | 回程 `/32` 路由尚未回收，它会吸走该 IP 的全部回包。后端执行 `route print -4 \| findstr 255.255.255.255` 可看到残留条目，急用时 `route delete <玩家IP>` 立即恢复。客户端版本过旧（回收要等 5 分钟且不主动回收）请升级 |
 | 客户端日志「回程路由删除失败…已放弃」 | 该地址的路由留在系统里了，会导致它无法直连。按提示手动 `route delete <IP>`；反复出现要查是否有另一个 pf-client 实例在抢路由表 |
+| 升级后从后端机访问 `https://<网关>/login.html` 不通了 | 这是安全修复的预期行为：TUN 接口入站只放行既有连接的回包，隧道用户不能再摸到中转机上的服务。管理面板请用公网地址访问 |
+| 升级后透明模式全部不通、抓包见回包被 INPUT 丢弃 | 回包放行依赖 conntrack ESTABLISHED。检查 `iptables -t raw -S` 是否被云镜像/其它软件加了 NOTRACK 把 UDP 排除在外 |
 | 「取接入码」报错说无法确定中转机地址 | 全局设置与 `tunnel.public_addr` 都没配，且公网 IP 自动探测失败（NAT 云主机可能探测不到出口）——在面板「全局设置」里显式填写中转机地址 |
 | 中转机日志刷屏 | 例行推送已降为 debug；仍刷屏说明 `log.level` 设成了 debug |
 
