@@ -1,7 +1,11 @@
 // UI 逻辑：一秒一次轮询 /api/status，按状态驱动界面。
-// token 从入口 URL 的查询参数取，后续所有请求都带上。
+// token 从入口 URL 的查询参数取一次，随即从地址栏抹掉（避免留在历史记录里），
+// 后续所有请求走 Authorization 头；服务端对 ?t= 的兼容保留给旧缓存页面。
 
 const token = new URLSearchParams(location.search).get('t') || '';
+if (token) {
+  try { history.replaceState(null, '', location.pathname) } catch (e) {}
+}
 
 const el = (id) => document.getElementById(id);
 const ui = {
@@ -35,8 +39,9 @@ ui.code.addEventListener('input', () => {
 });
 
 async function api(path, options) {
-  const sep = path.includes('?') ? '&' : '?';
-  const res = await fetch(`${path}${sep}t=${encodeURIComponent(token)}`, options);
+  options = Object.assign({}, options);
+  options.headers = Object.assign({}, options.headers, { 'Authorization': 'Bearer ' + token });
+  const res = await fetch(path, options);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `请求失败（${res.status}）`);
   return body;

@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 //go:embed ui
@@ -56,7 +57,14 @@ func startUI(eng *Engine) (string, <-chan struct{}, error) {
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/quit", s.handleQuit)
 
-	go func() { _ = http.Serve(ln, mux) }()
+	// 超时只收紧读头部与空闲连接：/api/connect 的 Start 里可能含隧道握手
+	// 甚至人机交互（等用户确认），不能给它套整个请求级的 WriteTimeout。
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() { _ = srv.Serve(ln) }()
 
 	return fmt.Sprintf("http://%s/?t=%s", ln.Addr().String(), s.token), s.quit, nil
 }

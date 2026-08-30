@@ -15,8 +15,8 @@ const firewallRuleName = "Port Forward Tunnel (pf-client)"
 // 玩家经隧道到达的包会被防火墙静默丢弃（表现为回程路由正确但无回包）。
 func AllowInboundOnInterface(ifaceName string) error {
 	cmd := fmt.Sprintf(
-		`New-NetFirewallRule -DisplayName '%s' -Direction Inbound -Action Allow -InterfaceAlias '%s' | Out-Null`,
-		firewallRuleName, ifaceName)
+		`New-NetFirewallRule -DisplayName %s -Direction Inbound -Action Allow -InterfaceAlias %s | Out-Null`,
+		psQuote(firewallRuleName), psQuote(ifaceName))
 	out, err := execPowerShell(cmd)
 	if err != nil {
 		// 已存在同名规则视为成功
@@ -31,6 +31,6 @@ func AllowInboundOnInterface(ifaceName string) error {
 // RemoveInboundRule 移除启动时添加的防火墙放行规则（不存在不报错）。
 func RemoveInboundRule() {
 	_, _ = execPowerShell(fmt.Sprintf(
-		`Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue`,
-		firewallRuleName))
+		`Remove-NetFirewallRule -DisplayName %s -ErrorAction SilentlyContinue`,
+		psQuote(firewallRuleName)))
 }
