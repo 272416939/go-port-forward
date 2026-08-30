@@ -111,6 +111,7 @@ type Server struct {
 	lastAuthErr  atomic.Int64 // 认证失败告警限频锚点
 	lastNoRoute  atomic.Int64 // 出向找不到会话的告警限频锚点
 	lastSpoof    atomic.Int64 // 源地址伪造告警限频锚点
+	lastInternal atomic.Int64 // 隧道内互访告警限频锚点
 	lastReject   atomic.Int64 // 拒绝握手告警限频锚点
 
 	stop     chan struct{}
@@ -355,6 +356,15 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 				s.logSpoof(ps, src)
 				continue
 			}
+			// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（网关除外，
+			// 通用模式经网关往返隧道地址是合法流量）。客户端掩码是 /16，整个
+			// 网段在每台客户端机器上都是直连网段，不拦的话 A 可以直接访问 B
+			// 后端机上所有绑 0.0.0.0 的服务。
+			dst, ok := dstIP4(plain)
+			if ok && s.isTunnelInternal(dst) {
+				s.logTunnelInternal(ps, dst, "目的")
+				continue
+			}
 			if werr := dev.WritePacket(plain); werr != nil {
 				s.logWriteErr(werr)
 			}
@@ -513,6 +523,24 @@ func (s *Server) logSpoof(ps *peerSession, src netip.Addr) {
 		"user", ps.userName, "code", ps.codeName, "expect", ps.tunIP, "got", src)
 }
 
+// isTunnelInternal 报告该地址是否属于「隧道内部、不许互相访问」的地址：
+// 网段内但不是网关。网关要放行——通用模式经网关往返隧道地址是合法流量
+// （中转机以网关为源去连隧道地址，回包目的地址也是网关）。
+func (s *Server) isTunnelInternal(ip netip.Addr) bool {
+	return ip.IsValid() && s.tunPool.Contains(ip) && ip != s.gateway
+}
+
+// logTunnelInternal 限频记录隧道内互访的拦截。direction 是被拦地址在 IP 头里
+// 的位置（"源"/"目的"），方便对上排查方向。
+func (s *Server) logTunnelInternal(ps *peerSession, ip netip.Addr, direction string) {
+	if !throttle(&s.lastInternal, 10) {
+		return
+	}
+	logger.S.Warnw("丢弃隧道内互访的包（用户隔离）",
+		"direction", direction, "addr", ip,
+		"user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP)
+}
+
 func (s *Server) logNoRoute(dst netip.Addr) {
 	if !throttle(&s.lastNoRoute, 30) {
 		return
@@ -555,6 +583,13 @@ func (s *Server) pumpTunToClient(dev *tunnet.Device, udpConn *net.UDPConn) {
 		ps := s.peers.byTunnelIP(dst)
 		if ps == nil {
 			s.logNoRoute(dst)
+			continue
+		}
+		// 用户隔离的对称执行语句：发往客户端的包，源地址不得是隧道网段内的
+		// 地址（网关除外）。合法来源只有玩家公网 IP（透明）与网关（通用）；
+		// 出现隧道内地址说明有人正在隧道里访问别人，不能替他递送。
+		if src, ok := srcIP4(buf[:n]); ok && s.isTunnelInternal(src) {
+			s.logTunnelInternal(ps, src, "源")
 			continue
 		}
 		pkt := make([]byte, n)

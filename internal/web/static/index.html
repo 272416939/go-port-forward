@@ -1987,6 +1987,16 @@ function portForwardApp() {
       return src.filter(c => !c.disabled && c.tun_ip)
     },
 
+    // isTunnelAddress 判断目标是否为可见访问码的隧道地址（精确比对 tun_ip）。
+    // 用于通用模式的表单拦截：用户填了隧道地址却选了通用模式，提交前直接
+    // 引导去透明模式。别人的隧道地址普通用户看不见，那一层由服务端按网段
+    // 拦截并给出同样的引导。
+    isTunnelAddress(addr) {
+      if (!addr) return false
+      const src = this.isAdmin ? this.allCodes : this.myCodes
+      return src.some(c => c.tun_ip && c.tun_ip === addr)
+    },
+
     // 透明模式选中目标访问码后联动规则归属——回程路由按规则归属分组推送，
     // 归属与隧道不一致时数据面不通。
     onTargetCodeChange() {
@@ -2513,13 +2523,15 @@ function portForwardApp() {
 	    showAddModal() {
 	      this.formError = ''
 	      this.form = this.newRuleForm()
+	      // 通用模式拦截「目标填了隧道地址」需要访问码的 tun_ip 列表做比对。
+	      if (this.isAdmin) this.loadAllCodes()
 	      this._ruleModal.show()
 	    },
 
 	    editRule(r) {
 	      this.formError = ''
 	      this.form = this.editableRuleForm(r)
-	      if (this.form.mode === 'transparent' && this.isAdmin) this.loadAllCodes()
+	      if (this.isAdmin) this.loadAllCodes()
 	      this._ruleModal.show()
 	    },
 
@@ -2619,6 +2631,17 @@ function portForwardApp() {
       if (!this.form.target_addr) { this.formError = _t('请填写目标地址', 'Target address is required'); return }
       if (!this.form.listen_port) { this.formError = _t('请填写监听端口', 'Listen port is required'); return }
       if (!this.form.target_port) { this.formError = _t('请填写目标端口', 'Target port is required'); return }
+
+      // 通用模式拦截：目标填的是访问码隧道地址，说明用户想走隧道——那是
+      // 透明模式的语义，引导切模式，而不是存一条数据面语义错误的规则。
+      // TCP 不拦：透明模式仅 UDP，TCP 经隧道到后端只有通用模式这一条路。
+      if (this.form.mode === 'general' && this.form.protocol !== 'tcp'
+          && this.isTunnelAddress(this.form.target_addr.trim())) {
+        this.formError = _t(
+          '该地址是访问码的隧道地址：经隧道转发的流量请改用「透明代理」模式（转发目标选访问码，仅支持 UDP）。',
+          'That address is an access-code tunnel address; switch to Transparent mode for tunnel traffic (UDP only).')
+        return
+      }
 
       this.saving = true
       try {

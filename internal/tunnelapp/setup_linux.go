@@ -53,6 +53,19 @@ func ensureRule(table string, ruleSpec ...string) error {
 	return err
 }
 
+// ensureRuleFirst 幂等地把一条规则**插入到链首**。
+//
+// hairpin DROP 必须排在 -A 追加的放行规则前面才有意义：用户态检查之外，
+// 隧道里 A 访问 B 的包在内核里表现为 in=pftun0 out=pftun0 的转发，会被
+// 「FORWARD -i pftun0 -j ACCEPT」直接放走，DROP 追加在它后面永远匹配不到。
+func ensureRuleFirst(table string, ruleSpec ...string) error {
+	if _, err := run("iptables", append([]string{"-t", table, "-C"}, ruleSpec...)...); err == nil {
+		return nil
+	}
+	_, err := run("iptables", append([]string{"-t", table, "-I"}, ruleSpec...)...)
+	return err
+}
+
 // setupReturnPath 建立透明模式的回程路径（幂等）。
 //
 // 透明模式下 go-port-forward 用玩家真实 IP:端口 绑定上游 socket 发往隧道，
@@ -91,6 +104,12 @@ func setupReturnPath(tunName string) error {
 	if err := ensureRule("filter", "INPUT", "-i", tunName, "-j", "ACCEPT"); err != nil {
 		return err
 	}
+	// 隧道内互访的内核兜底：用户态检查（tunnelapp.go isTunnelInternal）之外，
+	// A 访问 B 的包在内核里是同一张 TUN 的进与出，直接丢弃。必须插在链首，
+	// 否则会被下面的放行规则先匹配掉。
+	if err := ensureRuleFirst("filter", "FORWARD", "-i", tunName, "-o", tunName, "-j", "DROP"); err != nil {
+		return fmt.Errorf("配置隧道内互访拦截失败: %w", err)
+	}
 	// 非透明规则或将来其它用途仍可能走转发路径（云镜像 FORWARD 常为 DROP）。
 	if err := ensureRule("filter", "FORWARD", "-i", tunName, "-j", "ACCEPT"); err != nil {
 		return err
@@ -116,6 +135,7 @@ func teardownReturnPath(tunName string) {
 	_, _ = run("ip", "route", "flush", "table", returnTable)
 	_, _ = run("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", tunName, "-p", "udp", "-j", "MARK", "--set-mark", returnMark)
 	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT")
+	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-o", tunName, "-j", "DROP")
 	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-j", "ACCEPT")
 	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-o", tunName, "-j", "ACCEPT")
 }

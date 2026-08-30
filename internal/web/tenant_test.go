@@ -303,6 +303,39 @@ func TestCreateRuleRejectsForeignTarget(t *testing.T) {
 	}
 }
 
+// 通用模式目标填隧道网段地址：这是「想走隧道但选错模式」的最常见误用，
+// 文案必须引导去透明模式，而不是笼统的「不能是内网地址」。自己的隧道地址
+// 仍放行——TCP 经隧道到后端只有这一条路（透明模式仅 UDP）。
+func TestGeneralTargetTunnelSubnetGuidesToTransparent(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	// 别人的隧道地址：拒绝且文案引导透明模式。
+	body := `{"name":"guide","listen_addr":"127.0.0.1","listen_port":20040,"protocol":"udp","target_addr":"` + f.bobCode.TunIP + `","target_port":19132}`
+	rec := httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "透明") {
+		t.Fatalf("别人的隧道地址应引导去透明模式，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 网段内未分配的地址同样拦截（同一文案）：数据面也会丢，但要在 API 层
+	// 就把路指对。
+	body = `{"name":"guide2","listen_addr":"127.0.0.1","listen_port":20041,"protocol":"udp","target_addr":"10.66.0.250","target_port":19132}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "透明") {
+		t.Fatalf("网段内未分配地址应引导去透明模式，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 自己的隧道地址 + TCP：放行。
+	body = `{"name":"tcp-tun","listen_addr":"127.0.0.1","listen_port":20042,"protocol":"tcp","target_addr":"` + f.aliceCode.TunIP + `","target_port":25565}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", body, f.alice))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("自己的隧道地址 + TCP 应放行，status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // 没有访问码的用户建透明规则 fail-closed：不能让规则指向一个不存在的隧道。
 func TestUserWithoutAccessCodeCannotCreate(t *testing.T) {
 	f := newTenantFixture(t)

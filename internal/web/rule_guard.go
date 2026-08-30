@@ -9,6 +9,7 @@ package web
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 
@@ -130,9 +131,14 @@ func (h *handler) checkTargetScope(me *models.User, targetAddr string) error {
 // 通用模式的转发目标不再锁定为访问码隧道地址（用户可以转发到任意公网服务），
 // 但「把中转机当内网跳板」的口子不能开：私网、CGNAT、回环、链路本地（含
 // 云元数据 169.254.169.254）、组播与本机网卡地址一律拒绝。指向自己访问码
-// 隧道地址仍放行——那是存量规则的形态，目标也是用户自己的后端机。
+// 隧道地址仍放行——那是 TCP 经隧道到后端的唯一通路（透明模式仅 UDP）。
 //
-// 主机名不做解析校验：创建时解析存在 TOCTOU，且公网域名是合法用例。
+// 隧道网段内的其它地址在命中通用私网检查前先单独拦截，并给出「去用透明
+// 模式」的引导——这是最常见的误用，只报「不能是内网地址」用户会一头雾水。
+//
+// 主机名不做解析校验：创建时解析存在 TOCTOU，且公网域名是合法用例；解析成
+// 隧道网段地址的包会被数据面丢弃（tunnelapp 的用户隔离检查），API 层不是
+// 这条边界的执行点。
 func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 	target := strings.TrimSpace(targetAddr)
 	ip := net.ParseIP(target)
@@ -150,6 +156,13 @@ func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 	if _, ok := allowed[target]; ok {
 		return nil
 	}
+	// 隧道网段内、但不属于自己：大概率是想走隧道填错了模式，给出引导。
+	if v4 := ip.To4(); v4 != nil {
+		pool, _ := h.users.TunnelPrefix()
+		if pool.IsValid() && pool.Contains(netip.AddrFrom4([4]byte(v4))) {
+			return errTunnelTarget
+		}
+	}
 	if isForbiddenTargetIP(ip) || isLocalIP(ip) {
 		return errPublicTarget
 	}
@@ -157,6 +170,12 @@ func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 }
 
 var errPublicTarget = fmt.Errorf("目标地址不能是内网、回环或本机地址 | target must not be a private, loopback or host-local address")
+
+// errTunnelTarget 引导用户走透明模式：通用模式的目标填隧道地址是常见误用——
+// 用户以为「填自己后端的隧道地址」就叫通用模式，实际那是透明模式的语义。
+// 文案必须指出路怎么走，而不是只说不行。
+var errTunnelTarget = fmt.Errorf(
+	"该地址属于隧道网段：经隧道转发的流量请使用透明代理模式（转发目标选访问码的隧道地址，仅 UDP），通用模式只转发到公网地址 | this address is inside the tunnel subnet; use transparent mode for tunnel traffic (UDP only), general mode forwards to public addresses only")
 
 // isForbiddenTargetIP 报告一个 IP 是否属于禁止作为转发目标的地址段。
 func isForbiddenTargetIP(ip net.IP) bool {
