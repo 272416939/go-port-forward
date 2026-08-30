@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"mime"
+	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"strconv"
@@ -149,6 +150,10 @@ func sendBody(c *smtp.Client, from, to string, msg []byte) error {
 
 // buildMessage 构造 RFC 5322 邮件。主题与显示名按 RFC 2047 编码，正文用
 // quoted-printable——中文内容不过这两道编码，在部分客户端会显示乱码。
+//
+// 正文编码必须用标准库 mime/quotedprintable：QP 的行宽限制、行尾空白、
+// 软换行细节比看上去多。手写版曾按 rune 迭代后截断成单字节发出，中文
+// 正文整体乱码（头部声明全对也救不回来），只有解码回读才能发现。
 func buildMessage(fromName, from, to, subject, textBody string) []byte {
 	display := from
 	if fromName != "" {
@@ -162,43 +167,10 @@ func buildMessage(fromName, from, to, subject, textBody string) []byte {
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	b.WriteString("Content-Transfer-Encoding: quoted-printable\r\n")
 	b.WriteString("\r\n")
-	qp := &quotedPrinter{w: &b}
+	qp := quotedprintable.NewWriter(&b)
 	_, _ = qp.Write([]byte(textBody))
+	_ = qp.Close()
 	return []byte(b.String())
-}
-
-// quotedPrinter 是够用的 quoted-printable 编码器：行宽 76、末尾软换行、
-// 特殊字符转 =XX。不做完整流式实现——验证码邮件是几行文本，简单正确优先。
-type quotedPrinter struct {
-	w    *strings.Builder
-	line int
-}
-
-func (q *quotedPrinter) Write(p []byte) (int, error) {
-	for _, r := range string(p) {
-		s := encodeQPByte(byte(r), r)
-		// 76 行宽：留出软换行两个字符的余量
-		if q.line+len(s) > 74 {
-			q.w.WriteString("=\r\n")
-			q.line = 0
-		}
-		q.w.WriteString(s)
-		q.line += len(s)
-	}
-	return len(p), nil
-}
-
-func encodeQPByte(b byte, r rune) string {
-	switch {
-	case r == '\n':
-		return "\r\n"
-	case r == '\r':
-		return "" // \r\n 由 \n 分支输出
-	case b == '=' || b == '?' || b == '_' || b < 0x20 || b > 0x7E:
-		return fmt.Sprintf("=%02X", b)
-	default:
-		return string(r)
-	}
 }
 
 // --- 验证码服务 ---

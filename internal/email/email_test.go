@@ -6,6 +6,8 @@ package email
 // 单测锁的是验证码的安全语义与邮件消息的编码正确性。
 
 import (
+	"io"
+	"mime/quotedprintable"
 	"strings"
 	"testing"
 	"time"
@@ -194,8 +196,10 @@ func TestMaskEmail(t *testing.T) {
 
 // 邮件消息构造：中文主题/正文必须经过编码，否则部分客户端显示乱码。
 func TestBuildMessageEncoding(t *testing.T) {
+	body := "这是一封测试邮件。收到它说明 SMTP 配置正确，\n\n验证码：123456\n\n" +
+		"注册验证码与找回密码邮件将经由同一通道发送。"
 	msg := string(buildMessage("Port Forward 面板", "noreply@x.com", "to@y.com",
-		"注册验证码", "验证码：123456"))
+		"注册验证码", body))
 	for _, want := range []string{
 		"From: =?utf-8?", // 主题与显示名走 RFC 2047
 		"To: to@y.com",
@@ -206,9 +210,18 @@ func TestBuildMessageEncoding(t *testing.T) {
 			t.Fatalf("邮件消息缺少 %q：\n%s", want, msg)
 		}
 	}
-	// 正文是 quoted-printable 编码的 UTF-8：验证码（ASCII）应原样可读。
-	if !strings.Contains(msg, "123456") {
-		t.Fatalf("验证码在编码中丢失：\n%s", msg)
+	// 头部声明全对不等于正文能读——曾把多字节字符按 rune 截断成单字节
+	// 发出，唯一的锁法是按 QP 解码回读并与原文逐字节比对。
+	i := strings.Index(msg, "\r\n\r\n")
+	if i < 0 {
+		t.Fatalf("消息缺少头部与正文的空行分隔：\n%s", msg)
+	}
+	decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(msg[i+len("\r\n\r\n"):])))
+	if err != nil {
+		t.Fatalf("正文 QP 解码失败：%v", err)
+	}
+	if got := strings.ReplaceAll(string(decoded), "\r\n", "\n"); got != body {
+		t.Fatalf("正文解码回读与原文不符：\n got %q\nwant %q", got, body)
 	}
 }
 
