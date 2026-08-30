@@ -99,6 +99,15 @@ func (f *UDPForwarder) Start() error {
 		_ = conn.Close()
 		return fmt.Errorf("UDP 目标地址无效 | invalid UDP target address: %w", err)
 	}
+	// 通用模式目标安全边界执行点：本转发器整个生命周期都用这一个解析结果，
+	// 启动时校验一次即覆盖全部实际拨号。透明模式例外（目标本来就是隧道内网
+	// 地址）。TCP 侧对应检查在拨号 Control 里（每次连接重新解析）。
+	if !f.rule.Transparent {
+		if terr := TargetPolicy(targetAddr.IP); terr != nil {
+			_ = conn.Close()
+			return terr
+		}
+	}
 	f.conn = conn
 	f.targetAddr = targetAddr
 

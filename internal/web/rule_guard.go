@@ -11,8 +11,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync"
 
+	"go-port-forward/internal/forward"
 	"go-port-forward/internal/models"
 )
 
@@ -132,9 +132,10 @@ func (h *handler) checkTargetScope(me *models.User, targetAddr string) error {
 // 的地址一律拒绝——包括自己的隧道地址：指向它的通用规则是「TCP 经隧道」的
 // 旧通路，已随网关例外一起移除（透明模式仅 UDP，TCP 无法经隧道转发）。
 //
-// 主机名不做解析校验：创建时解析存在 TOCTOU，且公网域名是合法用例；解析成
-// 隧道网段地址的包由数据面丢弃（tunnelapp 的用户隔离检查）——API 层不是
-// 这条边界的执行点，只是把最常见的误用在提交时就拦下并指路。
+// 主机名不做解析校验：创建时解析存在 TOCTOU（DNS 指向随时可变），API 层只把
+// 「填的就是内网 IP」的最常见误用在提交时拦下并指路；这条边界的真正执行点在
+// 数据面——forward 包在拨号解析后复检（TCP 在 Dialer.Control，UDP 在启动解析后），
+// 域名指向内网也过不去。
 func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 	target := strings.TrimSpace(targetAddr)
 	ip := net.ParseIP(target)
@@ -152,7 +153,7 @@ func (h *handler) checkPublicTarget(me *models.User, targetAddr string) error {
 			return errTunnelTarget
 		}
 	}
-	if isForbiddenTargetIP(ip) || isLocalIP(ip) {
+	if forward.IsForbiddenTargetIP(ip) || forward.IsLocalIP(ip) {
 		return errPublicTarget
 	}
 	return nil
@@ -165,48 +166,6 @@ var errPublicTarget = fmt.Errorf("目标地址不能是内网、回环或本机�
 // 文案必须指出路怎么走，而不是只说不行。
 var errTunnelTarget = fmt.Errorf(
 	"该地址属于隧道网段：经隧道转发的流量请使用透明代理模式（转发目标选访问码的隧道地址，仅 UDP），通用模式只转发到公网地址 | this address is inside the tunnel subnet; use transparent mode for tunnel traffic (UDP only), general mode forwards to public addresses only")
-
-// isForbiddenTargetIP 报告一个 IP 是否属于禁止作为转发目标的地址段。
-func isForbiddenTargetIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil {
-		// CGNAT 100.64.0.0/10：IsPrivate 不覆盖，但它同样不是公网可达地址。
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] < 128 {
-			return true
-		}
-	}
-	return false
-}
-
-// isLocalIP 报告 IP 是否为本机网卡地址（含中转机自己的公网 IP——指向它的
-// 规则等于绕过防火墙直连本机服务）。网卡集合进程生命周期内不变，只查一次。
-var (
-	localIPOnce sync.Once
-	localIPs    []net.IP
-)
-
-func isLocalIP(ip net.IP) bool {
-	localIPOnce.Do(func() {
-		addrs, err := net.InterfaceAddrs()
-		if err != nil {
-			return
-		}
-		for _, a := range addrs {
-			if ipnet, ok := a.(*net.IPNet); ok {
-				localIPs = append(localIPs, ipnet.IP)
-			}
-		}
-	})
-	for _, l := range localIPs {
-		if l.Equal(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // checkRuleQuota 校验规则数上限（0 表示不限）。
 func (h *handler) checkRuleQuota(me *models.User, quota models.Quota) error {
