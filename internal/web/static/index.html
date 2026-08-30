@@ -2339,7 +2339,7 @@ function portForwardApp() {
     // --- SMTP（仅管理员）---
 
     smtpConfigured() {
-      return !!(this.globalSettings && this.globalSettings._smtp_configured)
+      return !!(this.globalSettings && this.globalSettings.smtp_configured)
     },
 
     showSMTPModal() {
@@ -2354,7 +2354,7 @@ function portForwardApp() {
         }
         this.smtpHasPassword = !!v.has_password
       })
-      // 全局设置弹窗里的"已配置"徽章由 settings 里带出的 _smtp_configured 驱动。
+      // 全局设置弹窗里的"已配置"徽章由 settings 里带出的 smtp_configured 驱动。
       fetch('/api/settings').then(r => r.json()).then(d => {
         if (d.success && d.data) this.globalSettings = d.data
       })
@@ -2381,6 +2381,11 @@ function portForwardApp() {
           showToast('success', d.message || _t('邮件设置已更新','Email settings updated'))
           this.smtpHasPassword = !!this.smtpForm.password || this.smtpHasPassword
           this.smtpForm.password = ''
+          // 重拉全局设置刷新「已配置」徽章；只更新 globalSettings，
+          // 不碰可能带着未保存改动的 settingsForm。
+          fetch('/api/settings').then(r => r.json()).then(s => {
+            if (s.success && s.data) this.globalSettings = s.data
+          })
         } else {
           showToast('danger', d.message || _t('保存失败','Save failed'))
         }

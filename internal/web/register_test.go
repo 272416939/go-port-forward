@@ -155,5 +155,33 @@ func TestSMTPPasswordNeverEchoed(t *testing.T) {
 // SMTP 端点的 adminOnly 包装行为由 middleware_auth_test 的放行矩阵覆盖
 // （直接调 handler 方法不经过路由上的包装，这里无法测 403/401）。
 
+// /api/settings 必须带回 smtp_configured 字段：设置弹窗的「已配置」徽章由
+// 它驱动（曾因前端读了不存在的 _smtp_configured 而永远显示未配置——字段名
+// 前后端各写一份，这里把后端的名字钉住）。
+func TestSettingsCarriesSMTPConfigured(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	rec := httptest.NewRecorder()
+	f.h.getSettings(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/settings", nil), f.admin))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"smtp_configured":true`) {
+		t.Fatalf("未配置 SMTP 时不应为 true：%s", rec.Body.String())
+	}
+
+	if _, err := f.svc.UpdateSMTP(&models.UpdateSMTPRequest{
+		Host: strptr("smtp.x.com"), Port: intptr(587), From: strptr("n@x.com"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	f.h.getSettings(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/settings", nil), f.admin))
+	if !strings.Contains(rec.Body.String(), `"smtp_configured":true`) {
+		t.Fatalf("配置后应返回 smtp_configured=true：%s", rec.Body.String())
+	}
+}
+
 func strptr(s string) *string { return &s }
 func intptr(i int) *int       { return &i }
