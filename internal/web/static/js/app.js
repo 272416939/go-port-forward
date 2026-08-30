@@ -5,13 +5,11 @@
  *
  * 加载顺序 Load order:
  * 1. lib/bootstrap.bundle.min.js
- * 2. lib/htmx.min.js
- * 3. lib/alpine-collapse.min.js (defer, 必须在 Alpine 核心之前 must load before Alpine core)
- * 4. lib/alpine.min.js (defer)
- * 5. app.js (本文件 this file)
- * 6. htmx-ext.js
- * 7. charts.js (按需 on demand)
- * 8. user-preferences.js (按需 on demand)
+ * 2. lib/alpine-collapse.min.js (defer, 必须在 Alpine 核心之前 must load before Alpine core)
+ * 3. lib/alpine.min.js (defer)
+ * 4. app.js (本文件 this file)
+ * 5. charts.js (按需 on demand)
+ * 6. user-preferences.js (按需 on demand)
  */
 
 'use strict'
@@ -285,14 +283,21 @@ const showToast = (level, message) => {
     const toast = document.createElement('div')
     toast.className = `toast toast--${level} show`
     toast.setAttribute('role', 'alert')
-    toast.innerHTML = `
-    <div class="toast-body d-flex align-items-center">
-      <i class="bi ${iconMap[level] || iconMap.info} toast__icon"></i>
-      <span>${escapeHtml(message)}</span>
-      <button type="button" class="btn-close btn-close-sm ms-auto"
-              onclick="this.closest('.toast').remove()"></button>
-    </div>
-  `
+    // 消息体用 textContent 注入而不是 innerHTML + escapeHtml：转义函数一旦
+    // 被绕过或遗漏就是存储型 XSS，DOM 安全 API 不给这类失误留门。
+    const body = document.createElement('div')
+    body.className = 'toast-body d-flex align-items-center'
+    const icon = document.createElement('i')
+    icon.className = `bi ${iconMap[level] || iconMap.info} toast__icon`
+    const text = document.createElement('span')
+    text.textContent = message
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.className = 'btn-close btn-close-sm ms-auto'
+    close.setAttribute('aria-label', 'Close')
+    close.addEventListener('click', () => toast.remove())
+    body.append(icon, text, close)
+    toast.append(body)
 
     container.appendChild(toast)
 
@@ -353,23 +358,6 @@ const showConfirm = (message, onOk, level = 'danger') => {
 
     const modal = bootstrap.Modal.getOrCreateInstance(modalEl)
     modal.show()
-}
-
-/* ========================================
-   通用工具函数 | Utility functions
-   ======================================== */
-
-/**
- * escapeHtml HTML 转义 | HTML escape
- * 使用正则替换方案，避免每次调用创建 DOM 元素，提升性能
- * Uses regex replacement to avoid creating DOM elements on each call for better performance
- * @param {string} str - 原始字符串 Raw string
- * @returns {string} 转义后的字符串 Escaped string
- */
-const escapeHtml = (str) => {
-    if (!str) return ''
-    const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }
-    return String(str).replace(/[&<>"']/g, (ch) => escapeMap[ch])
 }
 
 /* ========================================

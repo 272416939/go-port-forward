@@ -437,6 +437,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		// CSP 兜底三条：禁插件类内容、禁 <base> 劫持、禁被第三方 iframe 嵌入
+		// （与 X-Frame-Options 互为冗余）。刻意不加 script-src——面板是内联
+		// Alpine 脚本，'self' 会整页瘫痪，Alpine 又依赖 eval，收紧需要把脚本
+		// 全部外置并按 hash/nonce 改造，单独立项处理。
+		w.Header().Set("Content-Security-Policy", "object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}

@@ -96,10 +96,6 @@
         </div>
         <button class="btn btn-primary w-100" type="submit">重置密码</button>
       </form>
-
-      <div class="form-text mt-3" id="hint">
-        首次使用请查看服务端启动日志或程序目录下的 admin-credentials.txt 获取初始管理员密码。
-      </div>
     </div>
   </div>
 </div>
@@ -118,7 +114,6 @@ const i18n = isEn ? {
   passHint: 'At least 8 characters.', email: 'Email', code: 'Email code',
   sendCode: 'Send code', register: 'Register', reset: 'Reset password',
   emailUsed: 'Email used at registration', newPass: 'New password',
-  hint: 'On first run, find the initial administrator password in the server startup log or in admin-credentials.txt next to the executable.',
   sent: 'The code has been sent (valid for 10 minutes).', registered: 'Registered — please sign in.',
   resetDone: 'Password reset — sign in with the new password.', resendIn: 'Resend in {n}s',
 } : {
@@ -128,7 +123,6 @@ const i18n = isEn ? {
   passHint: '至少 8 位。', email: '邮箱', code: '邮箱验证码',
   sendCode: '发送验证码', register: '注册', reset: '重置密码',
   emailUsed: '注册时的邮箱', newPass: '新密码',
-  hint: '首次使用请查看服务端启动日志或程序目录下的 admin-credentials.txt 获取初始管理员密码。',
   sent: '验证码已发送（10 分钟内有效）。', registered: '注册成功，请登录。',
   resetDone: '密码已重置，请用新密码登录。', resendIn: '{n}s 后重发',
 }
@@ -153,7 +147,6 @@ document.getElementById('fgCode').placeholder = i18n.code
 document.getElementById('btnCodeForgot').textContent = i18n.sendCode
 document.getElementById('fgPass').previousElementSibling.textContent = i18n.newPass
 document.getElementById('formForgot').querySelector('button[type=submit]').textContent = i18n.reset
-document.getElementById('hint').textContent = i18n.hint
 if (isEn) document.documentElement.lang = 'en'
 
 const errorBox = document.getElementById('error')
