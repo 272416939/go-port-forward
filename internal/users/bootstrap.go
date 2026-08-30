@@ -18,8 +18,9 @@ const credentialsFileName = "admin-credentials.txt"
 
 // Bootstrap 在用户表为空时创建初始管理员，并确保默认用户组存在。
 //
-// 初始密码同时写日志与一个 0600 文件：日志可能被轮转或采集走，文件可能被
-// 运维忽略，两条路都留着才不至于把人锁在门外。返回明文密码供调用方展示。
+// 初始密码只写一个 0600 文件，不进日志：日志会被轮转、压缩并留存 30 天，
+// 甚至进入集中采集链路，明文密码在里面活 30 天远比「运维没看到启动日志」
+// 危险——找不到密码的运维一定会翻到 exe 旁边的 admin-credentials.txt。
 // MustChangePassword 强制首次登录改密——初始密码在磁盘上留过痕，不能长用。
 func (s *Service) Bootstrap() (created bool, username, password string, err error) {
 	// 默认组要先于用户存在：新建用户会落到它。迁移逻辑已经建过，这里是兜底。
@@ -60,7 +61,7 @@ func (s *Service) Bootstrap() (created bool, username, password string, err erro
 		logger.S.Warnw("初始密码文件写入失败 | failed to write initial credentials file", "path", path, "err", werr)
 	}
 	logger.S.Warnw("已创建初始管理员，请立即登录并修改密码 | initial administrator created, log in and change the password now",
-		"username", u.Username, "password", pw, "file", path)
+		"username", u.Username, "file", path)
 	return true, u.Username, pw, nil
 }
 
