@@ -113,6 +113,15 @@ const (
 	// CtrlKindRoutes 是回程路由 IP 全量同步（历史上唯一的控制消息，
 	// 旧客户端不带 kind 字段，零值按此处理）。
 	CtrlKindRoutes = "routes"
+	// CtrlKindEnded 告知客户端这些来源 IP 已无活跃会话，可以尽快回收它们的
+	// /32 回程路由。
+	//
+	// 为什么需要一个「结束」消息：routes 是活跃列表，它的「缺席」不能当作删除
+	// 依据（推送周期 10s，短交互的 IP 在列表里一闪而过，按缺席删除会把正在
+	// 进行的会话反复掐断）。但 /32 主机路由会吸走该 IP 的全部回包，残留太久
+	// 会让玩家不经代理直连源站时也收不到回包。所以由服务端在 UDP 会话真正
+	// 超时回收时发一条明确的结束事件——事件可信，缺席不可信。
+	CtrlKindEnded = "ended"
 )
 
 // CtrlMessage 是加密控制通道上的 JSON 消息。
@@ -121,5 +130,5 @@ const (
 // 后续消息不必再改结构。
 type CtrlMessage struct {
 	Kind string   `json:"kind,omitempty"`
-	IPs  []string `json:"ips,omitempty"` // 需要回程路由的目的 IP 全量列表
+	IPs  []string `json:"ips,omitempty"` // 目的 IP 列表（按 Kind 解释）
 }

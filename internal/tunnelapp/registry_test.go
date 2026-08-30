@@ -257,25 +257,86 @@ func TestIPHeaderHelpers(t *testing.T) {
 	}
 }
 
-// 推送指纹按访问码各记一份：A 的 IP 集合变化不应让 B 被误判为「已变更」。
+// 推送记录按访问码各记一份：A 的 IP 集合变化不应让 B 被误判为「已变更」。
 func TestPushSigPerCode(t *testing.T) {
-	s := &Server{pushSigs: make(map[string]string)}
-	if !s.recordPushSig("code-a", "1.1.1.1") {
+	s := &Server{pushPrev: make(map[string][]string)}
+	if _, changed := s.diffPushed("code-a", []string{"1.1.1.1"}); !changed {
 		t.Fatal("首次记录应判为变化")
 	}
-	if s.recordPushSig("code-a", "1.1.1.1") {
-		t.Fatal("相同指纹应判为未变化")
+	if _, changed := s.diffPushed("code-a", []string{"1.1.1.1"}); changed {
+		t.Fatal("相同集合应判为未变化")
 	}
-	if !s.recordPushSig("code-b", "1.1.1.1") {
+	if _, changed := s.diffPushed("code-b", []string{"1.1.1.1"}); !changed {
 		t.Fatal("另一个访问码的首次记录应判为变化")
 	}
-	if s.recordPushSig("code-a", "1.1.1.1") {
+	if _, changed := s.diffPushed("code-a", []string{"1.1.1.1"}); changed {
 		t.Fatal("B 的记录不应影响 A 的判定")
 	}
 	// 重握手后必须重推：新会话对端的路由表是空的。
-	s.forgetPushSig("code-a")
-	if !s.recordPushSig("code-a", "1.1.1.1") {
+	s.forgetPushed("code-a")
+	if _, changed := s.diffPushed("code-a", []string{"1.1.1.1"}); !changed {
 		t.Fatal("重握手后应重新判为变化")
+	}
+}
+
+// 顺序不同不算变化：会话 IP 来自 map 遍历，顺序天然不稳定，不归一化会让每轮
+// 推送都被误判为「变更」并打一条 info（正是要消掉的刷屏）。
+func TestDiffPushedIgnoresOrder(t *testing.T) {
+	s := &Server{pushPrev: make(map[string][]string)}
+	s.diffPushed("c", []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"})
+	gone, changed := s.diffPushed("c", []string{"3.3.3.3", "1.1.1.1", "2.2.2.2"})
+	if changed || len(gone) > 0 {
+		t.Fatalf("同一集合不同顺序被判为变化：gone=%v changed=%v", gone, changed)
+	}
+}
+
+// 「上轮在、本轮不在」才是可信的会话结束事件——客户端据此走短宽限期回收
+// /32 路由。首次推送不得产出 gone（对端路由表本来就是空的）。
+func TestDiffPushedReportsGone(t *testing.T) {
+	s := &Server{pushPrev: make(map[string][]string)}
+
+	if gone, _ := s.diffPushed("c", []string{"1.1.1.1", "2.2.2.2"}); len(gone) > 0 {
+		t.Fatalf("首次推送不应产出结束集合：%v", gone)
+	}
+	gone, changed := s.diffPushed("c", []string{"1.1.1.1"})
+	if !changed {
+		t.Fatal("集合缩小应判为变化")
+	}
+	if len(gone) != 1 || gone[0] != "2.2.2.2" {
+		t.Fatalf("结束集合 = %v，应为 [2.2.2.2]", gone)
+	}
+
+	// 全部结束（空列表）同样要产出——这正是最需要客户端清残留路由的时刻。
+	gone, changed = s.diffPushed("c", nil)
+	if !changed || len(gone) != 1 || gone[0] != "1.1.1.1" {
+		t.Fatalf("清空后 gone = %v changed = %v", gone, changed)
+	}
+	// 已经空了，再推一轮不应重复通知。
+	if gone, changed := s.diffPushed("c", nil); changed || len(gone) > 0 {
+		t.Fatalf("重复的空集合不应再通知：gone=%v changed=%v", gone, changed)
+	}
+}
+
+// 新增来源不产出 gone：那是「活跃」正向语义，删除只由缺席差集与本地时间驱动。
+func TestDiffPushedGrowthHasNoGone(t *testing.T) {
+	s := &Server{pushPrev: make(map[string][]string)}
+	s.diffPushed("c", []string{"1.1.1.1"})
+	gone, changed := s.diffPushed("c", []string{"1.1.1.1", "2.2.2.2"})
+	if !changed {
+		t.Fatal("集合新增应判为变化")
+	}
+	if len(gone) > 0 {
+		t.Fatalf("新增来源不应产出结束集合：%v", gone)
+	}
+}
+
+// 不得就地修改入参：调用方传的是活跃会话快照，排序会打乱其它使用者看到的顺序。
+func TestDiffPushedDoesNotMutateInput(t *testing.T) {
+	s := &Server{pushPrev: make(map[string][]string)}
+	ips := []string{"3.3.3.3", "1.1.1.1", "2.2.2.2"}
+	s.diffPushed("c", ips)
+	if ips[0] != "3.3.3.3" {
+		t.Errorf("入参被就地排序了：%v", ips)
 	}
 }
 

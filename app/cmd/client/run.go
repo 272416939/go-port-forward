@@ -115,7 +115,7 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	}
 	defer func() {
 		if rm := rmHolder.Load(); rm != nil {
-			rm.cleanup()
+			rm.close()
 		}
 		e.routes.Store(nil)
 		rmHolder.Store(nil)
@@ -166,8 +166,10 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 
 			// 路由管理器依赖隧道地址（网关是 /32 回程路由的下一跳，
 			// 本机与网关地址必须排除在可安装地址之外）。
+			// 旧管理器要 close 而不是 cleanup——它带着回收 goroutine，
+			// 只清路由会把 goroutine 泄漏到进程结束。
 			if rm := rmHolder.Load(); rm != nil {
-				rm.cleanup()
+				rm.close()
 			}
 			rm := newRouteManager(serverAddr.IP.String(), addressing, e.logf)
 			rmHolder.Store(rm)
@@ -308,8 +310,11 @@ func (e *Engine) pump(ctx context.Context, udp *net.UDPConn, dev *tunnet.Device,
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:
 			if msg, cerr := sess.OpenCtrl(buf[:n]); cerr == nil {
-				if msg.Kind == "" || msg.Kind == tunnel.CtrlKindRoutes {
+				switch msg.Kind {
+				case "", tunnel.CtrlKindRoutes:
 					rm.sync(msg.IPs)
+				case tunnel.CtrlKindEnded:
+					rm.markEnded(msg.IPs)
 				}
 			}
 		case n > 0 && buf[0] == tunnel.TypePing:

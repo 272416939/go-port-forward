@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -116,8 +117,12 @@ type Server struct {
 	stopOnce sync.Once
 	done     chan struct{}
 
-	pushMu   sync.Mutex
-	pushSigs map[string]string // 访问码 ID → 上次推送的 IP 集合指纹
+	pushMu sync.Mutex
+	// pushPrev 是每个访问码上次推送的活跃 IP 集合（已排序）。
+	//
+	// 存集合而不是指纹，是为了能算出「上次在、这次不在」的差集——那是唯一
+	// 可信的「会话已结束」事件（见 sendEnded）。
+	pushPrev map[string][]string
 }
 
 // Options 是隧道服务端的依赖注入。
@@ -175,7 +180,7 @@ func Start(opt Options) (*Server, error) {
 		gateway:  gateway,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
-		pushSigs: make(map[string]string),
+		pushPrev: make(map[string][]string),
 	}
 
 	go s.loop(dev, udpConn)            // 客户端 → TUN（含握手状态机）
@@ -291,7 +296,7 @@ func (s *Server) EvictCode(codeID string) bool {
 	if ps == nil {
 		return false
 	}
-	s.forgetPushSig(codeID)
+	s.forgetPushed(codeID)
 	logger.S.Infow("隧道会话已被强制断开", "user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP)
 	return true
 }
@@ -459,7 +464,7 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr
 		logger.S.Debugw("隧道客户端重新握手", "user", ident.UserName, "code", ident.CodeName, "src", from)
 	}
 	// 换会话意味着旧的推送指纹失效（新会话的对端路由表是空的，必须重推）。
-	s.forgetPushSig(ident.CodeID)
+	s.forgetPushed(ident.CodeID)
 }
 
 // logWriteErr 限频记录写 TUN 失败（每 5 秒最多一条）。
@@ -596,13 +601,18 @@ func (s *Server) janitor() {
 			for _, ps := range s.peers.reap(now, peerIdleTimeout) {
 				logger.S.Infow("隧道会话已因空闲回收",
 					"user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP)
-				s.forgetPushSig(ps.codeID)
+				s.forgetPushed(ps.codeID)
 			}
 		}
 	}
 }
 
-// pushSessionIPs 周期把活跃会话来源 IP 推给各自的客户端（回程路由同步）。
+// pushSessionIPs 周期把活跃会话来源 IP 推给各自的客户端（回程路由同步），
+// 并把「上一轮在、这一轮不在」的来源作为结束事件单独下发。
+//
+// 为什么要发结束事件：客户端的 /32 主机路由会吸走该 IP 的**全部**回包，包括
+// 玩家不经代理直连源站的那条流。活跃列表的「缺席」不能当删除依据（铁律 5），
+// 所以必须由服务端在会话真正结束时说一声，客户端才能及时回收。
 //
 // 推送每 10 秒一次且内容通常不变，逐次打 info 只会把日志刷满。所以只在某个
 // 访问码的 IP 集合发生变化时记一条 info，逐次推送降到 debug。
@@ -617,17 +627,23 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 			byCode := sessionIPs()
 			for _, ps := range s.peers.snapshot() {
 				ips := byCode[ps.codeID]
-				if len(ips) == 0 {
-					continue
+				// 空列表也要走完这一轮：会话全部结束时（玩家都退了）恰好
+				// 是最需要下发结束事件的时刻，提前 continue 会让客户端的
+				// 残留路由等到本地宽限期才消失。
+				if len(ips) > 0 {
+					wire, err := ps.sess.SealCtrl(tunnel.CtrlMessage{Kind: tunnel.CtrlKindRoutes, IPs: ips})
+					if err != nil {
+						continue
+					}
+					if _, err := udpConn.WriteToUDP(wire, ps.addr); err != nil {
+						continue
+					}
 				}
-				wire, err := ps.sess.SealCtrl(tunnel.CtrlMessage{Kind: tunnel.CtrlKindRoutes, IPs: ips})
-				if err != nil {
-					continue
+				gone, changed := s.diffPushed(ps.codeID, ips)
+				if len(gone) > 0 {
+					s.sendEnded(udpConn, ps, gone)
 				}
-				if _, err := udpConn.WriteToUDP(wire, ps.addr); err != nil {
-					continue
-				}
-				if s.recordPushSig(ps.codeID, sessionIPsSignature(ips)) {
+				if changed {
 					logger.S.Infow("回程路由 IP 变更",
 						"user", ps.userName, "code", ps.codeName, "count", len(ips), "ips", ips)
 				} else {
@@ -638,30 +654,59 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 	}
 }
 
-// recordPushSig 记录某访问码的推送指纹，返回是否发生变化。
-func (s *Server) recordPushSig(codeID, sig string) bool {
-	s.pushMu.Lock()
-	defer s.pushMu.Unlock()
-	if s.pushSigs[codeID] == sig {
-		return false
+// sendEnded 下发「这些来源已无活跃会话」。失败不重试：客户端还有本地空闲
+// 宽限期兜底，只是回收得慢一些。
+func (s *Server) sendEnded(udpConn *net.UDPConn, ps *peerSession, gone []string) {
+	wire, err := ps.sess.SealCtrl(tunnel.CtrlMessage{Kind: tunnel.CtrlKindEnded, IPs: gone})
+	if err != nil {
+		return
 	}
-	s.pushSigs[codeID] = sig
-	return true
+	if _, err := udpConn.WriteToUDP(wire, ps.addr); err != nil {
+		return
+	}
+	logger.S.Infow("回程路由会话结束已通知",
+		"user", ps.userName, "code", ps.codeName, "ips", gone)
 }
 
-// forgetPushSig 清掉某访问码的推送指纹，让下一轮必然重推并记一条 info。
-func (s *Server) forgetPushSig(codeID string) {
+// diffPushed 用本轮的活跃 IP 集合替换上一轮，返回「上轮在、本轮不在」的集合
+// 与「集合是否发生变化」。
+//
+// 首次推送（该访问码没有上一轮记录）不产出 gone：新会话对端路由表是空的，
+// 无从谈起「结束」。
+func (s *Server) diffPushed(codeID string, ips []string) (gone []string, changed bool) {
+	cur := make([]string, len(ips))
+	copy(cur, ips)
+	sort.Strings(cur)
+
 	s.pushMu.Lock()
-	delete(s.pushSigs, codeID)
+	prev, seen := s.pushPrev[codeID]
+	s.pushPrev[codeID] = cur
 	s.pushMu.Unlock()
+
+	if !seen {
+		return nil, len(cur) > 0
+	}
+	if slices.Equal(prev, cur) {
+		return nil, false
+	}
+	now := make(map[string]bool, len(cur))
+	for _, ip := range cur {
+		now[ip] = true
+	}
+	for _, ip := range prev {
+		if !now[ip] {
+			gone = append(gone, ip)
+		}
+	}
+	return gone, true
 }
 
-// sessionIPsSignature 生成与顺序无关的集合指纹，用于判断内容是否变化。
-// 会话来源于 map 遍历，顺序本身不稳定，不排序会把同一集合误判为变更。
-// 注意不得就地修改调用方传入的切片。
-func sessionIPsSignature(ips []string) string {
-	sorted := make([]string, len(ips))
-	copy(sorted, ips)
-	sort.Strings(sorted)
-	return strings.Join(sorted, ",")
+// forgetPushed 清掉某访问码的推送记录，让下一轮必然重推并记一条 info。
+//
+// 会话换了（重握手、被踢、空闲回收）之后对端的路由表是空的，上一轮的集合
+// 不再代表对端状态，据它算出的结束事件也没有意义。
+func (s *Server) forgetPushed(codeID string) {
+	s.pushMu.Lock()
+	delete(s.pushPrev, codeID)
+	s.pushMu.Unlock()
 }
