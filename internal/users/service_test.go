@@ -647,3 +647,78 @@ func containsID(list []string, id string) bool {
 	}
 	return false
 }
+
+// 管理员代设邮箱：改址未显式激活 → 复位未激活；显式激活 → 激活；清空 →
+// 邮箱与激活一起复位；邮箱唯一性在存储事务内把关（复用自助绑定通路）。
+func TestAdminUpdateUserEmail(t *testing.T) {
+	f := newService(t)
+	alice := f.mustUser(t, "alice", models.RoleUser, "")
+	bob := f.mustUser(t, "bob", models.RoleUser, "")
+
+	email := " Alice@X.com "
+	yes := true
+	if _, err := f.svc.Update(alice.ID, &models.UpdateUserRequest{Email: &email, EmailVerified: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.store.GetUser(alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "alice@x.com" || !got.EmailVerified {
+		t.Fatalf("邮箱应规范化并激活：got %+v", got)
+	}
+
+	// 只换地址、不给激活标志 → 复位为未激活（旧地址的验证不延续到新地址）。
+	changed := "alice2@x.com"
+	if _, err := f.svc.Update(alice.ID, &models.UpdateUserRequest{Email: &changed}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = f.store.GetUser(alice.ID); got.Email != "alice2@x.com" || got.EmailVerified {
+		t.Fatalf("改址未显式激活应复位激活标志：got %+v", got)
+	}
+
+	// bob 抢注 alice 的邮箱 → 拒绝，且 bob 原有邮箱不受影响。
+	dup := "alice2@x.com"
+	if _, err := f.svc.Update(bob.ID, &models.UpdateUserRequest{Email: &dup}); !errors.Is(err, storage.ErrEmailExists) {
+		t.Fatalf("重复邮箱应拒绝：got %v", err)
+	}
+	if got, _ := f.store.GetUser(bob.ID); got.Email != "" {
+		t.Fatalf("被拒绝的更新不应落库：got %+v", got)
+	}
+
+	// 清空邮箱 → 邮箱与激活一起复位（即使显式要求激活）。
+	empty := ""
+	if _, err := f.svc.Update(alice.ID, &models.UpdateUserRequest{Email: &empty, EmailVerified: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = f.store.GetUser(alice.ID); got.Email != "" || got.EmailVerified {
+		t.Fatalf("清空后邮箱与激活应复位：got %+v", got)
+	}
+
+	// 非法邮箱格式 → 拒绝。
+	bad := "not-an-email"
+	if _, err := f.svc.Update(alice.ID, &models.UpdateUserRequest{Email: &bad}); err == nil {
+		t.Fatal("非法邮箱应拒绝")
+	}
+}
+
+// 每用户日志保留上限：默认值、校验区间与更新生效（即时生效，connLogger
+// 下一批裁剪时读取最新值）。
+func TestUpdateSettingsConnLogBounds(t *testing.T) {
+	f := newService(t)
+	if f.cfg.ConnLogMaxPerUser != models.ConnLogMaxDefault {
+		t.Fatalf("默认保留上限应为 %d：got %d", models.ConnLogMaxDefault, f.cfg.ConnLogMaxPerUser)
+	}
+	tooSmall := 50
+	if _, err := f.svc.UpdateSettings(&models.UpdateSettingsRequest{ConnLogMaxPerUser: &tooSmall}); err == nil {
+		t.Fatal("低于下限应拒绝")
+	}
+	updated := 500
+	if _, err := f.svc.UpdateSettings(&models.UpdateSettingsRequest{ConnLogMaxPerUser: &updated}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.svc.Settings()
+	if err != nil || got.ConnLogMaxPerUser != 500 {
+		t.Fatalf("更新应生效：got %d err=%v", got.ConnLogMaxPerUser, err)
+	}
+}

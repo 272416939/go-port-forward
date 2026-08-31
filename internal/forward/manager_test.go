@@ -441,9 +441,13 @@ func (s *countingStore) Close() error { return nil }
 func (s *countingStore) ListACLEntries() ([]*models.ACLEntry, error)            { return nil, nil }
 func (s *countingStore) SaveACLEntry(entry *models.ACLEntry) error              { return nil }
 func (s *countingStore) DeleteACLEntry(id string) error                         { return nil }
-func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error         { return nil }
-func (s *countingStore) ListConnLogs(limit int) ([]*models.ConnLogEntry, error) { return nil, nil }
-func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)               { return 0, nil }
+func (s *countingStore) AppendConnLog(entry *models.ConnLogEntry) error { return nil }
+func (s *countingStore) ListConnLogs(userID string, offset, limit int) ([]*models.ConnLogEntry, int, error) {
+	return nil, 0, nil
+}
+func (s *countingStore) DeleteConnLogs(userID string, ids []string) (int, error) { return 0, nil }
+func (s *countingStore) ClearConnLogs(userID string) (int, error)                { return 0, nil }
+func (s *countingStore) TrimConnLogs(maxEntries int) (int, error)                { return 0, nil }
 
 // --- User / group / access code stubs required by the extended Store interface ---
 
@@ -457,7 +461,7 @@ func (s *countingStore) GetUserByEmail(e string) (*models.User, error) {
 }
 func (s *countingStore) CreateUser(u *models.User) error { return nil }
 func (s *countingStore) SaveUser(u *models.User) error   { return nil }
-func (s *countingStore) UpdateUserEmail(id, email string) error { return nil }
+func (s *countingStore) SetUserEmail(id, email string, verified bool) error { return nil }
 func (s *countingStore) DeleteUser(id string) error      { return nil }
 func (s *countingStore) CountUsers() (int, error)        { return 0, nil }
 

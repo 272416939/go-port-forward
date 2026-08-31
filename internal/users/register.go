@@ -165,13 +165,14 @@ func (s *Service) Register(in RegisterInput) (*models.User, error) {
 		return nil, err
 	}
 	u := &models.User{
-		ID:           uuid.NewString(),
-		Username:     req.Username,
-		Role:         models.RoleUser,
-		GroupID:      cfg.DefaultGroupID,
-		Email:        email,
-		PasswordHash: hash,
-		CreatedAt:    time.Now(),
+		ID:            uuid.NewString(),
+		Username:      req.Username,
+		Role:          models.RoleUser,
+		GroupID:       cfg.DefaultGroupID,
+		Email:         email,
+		EmailVerified: email != "", // 注册邮箱经过验证码验证才落库
+		PasswordHash:  hash,
+		CreatedAt:     time.Now(),
 	}
 	if err := s.store.CreateUser(u); err != nil {
 		return nil, err
@@ -231,7 +232,7 @@ func (s *Service) SendBindEmailCode(userID, emailRaw string) error {
 // BindOwnEmail 给账号绑定/更换邮箱。验证码证明新邮箱的控制权，当前密码
 // 证明请求者不是偷来的会话——邮箱一旦绑上就开通了找回密码的通路，只凭
 // cookie 就能绑等于给了会话劫持者一条改密旁路（改密本身要旧密码）。
-// 唯一性由 storage.UpdateUserEmail 在写事务内把关。
+// 唯一性由 storage.SetUserEmail 在写事务内把关；绑定成功即视为已激活。
 func (s *Service) BindOwnEmail(userID, password, emailRaw, code string) error {
 	smtpCfg, err := s.store.SMTPConfig()
 	if err != nil {
@@ -255,7 +256,7 @@ func (s *Service) BindOwnEmail(userID, password, emailRaw, code string) error {
 	if err := s.verifier.Verify(email, models.PurposeBind, code); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidUser, err)
 	}
-	if err := s.store.UpdateUserEmail(userID, email); err != nil {
+	if err := s.store.SetUserEmail(userID, email, true); err != nil {
 		return err
 	}
 	logger.S.Infow("账号已绑定邮箱 | email bound", "user", u.Username, "has_email", email != "")

@@ -200,6 +200,13 @@ func (a *application) Start() error {
 	}})
 	// 规则数计数（配额用量 0/5 展示的数据源之一）。
 	usrs.SetRulesCounter(mgr.CountRulesByUser)
+	// 连接日志每用户保留上限：跟随全局设置（connLogger 每批裁剪时实时读取）。
+	mgr.SetConnLogMaxProvider(func() int {
+		if s, err := usrs.Settings(); err == nil && s.ConnLogMaxPerUser > 0 {
+			return s.ConnLogMaxPerUser
+		}
+		return 10000
+	})
 	if _, _, _, berr := usrs.Bootstrap(); berr != nil {
 		return fmt.Errorf("bootstrap admin: %w", berr)
 	}

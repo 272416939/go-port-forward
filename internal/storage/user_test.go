@@ -440,8 +440,9 @@ func contains(s, sub string) bool {
 	})()
 }
 
-// UpdateUserEmail：唯一性查重与写入必须在同一事务（铁律 4b 的存储侧锚点）。
-func TestUpdateUserEmail(t *testing.T) {
+// SetUserEmail：唯一性查重与写入必须在同一事务（铁律 4b 的存储侧锚点），
+// 激活标志随邮箱一起落库，清空邮箱强制复位激活。
+func TestSetUserEmail(t *testing.T) {
 	s := newUserStore(t)
 	a := makeUser("a", "alice", "user")
 	b := makeUser("b", "bob", "user")
@@ -450,23 +451,37 @@ func TestUpdateUserEmail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.UpdateUserEmail("a", "Alice@X.com "); err != nil {
+	if err := s.SetUserEmail("a", "Alice@X.com ", true); err != nil {
 		t.Fatalf("绑定应成功：%v", err)
 	}
 	got, err := s.GetUserByEmail("alice@x.com")
 	if err != nil || got.ID != "a" {
 		t.Fatalf("邮箱应规范化小写并可反查：got %+v, %v", got, err)
 	}
+	if !got.EmailVerified {
+		t.Fatal("绑定成功应置激活标志")
+	}
 	// bob 绑 alice 的邮箱 → ErrEmailExists。
-	if err := s.UpdateUserEmail("b", "alice@x.com"); !errors.Is(err, ErrEmailExists) {
+	if err := s.SetUserEmail("b", "alice@x.com", true); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("重复邮箱应拒绝：got %v", err)
 	}
 	// 重绑自己当前邮箱应放行（查重排除自身）。
-	if err := s.UpdateUserEmail("a", "alice@x.com"); err != nil {
+	if err := s.SetUserEmail("a", "alice@x.com", true); err != nil {
 		t.Fatalf("重绑自己邮箱应放行：%v", err)
 	}
 	// 不存在的用户。
-	if err := s.UpdateUserEmail("nope", "n@x.com"); !errors.Is(err, ErrUserNotFound) {
+	if err := s.SetUserEmail("nope", "n@x.com", true); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("未知用户应拒绝：got %v", err)
+	}
+	// 清空邮箱：激活标志强制复位。
+	if err := s.SetUserEmail("a", "", true); err != nil {
+		t.Fatalf("清空邮箱应成功：%v", err)
+	}
+	got, err = s.GetUser("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "" || got.EmailVerified {
+		t.Fatalf("清空后邮箱与激活标志应复位：got %+v", got)
 	}
 }

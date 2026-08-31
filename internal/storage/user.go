@@ -41,7 +41,9 @@ type userRecord struct {
 	Role     string `json:"role"`
 	GroupID  string `json:"group_id,omitempty"`
 	Email    string `json:"email,omitempty"`
-	Comment  string `json:"comment,omitempty"`
+	// EmailVerified 报告邮箱是否通过验证码验证（注册验证/自助绑定/管理员代设）。
+	EmailVerified bool   `json:"email_verified,omitempty"`
+	Comment       string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"password_hash"`
 
@@ -60,6 +62,7 @@ func toRecord(u *models.User) *userRecord {
 	return &userRecord{
 		CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
 		ID: u.ID, Username: u.Username, Role: u.Role, GroupID: u.GroupID, Email: u.Email, Comment: u.Comment,
+		EmailVerified:      u.EmailVerified,
 		PasswordHash:       u.PasswordHash,
 		Disabled:           u.Disabled,
 		MustChangePassword: u.MustChangePassword,
@@ -70,6 +73,7 @@ func (r *userRecord) toModel() *models.User {
 	return &models.User{
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		ID: r.ID, Username: r.Username, Role: r.Role, GroupID: r.GroupID, Email: r.Email, Comment: r.Comment,
+		EmailVerified:      r.EmailVerified,
 		PasswordHash:       r.PasswordHash,
 		Disabled:           r.Disabled,
 		MustChangePassword: r.MustChangePassword,
@@ -244,14 +248,16 @@ func (s *boltStore) SaveUser(u *models.User) error {
 	})
 }
 
-// UpdateUserEmail 自助绑定/更换邮箱。与 CreateUser 同一套唯一性纪律：查重
-// 与写入必须在同一个写事务里，两个并发绑定同一邮箱只有一方能成功。事务内
-// 重读记录只改 Email 字段——用外部传来的整个模型覆盖会踩掉并发改动的其他
-// 字段（丢更新）。
-func (s *boltStore) UpdateUserEmail(id, email string) error {
+// SetUserEmail 设置用户邮箱与激活标志（自助绑定传 verified=true；管理员代设
+// 时两者都由管理员决定，email 为空串 = 清空并强制未激活）。与 CreateUser 同
+// 一套唯一性纪律：查重与写入必须在同一个写事务里，两个并发绑定同一邮箱只有
+// 一方能成功。事务内重读记录只改 Email/EmailVerified 字段——用外部传来的整
+// 个模型覆盖会踩掉并发改动的其他字段（丢更新）。
+func (s *boltStore) SetUserEmail(id, email string, verified bool) error {
 	want := strings.ToLower(strings.TrimSpace(email))
 	if want == "" {
-		return fmt.Errorf("storage: email is required")
+		// 清空邮箱等于拆掉找回密码的通路，激活状态必须一并复位。
+		verified = false
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(usersBucket)
@@ -264,25 +270,28 @@ func (s *boltStore) UpdateUserEmail(id, email string) error {
 			return err
 		}
 		dup := false
-		if err := b.ForEach(func(k, ov []byte) error {
-			if string(k) == id {
+		if want != "" {
+			if err := b.ForEach(func(k, ov []byte) error {
+				if string(k) == id {
+					return nil
+				}
+				var other userRecord
+				if err := json.Unmarshal(ov, &other); err != nil {
+					return err
+				}
+				if strings.EqualFold(strings.TrimSpace(other.Email), want) {
+					dup = true
+				}
 				return nil
-			}
-			var other userRecord
-			if err := json.Unmarshal(ov, &other); err != nil {
+			}); err != nil {
 				return err
 			}
-			if strings.EqualFold(strings.TrimSpace(other.Email), want) {
-				dup = true
-			}
-			return nil
-		}); err != nil {
-			return err
 		}
 		if dup {
 			return fmt.Errorf("%w: %s", ErrEmailExists, want)
 		}
 		r.Email = want
+		r.EmailVerified = verified
 		data, err := json.Marshal(&r)
 		if err != nil {
 			return err

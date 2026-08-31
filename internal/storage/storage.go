@@ -29,9 +29,12 @@ type Store interface {
 	SaveACLEntry(entry *models.ACLEntry) error
 	DeleteACLEntry(id string) error
 
-	// Connection/session event log
+	// Connection/session event log（connlogs 父桶下按用户嵌套分桶）
+	// userID 为空表示全量（admin 视角）。AppendConnLog 要求 entry.UserID 非空。
 	AppendConnLog(entry *models.ConnLogEntry) error
-	ListConnLogs(limit int) ([]*models.ConnLogEntry, error)
+	ListConnLogs(userID string, offset, limit int) ([]*models.ConnLogEntry, int, error)
+	DeleteConnLogs(userID string, ids []string) (int, error)
+	ClearConnLogs(userID string) (int, error)
 	TrimConnLogs(maxEntries int) (int, error)
 
 	// Users (web accounts)
@@ -41,9 +44,10 @@ type Store interface {
 	GetUserByEmail(email string) (*models.User, error)
 	CreateUser(u *models.User) error
 	SaveUser(u *models.User) error
-	// UpdateUserEmail 自助绑定/更换邮箱。唯一性检查必须在同一个写事务内
-	// （铁律 4b：读写分处两个事务时，两个并发绑定会同时通过查重）。
-	UpdateUserEmail(id, email string) error
+	// SetUserEmail 自助绑定与管理员代设共用：写邮箱 + 激活标志。唯一性检查
+	// 必须在同一个写事务内（铁律 4b：读写分处两个事务时，两个并发绑定会同时
+	// 通过查重）。email 为空串 = 清空并强制未激活。
+	SetUserEmail(id, email string, verified bool) error
 	DeleteUser(id string) error
 	CountUsers() (int, error)
 
@@ -118,6 +122,13 @@ func Open(path string) (Store, error) {
 			logger.S.Infow("数据模型已迁移 | data model migrated",
 				"from", res.From, "to", res.To, "groups", res.Groups, "access_codes", res.AccessCodes)
 		}
+	}
+	// 旧版连接日志直接写在 connlogs 父桶里（无用户归属），分桶模型下清理掉。
+	if n, err := dropLegacyConnLogs(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: drop legacy conn logs: %w", err)
+	} else if n > 0 && logger.S != nil {
+		logger.S.Infow("已清理旧版全局连接日志 | legacy global conn logs dropped", "count", n)
 	}
 	return &boltStore{db: db}, nil
 }

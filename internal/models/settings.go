@@ -13,6 +13,15 @@ import (
 // 数据结构变更就加一，不要复用旧号。
 const SchemaVersion = 2
 
+// 每用户连接日志保留上限的默认值与允许区间。不做「0 = 不限」：日志是攻击者
+// 可以低成本刷量的数据面（denied 事件限频后仍可持续产生），不限等于给磁盘
+// 埋雷；下限 100 保证限额语义始终成立。
+const (
+	ConnLogMaxDefault = 10000
+	ConnLogMaxMin     = 100
+	ConnLogMaxLimit   = 10000000
+)
+
 // Settings 是全局设置（单例）。
 //
 // 它是配额的天花板：用户组只能在这个范围内切分，不能突破。分成两层是因为
@@ -28,6 +37,10 @@ type Settings struct {
 	MaxAccessCodesPerUser int `json:"max_access_codes_per_user"`
 	MaxTunnelsPerUser     int `json:"max_tunnels_per_user"`
 	MaxRulesPerUser       int `json:"max_rules_per_user"`
+
+	// ConnLogMaxPerUser 是每用户连接日志的保留上限，超出裁掉最旧（环形写入）。
+	// 它不参与组配额切分（日志量无法预估也没有共享语义），直接全局统一。
+	ConnLogMaxPerUser int `json:"connlog_max_per_user"`
 
 	// DefaultGroupID 是新建用户的默认组。
 	DefaultGroupID string `json:"default_group_id"`
@@ -57,6 +70,7 @@ func DefaultSettings() Settings {
 		MaxAccessCodesPerUser: 3,
 		MaxTunnelsPerUser:     3,
 		MaxRulesPerUser:       10,
+		ConnLogMaxPerUser:     ConnLogMaxDefault,
 		SchemaVersion:         SchemaVersion,
 	}
 }
@@ -68,6 +82,7 @@ type UpdateSettingsRequest struct {
 	MaxAccessCodesPerUser *int    `json:"max_access_codes_per_user"`
 	MaxTunnelsPerUser     *int    `json:"max_tunnels_per_user"`
 	MaxRulesPerUser       *int    `json:"max_rules_per_user"`
+	ConnLogMaxPerUser     *int    `json:"connlog_max_per_user"`
 	DefaultGroupID        *string `json:"default_group_id"`
 	EnableRegistration    *bool   `json:"enable_registration"`
 	RelayAddr             *string `json:"relay_addr"`
@@ -87,10 +102,23 @@ func ValidateSettings(s *Settings) error {
 			return fmt.Errorf("%s 不能为负 | must not be negative", name)
 		}
 	}
+	if s.ConnLogMaxPerUser < ConnLogMaxMin || s.ConnLogMaxPerUser > ConnLogMaxLimit {
+		return fmt.Errorf("每用户日志保留上限需在 %d ~ %d 条之间 | connlog_max_per_user must be between %d and %d",
+			ConnLogMaxMin, ConnLogMaxLimit, ConnLogMaxMin, ConnLogMaxLimit)
+	}
 	if err := ValidateRelayAddr(s.RelayAddr); err != nil {
 		return err
 	}
 	return nil
+}
+
+// NormalizeSettings 补齐旧版本设置记录里缺失的字段（JSON 覆盖式落盘，旧记录
+// 反序列化后新字段为零值）：日志保留上限回落到默认值，保证限额语义始终成立。
+func NormalizeSettings(s Settings) Settings {
+	if s.ConnLogMaxPerUser < ConnLogMaxMin || s.ConnLogMaxPerUser > ConnLogMaxLimit {
+		s.ConnLogMaxPerUser = ConnLogMaxDefault
+	}
+	return s
 }
 
 // ValidateRelayAddr 校验中转机地址：允许留空（= 自动探测公网 IP），否则必须

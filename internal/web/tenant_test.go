@@ -31,6 +31,7 @@ import (
 type tenantFixture struct {
 	h         *handler
 	svc       *users.Service
+	store     storage.Store
 	admin     *models.User
 	alice     *models.User
 	bob       *models.User
@@ -95,6 +96,7 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 			bindCodeIP:    users.NewRateLimiter(1000, time.Hour),
 		},
 		svc:    svc,
+		store:  store,
 		admin:  mk("admin", models.RoleAdmin, ""),
 		groups: map[string]*models.UserGroup{},
 	}
@@ -558,6 +560,85 @@ func TestSessionsAndLogsScoped(t *testing.T) {
 	f.h.listConnLogs(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/logs", nil), f.alice))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+// 连接日志的删除与清空沿用列表的作用域：alice 拿 bob 的日志 ID 走自己的
+// 作用域删除，必须一条都删不掉（存储按用户分桶，扫描只发生在自己的桶里）。
+func TestConnLogMutationsScoped(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	seed := func(uid string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := f.store.AppendConnLog(&models.ConnLogEntry{
+				UserID: uid, Protocol: models.ProtocolUDP, SrcIP: "1.2.3.4", SrcPort: 1000,
+				Event: models.ConnEventJoin,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	seed(f.alice.ID, 2)
+	seed(f.bob.ID, 2)
+
+	// 列表响应带分页元数据与保留上限。
+	rec := httptest.NewRecorder()
+	f.h.listConnLogs(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/logs", nil), f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	var wrapped struct {
+		Success bool                   `json:"success"`
+		Data    models.ConnLogsResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &wrapped); err != nil {
+		t.Fatal(err)
+	}
+	page := wrapped.Data
+	if !wrapped.Success || page.Total != 2 || page.Retention != models.ConnLogMaxDefault || len(page.Logs) != 2 {
+		t.Fatalf("列表响应异常：success=%v total=%d retention=%d logs=%d",
+			wrapped.Success, page.Total, page.Retention, len(page.Logs))
+	}
+
+	// alice 拿 bob 的两条 ID 删除 → 0 条生效，bob 数据原样。
+	bobLogs, _, err := f.store.ListConnLogs(f.bob.ID, 0, 10)
+	if err != nil || len(bobLogs) != 2 {
+		t.Fatalf("准备 bob 日志失败：err=%v", err)
+	}
+	ids, _ := json.Marshal([]string{bobLogs[0].ID, bobLogs[1].ID})
+	rec = httptest.NewRecorder()
+	f.h.deleteConnLogs(rec, asUser(httptest.NewRequest(http.MethodPost, "/api/logs/delete",
+		strings.NewReader(`{"ids":`+string(ids)+`}`)), f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, totalB, _ := f.store.ListConnLogs(f.bob.ID, 0, 10); totalB != 2 {
+		t.Fatalf("别人的作用域不该删掉 bob 的日志：total=%d", totalB)
+	}
+
+	// alice 清空：只影响自己。
+	rec = httptest.NewRecorder()
+	f.h.clearConnLogs(rec, asUser(httptest.NewRequest(http.MethodPost, "/api/logs/clear", nil), f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, totalA, _ := f.store.ListConnLogs(f.alice.ID, 0, 10); totalA != 0 {
+		t.Fatalf("alice 清空后应为 0：total=%d", totalA)
+	}
+	if _, totalB, _ := f.store.ListConnLogs(f.bob.ID, 0, 10); totalB != 2 {
+		t.Fatalf("alice 清空不应影响 bob：total=%d", totalB)
+	}
+
+	// 非法档位的 per_page 回落到默认 50。
+	rec = httptest.NewRecorder()
+	f.h.listConnLogs(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/logs?per_page=33", nil), f.alice))
+	var badWrapped struct {
+		Data models.ConnLogsResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &badWrapped); err != nil || badWrapped.Data.PerPage != 50 {
+		t.Fatalf("非法 per_page 应回落 50：got %d err=%v", badWrapped.Data.PerPage, err)
 	}
 }
 

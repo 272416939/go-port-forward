@@ -14,8 +14,15 @@ import (
 	"go-port-forward/internal/models"
 )
 
-// Settings 返回全局设置。
-func (s *Service) Settings() (models.Settings, error) { return s.store.Settings() }
+// Settings 返回全局设置。旧记录里缺失的字段（如日志保留上限）在此归一化，
+// 消费方不需要各自兜底。
+func (s *Service) Settings() (models.Settings, error) {
+	cfg, err := s.store.Settings()
+	if err != nil {
+		return cfg, err
+	}
+	return models.NormalizeSettings(cfg), nil
+}
 
 // UpdateSettings 更新全局设置。
 //
@@ -27,7 +34,9 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	if err != nil {
 		return cur, err
 	}
-	next := cur
+	// 旧记录的新字段可能是零值，先归一化：否则不改该字段的一次普通保存会被
+	// 校验拒绝，而拒绝原因与管理员正在做的事毫无关系。
+	next := models.NormalizeSettings(cur)
 	if req.PortRangeStart != nil {
 		next.PortRangeStart = *req.PortRangeStart
 	}
@@ -42,6 +51,9 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	}
 	if req.MaxRulesPerUser != nil {
 		next.MaxRulesPerUser = *req.MaxRulesPerUser
+	}
+	if req.ConnLogMaxPerUser != nil {
+		next.ConnLogMaxPerUser = *req.ConnLogMaxPerUser
 	}
 	if req.EnableRegistration != nil {
 		next.EnableRegistration = *req.EnableRegistration
@@ -84,7 +96,8 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	logger.S.Infow("全局设置已更新 | global settings updated",
 		"port_range", fmt.Sprintf("%d-%d", next.PortRangeStart, next.PortRangeEnd),
 		"max_codes", next.MaxAccessCodesPerUser, "max_tunnels", next.MaxTunnelsPerUser,
-		"max_rules", next.MaxRulesPerUser, "registration", next.EnableRegistration,
+		"max_rules", next.MaxRulesPerUser, "connlog_max_per_user", next.ConnLogMaxPerUser,
+		"registration", next.EnableRegistration,
 		"relay_addr", next.RelayAddr)
 	return next, nil
 }

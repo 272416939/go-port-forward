@@ -245,6 +245,48 @@ func (s *Service) Update(id string, req *models.UpdateUserRequest) (*models.User
 	if req.Comment != nil {
 		u.Comment = strings.TrimSpace(*req.Comment)
 	}
+	// 邮箱与激活标志（管理员代设）：
+	//   Email 非空 = 改地址，未显式给出激活标志时视为未激活——旧地址的验证
+	//   不延续到新地址；Email 空串 = 清空，激活标志无条件复位（清掉邮箱等于
+	//   拆掉找回密码的通路，显式要求激活也不行）；只传 EmailVerified = 仅
+	//   切换当前地址的激活标志。
+	emailTouched := false
+	if req.Email != nil {
+		raw := strings.TrimSpace(*req.Email)
+		if raw != "" {
+			email, eerr := models.ValidateEmail(raw)
+			if eerr != nil {
+				return nil, fmt.Errorf("%w: %v", ErrInvalidUser, eerr)
+			}
+			if email != u.Email {
+				u.Email = email
+				emailTouched = true
+			}
+		} else {
+			if u.Email != "" {
+				u.Email = ""
+				emailTouched = true
+			}
+			u.EmailVerified = false
+		}
+	}
+	if req.EmailVerified != nil {
+		u.EmailVerified = *req.EmailVerified
+	} else if emailTouched {
+		u.EmailVerified = false
+	}
+	if u.Email == "" {
+		// 不变量：没有邮箱就谈不上激活。这里与 storage.SetUserEmail 的强制
+		// 复位对齐，避免 SaveUser 又把旧值写回去。
+		u.EmailVerified = false
+	}
+	if req.Email != nil || req.EmailVerified != nil {
+		// 邮箱先单独落库（事务内查重，复用自助绑定通路）；失败则中止整个
+		// 更新，其他字段不产生半套变更。
+		if err := s.store.SetUserEmail(u.ID, u.Email, u.EmailVerified); err != nil {
+			return nil, err
+		}
+	}
 	disableNow := false
 	if req.Disabled != nil {
 		if *req.Disabled && !u.Disabled {

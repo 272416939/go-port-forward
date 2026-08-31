@@ -907,15 +907,44 @@
 
         <!-- 连接日志 -->
         <div x-show="aclTab==='logs' || !isAdmin" x-cloak>
-          <div class="d-flex justify-content-end mb-2">
-            <button type="button" class="btn btn-sm btn-outline-secondary btn-icon" @click="loadConnLogs()" :disabled="logsLoading">
-              <i class="bi bi-arrow-clockwise"></i>
-              <span x-text="t('刷新','Refresh')"></span>
-            </button>
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+              <label class="small text-nowrap mb-0" x-text="t('每页','Per page')"></label>
+              <select class="form-select form-select-sm w-auto" x-model.number="logsPerPage" @change="logsPage=1; loadConnLogs()">
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+              </select>
+              <span class="form-text mb-0" x-show="logsRetention > 0"
+                    x-text="t('每用户最多保留 '+logsRetention+' 条，超出自动删除最旧。','Up to '+logsRetention+' entries kept per user; the oldest are trimmed automatically.')"></span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-outline-danger btn-icon" :disabled="logsSelected.length===0 || logsLoading"
+                      @click="deleteSelectedLogs()">
+                <i class="bi bi-trash"></i>
+                <span x-text="t('删除选中','Delete selected')+'('+logsSelected.length+')'"></span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-danger btn-icon" :disabled="logsTotal===0 || logsLoading"
+                      @click="clearLogs()">
+                <i class="bi bi-trash3"></i>
+                <span x-text="t('清空','Clear all')"></span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary btn-icon" @click="loadConnLogs()" :disabled="logsLoading">
+                <i class="bi bi-arrow-clockwise"></i>
+                <span x-text="t('刷新','Refresh')"></span>
+              </button>
+            </div>
           </div>
           <div class="table-responsive">
             <table class="table table-sm table-hover align-middle">
               <thead><tr>
+                <th style="width:2rem">
+                  <input class="form-check-input" type="checkbox" :disabled="connLogs.length===0"
+                         :checked="connLogs.length>0 && logsSelected.length===connLogs.length"
+                         @change="toggleAllLogs($event.target.checked)"
+                         :title="t('全选本页','Select all on this page')"/>
+                </th>
                 <th x-text="t('时间','Time')"></th>
                 <th x-text="t('事件','Event')"></th>
                 <th x-text="t('协议','Proto')"></th>
@@ -927,6 +956,7 @@
               <tbody>
                 <template x-for="l in connLogs" :key="l.id">
                   <tr>
+                    <td><input class="form-check-input" type="checkbox" :value="l.id" x-model="logsSelected"/></td>
                     <td class="small" x-text="fmtDateTime(l.time)"></td>
                     <td><span class="badge rounded-pill" :class="logEventClass(l.event)" x-text="logEventLabel(l.event)"></span></td>
                     <td class="small text-uppercase" x-text="l.protocol"></td>
@@ -938,9 +968,21 @@
                     </td>
                   </tr>
                 </template>
-                <tr x-show="connLogs.length===0"><td colspan="7" class="text-center text-muted small py-3" x-text="t('暂无记录','No records')"></td></tr>
+                <tr x-show="connLogs.length===0"><td colspan="8" class="text-center text-muted small py-3" x-text="t('暂无记录','No records')"></td></tr>
               </tbody>
             </table>
+          </div>
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2" x-show="logsTotal > 0">
+            <span class="small text-muted" x-text="t('共 '+logsTotal+' 条','Total '+logsTotal)"></span>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="logsPage<=1 || logsLoading" @click="loadConnLogs(logsPage-1)">
+                <i class="bi bi-chevron-left"></i><span x-text="t('上一页','Prev')"></span>
+              </button>
+              <span class="small" x-text="t('第 '+logsPage+' / '+logsTotalPages()+' 页','Page '+logsPage+' / '+logsTotalPages())"></span>
+              <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="logsPage>=logsTotalPages() || logsLoading" @click="loadConnLogs(logsPage+1)">
+                <span x-text="t('下一页','Next')"></span><i class="bi bi-chevron-right"></i>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1049,6 +1091,17 @@
               </select>
             </div>
             <div class="col-md-3">
+              <label class="form-label small mb-1" x-text="t('邮箱','Email')"></label>
+              <input class="form-control form-control-sm" type="email" x-model="userEdit.email"
+                     :placeholder="t('留空 = 清除邮箱','empty = clear email')"/>
+            </div>
+            <div class="col-md-2">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="chkUserEmailVerified" x-model="userEdit.email_verified"/>
+                <label class="form-check-label small" for="chkUserEmailVerified" x-text="t('邮箱已激活','Email verified')"></label>
+              </div>
+            </div>
+            <div class="col-md-auto">
               <button type="submit" class="btn btn-primary btn-sm w-100" x-text="t('保存','Save')"></button>
             </div>
           </form>
@@ -1333,6 +1386,14 @@
             <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_rules_per_user"/>
           </div>
           <div class="col-12">
+            <div class="form-text" x-text="t('0 表示不限。改动即时生效，正在使用的隧道与规则不受影响。','0 means unlimited. Changes take effect immediately; existing tunnels and rules are unaffected.')"></div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small mb-1" x-text="t('每用户日志保留上限','Conn logs kept / user')"></label>
+            <input class="form-control form-control-sm" type="number" min="100" step="100" x-model.number="settingsForm.connlog_max_per_user"/>
+            <div class="form-text" x-text="t('连接日志超出即删除最旧（100 ~ 1000 万，默认 10000）。','Oldest connection logs are trimmed beyond this (100 ~ 10,000,000, default 10000).')"></div>
+          </div>
+          <div class="col-12">
             <label class="form-label small mb-1" x-text="t('中转机地址（写入接入码，供客户端连接隧道）','Relay address (embedded in access codes)')"></label>
             <input class="form-control form-control-sm" x-model="settingsForm.relay_addr"
                    :placeholder="t('如 124.221.181.159 或 relay.example.com:7947','e.g. 203.0.113.9 or relay.example.com:7947')"/>
@@ -1349,9 +1410,6 @@
           </div>
           <div class="col-12">
             <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="settingsSaving" x-text="t('保存','Save')"></button>
-          </div>
-          <div class="col-12">
-            <div class="form-text" x-text="t('0 表示不限。改动即时生效，正在使用的隧道与规则不受影响。','0 means unlimited. Changes take effect immediately; existing tunnels and rules are unaffected.')"></div>
           </div>
         </form>
         <hr/>
@@ -1552,7 +1610,7 @@
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title" id="sessionsModalLabel"><i class="bi bi-arrow-left-right me-2"></i><span x-text="t('活跃会话','Active Sessions')"></span></h5>
-        <div class="d-flex align-items-center gap-2">
+        <div class="d-flex align-items-center gap-2 ms-auto">
           <button type="button" class="btn btn-sm btn-outline-secondary btn-icon" @click="loadSessions()" :disabled="sessionsLoading">
             <i class="bi bi-arrow-clockwise"></i>
             <span x-text="t('刷新','Refresh')"></span>
@@ -1690,6 +1748,11 @@ function portForwardApp() {
 	    aclForm: { cidr: '', action: 'deny', comment: '' },
 	    aclSaving: false,
 	    logsLoading: false,
+	    logsPage: 1,
+	    logsPerPage: 50,
+	    logsTotal: 0,
+	    logsRetention: 0,
+	    logsSelected: [],
 	    sessionsLoading: false,
 	    _aclModal: null,
 	    _sessionsModal: null,
@@ -1710,12 +1773,12 @@ function portForwardApp() {
 	    codeSaving: false,
 	    codeText: { code_id:'', name:'', addr:'', secret:'', code:'', tun_ip:'' },
 	    userForm: { username:'', password:'', role:'user', group_id:'' },
-	    userEdit: { id:'', username:'', password:'', group_id:'' },
+	    userEdit: { id:'', username:'', password:'', group_id:'', email:'', email_verified:false },
 	    userSaving: false,
 	    groupForm: { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false },
 	    groupSaving: false,
 	    groupEdit: { id:'', name:'', port_range_start:0, port_range_end:0, max_access_codes:0, max_tunnels:0, max_rules:0 },
-	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, enable_registration:false, relay_addr:'' },
+	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, connlog_max_per_user:10000, enable_registration:false, relay_addr:'' },
 	    settingsSaving: false,
 	    globalSettings: null, // 组页面回退值展示用
 	    smtpForm: { host:'', port:587, username:'', password:'', from:'', from_name:'', encryption:'starttls' },
@@ -1955,13 +2018,18 @@ function portForwardApp() {
     },
 
     editUser(u) {
-      this.userEdit = { id: u.id, username: u.username, password: '', group_id: u.role==='admin' ? '' : (u.group_id || '') }
+      this.userEdit = { id: u.id, username: u.username, password: '', group_id: u.role==='admin' ? '' : (u.group_id || ''), email: u.email || '', email_verified: !!u.email_verified }
     },
 
     async saveUserEdit() {
       this.userSaving = true
       try {
-        const body = { group_id: this.userEdit.group_id }
+        const body = {
+          group_id: this.userEdit.group_id,
+          // 恒发这两个字段：空串 = 清除邮箱（后端同步强制未激活）
+          email: (this.userEdit.email || '').trim(),
+          email_verified: !!this.userEdit.email_verified
+        }
         if (this.userEdit.password) body.password = this.userEdit.password
         const res = await fetch('/api/users/' + this.userEdit.id, {
           method: 'PUT',
@@ -1971,7 +2039,7 @@ function portForwardApp() {
         const d = await res.json()
         if (d.success) {
           showToast('success', d.message || _t('用户已更新','User updated'))
-          this.userEdit = { id:'', username:'', password:'', group_id:'' }
+          this.userEdit = { id:'', username:'', password:'', group_id:'', email:'', email_verified:false }
           await this.loadUsers()
         } else {
           showToast('danger', d.message || _t('操作失败','Operation failed'))
@@ -2399,6 +2467,7 @@ function portForwardApp() {
             max_access_codes_per_user: Number(this.settingsForm.max_access_codes_per_user) || 0,
             max_tunnels_per_user: Number(this.settingsForm.max_tunnels_per_user) || 0,
             max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0,
+            connlog_max_per_user: Number(this.settingsForm.connlog_max_per_user) || 0,
             enable_registration: !!this.settingsForm.enable_registration,
             relay_addr: (this.settingsForm.relay_addr || '').trim()
           })
@@ -2909,14 +2978,73 @@ function portForwardApp() {
       finally { this.sessionsLoading = false }
     },
 
-    async loadConnLogs() {
+    async loadConnLogs(page = 0) {
+      if (page > 0) this.logsPage = page
       this.logsLoading = true
       try {
-        const res = await fetch('/api/logs?limit=300')
+        const res = await fetch('/api/logs?page=' + this.logsPage + '&per_page=' + this.logsPerPage)
         const d = await res.json()
-        if (d.success) this.connLogs = d.data || []
+        if (d.success) {
+          this.connLogs = (d.data && d.data.logs) || []
+          this.logsTotal = (d.data && d.data.total) || 0
+          this.logsRetention = (d.data && d.data.retention) || 0
+          // 服务端回传生效页：末页被删空时自然回退
+          if (d.data && d.data.page > 0) this.logsPage = d.data.page
+          this.logsSelected = []
+        }
       } catch (e) { /* 静默 */ }
       finally { this.logsLoading = false }
+    },
+
+    logsTotalPages() {
+      return Math.max(1, Math.ceil(this.logsTotal / this.logsPerPage))
+    },
+
+    toggleAllLogs(checked) {
+      this.logsSelected = checked ? this.connLogs.map(l => l.id) : []
+    },
+
+    async deleteSelectedLogs() {
+      const ids = [...this.logsSelected]
+      if (!ids.length) return
+      showConfirm(_t('删除选中的 ' + ids.length + ' 条日志？此操作不可撤销。',
+        'Delete the ' + ids.length + ' selected log entries? This cannot be undone.'), async () => {
+        try {
+          const res = await fetch('/api/logs/delete', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ids })
+          })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('已删除','Deleted'))
+            this.loadConnLogs()
+          } else {
+            showToast('danger', d.message || _t('删除失败','Delete failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
+    },
+
+    async clearLogs() {
+      showConfirm(_t('确定清空全部连接日志吗？此操作不可撤销。',
+        'Clear ALL connection logs? This cannot be undone.'), async () => {
+        try {
+          const res = await fetch('/api/logs/clear', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('已清空','Cleared'))
+            this.logsPage = 1
+            this.loadConnLogs()
+          } else {
+            showToast('danger', d.message || _t('清空失败','Clear failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+        }
+      })
     },
 
     async quickBanSession(s) {

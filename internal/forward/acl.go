@@ -93,10 +93,13 @@ type connLogger struct {
 	store      storage.Store
 	ch         chan models.ConnLogEntry
 	maxEntries int
-	stop       chan struct{}
-	stopOnce   sync.Once
-	wg         sync.WaitGroup
-	appends    int
+	// maxFn 返回管理员在全局设置里配置的每用户保留上限；nil/返回非正值时
+	// 回落 maxEntries（config.yaml 的旧配置面）。
+	maxFn    func() int
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	appends  int
 }
 
 func newConnLogger(store storage.Store, maxEntries int) *connLogger {
@@ -109,6 +112,26 @@ func newConnLogger(store storage.Store, maxEntries int) *connLogger {
 	l.wg.Add(1)
 	go l.loop()
 	return l
+}
+
+// SetMaxProvider 挂接运行时的保留上限来源（main.go 装配完 users 服务后调用）。
+func (l *connLogger) SetMaxProvider(fn func() int) {
+	if l == nil {
+		return
+	}
+	l.maxFn = fn
+}
+
+func (l *connLogger) effectiveMax() int {
+	if l.maxFn != nil {
+		if v := l.maxFn(); v > 0 {
+			return v
+		}
+	}
+	if l.maxEntries <= 0 {
+		return 2000
+	}
+	return l.maxEntries
 }
 
 func (l *connLogger) Log(e models.ConnLogEntry) {
@@ -144,7 +167,7 @@ func (l *connLogger) loop() {
 			}
 			l.appends++
 			if l.appends%trimEvery == 0 {
-				_, _ = l.store.TrimConnLogs(l.maxEntries)
+				_, _ = l.store.TrimConnLogs(l.effectiveMax())
 			}
 		}
 	}
@@ -163,6 +186,7 @@ type sessionInfo struct {
 	Protocol models.Protocol
 	RuleID   string
 	RuleName string
+	UserID   string
 	SrcIP    string
 	SrcPort  int
 	Since    time.Time
@@ -235,6 +259,7 @@ func (si *sessionInfo) finish(ev models.ConnEvent, logs *connLogger) {
 		Protocol: si.Protocol,
 		RuleID:   si.RuleID,
 		RuleName: si.RuleName,
+		UserID:   si.UserID,
 		SrcIP:    si.SrcIP,
 		SrcPort:  si.SrcPort,
 		Event:    ev,

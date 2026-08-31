@@ -255,9 +255,11 @@ type ACLEntry struct {
 }
 
 // ConnLogEntry records one connection/session event observed by a forwarder.
-// BytesIn/BytesOut are filled when the session ends (leave).
+// BytesIn/BytesOut are filled when the session ends (leave). UserID 决定日志
+// 落在哪个用户的桶里（存储按用户分桶），写入时由转发器按规则归属填好。
 type ConnLogEntry struct {
 	ID       string    `json:"id"`
+	UserID   string    `json:"user_id,omitempty"`
 	Time     time.Time `json:"time"`
 	Protocol Protocol  `json:"protocol"`
 	RuleID   string    `json:"rule_id,omitempty"`
@@ -267,6 +269,21 @@ type ConnLogEntry struct {
 	Event    ConnEvent `json:"event"`
 	BytesIn  int64     `json:"bytes_in"`
 	BytesOut int64     `json:"bytes_out"`
+}
+
+// ConnLogsResponse 是 GET /api/logs 的分页响应。Retention 是管理员配置的
+// 每用户保留上限，前端用它动态显示「最多保留 N 条」。
+type ConnLogsResponse struct {
+	Logs      []*ConnLogEntry `json:"logs"`
+	Total     int             `json:"total"`
+	Page      int             `json:"page"`
+	PerPage   int             `json:"per_page"`
+	Retention int             `json:"retention"`
+}
+
+// ConnLogDeleteRequest 是 POST /api/logs/delete 的输入：按 ID 批量删除。
+type ConnLogDeleteRequest struct {
+	IDs []string `json:"ids"`
 }
 
 // SessionEntry is the live view of one tracked client session (conntrack style).

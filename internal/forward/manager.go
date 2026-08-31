@@ -271,33 +271,30 @@ func (m *Manager) CountRulesByTarget(addr string) int {
 	return n
 }
 
-// ConnLogsForUser 返回某用户名下规则的连接日志。
-//
-// 先取更多行再过滤：日志是全局倒序表，按用户过滤后行数会缩水，直接取 limit
-// 行会让规则少的用户几乎看不到自己的记录。
-func (m *Manager) ConnLogsForUser(userID string, limit int) ([]*models.ConnLogEntry, error) {
-	if userID == "" {
-		return m.store.ListConnLogs(limit)
+// ConnLogsForUser 分页返回某用户的连接日志（userID 为空 = admin 全量视图）。
+// 日志落桶时已带归属（UserID 在产生点写入），存储按用户分桶，这里不再需要
+// 「多取再过滤」的补偿逻辑。
+func (m *Manager) ConnLogsForUser(userID string, page, perPage int) ([]*models.ConnLogEntry, int, error) {
+	if page < 1 {
+		page = 1
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	raw, err := m.store.ListConnLogs(limit * 20)
-	if err != nil {
-		return nil, err
-	}
-	owned := m.ruleOwners()
-	out := make([]*models.ConnLogEntry, 0, limit)
-	for _, e := range raw {
-		if owned[e.RuleID] != userID {
-			continue
-		}
-		out = append(out, e)
-		if len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
+	return m.store.ListConnLogs(userID, (page-1)*perPage, perPage)
+}
+
+// DeleteConnLogs 按 ID 批量删除连接日志（userID 为空 = admin 全量）。
+func (m *Manager) DeleteConnLogs(userID string, ids []string) (int, error) {
+	return m.store.DeleteConnLogs(userID, ids)
+}
+
+// ClearConnLogs 清空某用户（或全部）的连接日志。
+func (m *Manager) ClearConnLogs(userID string) (int, error) {
+	return m.store.ClearConnLogs(userID)
+}
+
+// SetConnLogMaxProvider 挂接每用户日志保留上限的运行时来源。main.go 在
+// users 服务就绪后调用；未挂接时用 config.yaml 的 connlog_max_entries。
+func (m *Manager) SetConnLogMaxProvider(fn func() int) {
+	m.svc.logs.SetMaxProvider(fn)
 }
 
 func (m *Manager) reloadACL() {

@@ -308,6 +308,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/acl", s.adminOnly(h.createACL))
 	mux.HandleFunc("DELETE /api/acl/{id}", s.adminOnly(h.deleteACL))
 	mux.HandleFunc("GET /api/logs", s.authed(h.listConnLogs))
+	mux.HandleFunc("POST /api/logs/delete", s.authed(h.deleteConnLogs))
+	mux.HandleFunc("POST /api/logs/clear", s.authed(h.clearConnLogs))
 	mux.HandleFunc("GET /api/sessions", s.authed(h.listSessions))
 
 	// 端口检测与随机（登录即可；检测范围受配额区间约束）

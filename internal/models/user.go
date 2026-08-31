@@ -32,8 +32,11 @@ type User struct {
 	GroupID  string `json:"group_id"` // 所属用户组；空值表示未分组（配额取全局默认）
 	// Email 用于注册验证与找回密码。小写存储；可为空（SMTP 未配置时注册的
 	// 账号没有邮箱——收集了不验证等于没有）。
-	Email   string `json:"email,omitempty"`
-	Comment string `json:"comment,omitempty"`
+	Email string `json:"email,omitempty"`
+	// EmailVerified 报告邮箱是否通过了验证码验证（注册验证 / 自助绑定）。
+	// 管理员可手工代设——SMTP 未配置时这是给用户补邮箱的唯一途径。
+	EmailVerified bool `json:"email_verified,omitempty"`
+	Comment       string `json:"comment,omitempty"`
 
 	PasswordHash string `json:"-"` // bcrypt
 
@@ -61,12 +64,17 @@ type CreateUserRequest struct {
 }
 
 // UpdateUserRequest 是更新用户的 API 请求（指针字段表示"未提供即不改"）。
+//
+// Email 传空串 = 清空邮箱（同时强制未激活）；EmailVerified 单独设置时只改
+// 激活标志，两者语义见 users.Service.Update。
 type UpdateUserRequest struct {
-	Password *string `json:"password"`
-	Role     *string `json:"role"`
-	GroupID  *string `json:"group_id"`
-	Comment  *string `json:"comment"`
-	Disabled *bool   `json:"disabled"`
+	Password      *string `json:"password"`
+	Role          *string `json:"role"`
+	GroupID       *string `json:"group_id"`
+	Comment       *string `json:"comment"`
+	Disabled      *bool   `json:"disabled"`
+	Email         *string `json:"email"`
+	EmailVerified *bool   `json:"email_verified"`
 }
 
 // LoginRequest 是登录请求。
@@ -156,6 +164,7 @@ type CurrentUser struct {
 	Username           string `json:"username"`
 	Role               string `json:"role"`
 	Email              string `json:"email,omitempty"`
+	EmailVerified      bool   `json:"email_verified,omitempty"`
 	GroupID            string `json:"group_id,omitempty"`
 	GroupName          string `json:"group_name,omitempty"`
 	Quota              Quota  `json:"quota"`
@@ -172,6 +181,7 @@ func (u *User) View(quota Quota) CurrentUser {
 		Username:           u.Username,
 		Role:               u.Role,
 		Email:              u.Email,
+		EmailVerified:      u.EmailVerified,
 		GroupID:            u.GroupID,
 		GroupName:          quota.GroupName,
 		Quota:              quota,
