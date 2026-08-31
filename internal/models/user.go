@@ -112,7 +112,24 @@ type ForgotPasswordRequest struct {
 const (
 	PurposeRegister = "register"
 	PurposeReset    = "reset"
+	PurposeBind     = "bind" // 登录用户补绑/更换邮箱（另需当前密码）
 )
+
+// BindEmailCodeRequest 是登录用户请求向新邮箱发绑定验证码的请求。
+type BindEmailCodeRequest struct {
+	Email string `json:"email"`
+}
+
+// BindEmailRequest 是绑定/更换邮箱的请求。
+//
+// Password 必填：绑定邮箱等于给账号加了一条找回密码的通路，只凭会话就能
+// 绑的话，偷到 cookie 的人可以先绑自己的邮箱再走找回——加一道当前密码，
+// 与改密需旧密码对齐。
+type BindEmailRequest struct {
+	Email    string `json:"email"`
+	Code     string `json:"code"`
+	Password string `json:"password"`
+}
 
 // ValidateEmail 校验并规范化邮箱（小写、非空、含 @）。
 //
@@ -138,6 +155,7 @@ type CurrentUser struct {
 	ID                 string `json:"id"`
 	Username           string `json:"username"`
 	Role               string `json:"role"`
+	Email              string `json:"email,omitempty"`
 	GroupID            string `json:"group_id,omitempty"`
 	GroupName          string `json:"group_name,omitempty"`
 	Quota              Quota  `json:"quota"`
@@ -153,6 +171,7 @@ func (u *User) View(quota Quota) CurrentUser {
 		ID:                 u.ID,
 		Username:           u.Username,
 		Role:               u.Role,
+		Email:              u.Email,
 		GroupID:            u.GroupID,
 		GroupName:          quota.GroupName,
 		Quota:              quota,

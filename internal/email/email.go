@@ -106,8 +106,12 @@ func sendWithOptionalSTARTTLS(ctx context.Context, addr, host string, auth smtp.
 		return fmt.Errorf("服务器不支持 STARTTLS，请改用 465 端口的 ssl 模式或明确选择 none")
 	}
 
-	if err := c.Auth(auth); err != nil && auth != nil {
-		return fmt.Errorf("SMTP 认证失败: %w", err)
+	// 无凭据的中继（IP 白名单式）合法存在：auth 为 nil 时绝不能调 c.Auth，
+	// net/smtp 的 Auth(nil) 会在 a.Start 处空指针 panic。
+	if auth != nil {
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP 认证失败: %w", err)
+		}
 	}
 	return sendBody(c, from, to, msg)
 }
@@ -131,8 +135,10 @@ func sendImplicitTLS(ctx context.Context, addr, host string, auth smtp.Auth,
 	}
 	defer c.Close()
 
-	if err := c.Auth(auth); err != nil && auth != nil {
-		return fmt.Errorf("SMTP 认证失败: %w", err)
+	if auth != nil {
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP 认证失败: %w", err)
+		}
 	}
 	return sendBody(c, from, to, msg)
 }

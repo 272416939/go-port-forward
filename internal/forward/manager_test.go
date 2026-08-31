@@ -457,6 +457,7 @@ func (s *countingStore) GetUserByEmail(e string) (*models.User, error) {
 }
 func (s *countingStore) CreateUser(u *models.User) error { return nil }
 func (s *countingStore) SaveUser(u *models.User) error   { return nil }
+func (s *countingStore) UpdateUserEmail(id, email string) error { return nil }
 func (s *countingStore) DeleteUser(id string) error      { return nil }
 func (s *countingStore) CountUsers() (int, error)        { return 0, nil }
 

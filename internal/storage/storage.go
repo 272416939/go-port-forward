@@ -41,6 +41,9 @@ type Store interface {
 	GetUserByEmail(email string) (*models.User, error)
 	CreateUser(u *models.User) error
 	SaveUser(u *models.User) error
+	// UpdateUserEmail 自助绑定/更换邮箱。唯一性检查必须在同一个写事务内
+	// （铁律 4b：读写分处两个事务时，两个并发绑定会同时通过查重）。
+	UpdateUserEmail(id, email string) error
 	DeleteUser(id string) error
 	CountUsers() (int, error)
 

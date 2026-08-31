@@ -1450,6 +1450,12 @@
         <dl class="row small mb-3">
           <dt class="col-5" x-text="t('用户名','Username')"></dt><dd class="col-7" x-text="me.username"></dd>
           <dt class="col-5" x-text="t('角色','Role')"></dt><dd class="col-7" x-text="me.role==='admin' ? t('管理员','Admin') : t('普通用户','User')"></dd>
+          <dt class="col-5" x-text="t('邮箱','Email')"></dt>
+          <dd class="col-7">
+            <span x-text="me.email || t('未绑定','Not bound')"></span>
+            <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" x-show="emailReady" x-cloak
+                    @click="openBindEmail()" x-text="me.email ? t('更换','Change') : t('绑定','Bind')"></button>
+          </dd>
           <dt class="col-5" x-text="t('用户组','Group')"></dt><dd class="col-7" x-text="me.group_name || t('默认组','default')"></dd>
           <template x-if="!isAdmin">
             <dt class="col-5" x-text="t('端口区间','Port Range')"></dt>
@@ -1507,6 +1513,30 @@
           </div>
           <div class="col-12">
             <div class="form-text" x-text="t('修改后所有设备上的登录都会失效，需要重新登录。','All sessions on every device are signed out after the change.')"></div>
+          </div>
+        </form>
+        <form class="row g-2 border-top pt-3 mt-1" x-show="bindOpen" x-cloak @submit.prevent="bindEmail()">
+          <div class="col-12">
+            <div class="form-text" x-text="t('绑定后可用邮箱找回密码。需要新邮箱收到的验证码与当前密码。','The bound email can be used for password recovery; the code sent to it and your current password are required.')"></div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('新邮箱','New Email')"></label>
+            <input class="form-control form-control-sm" type="email" x-model="bindForm.email"/>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('邮箱验证码','Email Code')"></label>
+            <div class="input-group input-group-sm">
+              <input class="form-control" x-model="bindForm.code"/>
+              <button type="button" class="btn btn-outline-secondary" @click="sendBindCode()" :disabled="bindSending || bindCountdown > 0"
+                      x-text="bindCountdown > 0 ? bindCountdown + 's' : t('发送验证码','Send Code')"></button>
+            </div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('当前密码','Current Password')"></label>
+            <input class="form-control form-control-sm" type="password" x-model="bindForm.password"/>
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="bindSaving" x-text="t('绑定邮箱','Bind Email')"></button>
           </div>
         </form>
       </div>
@@ -1665,7 +1695,11 @@ function portForwardApp() {
 	    _sessionsModal: null,
 	    _sessionsTimer: null,
 	    // 身份与用户管理
-	    me: { id:'', username:'', role:'', group_id:'', group_name:'', quota:{}, must_change_password:false },
+	    me: { id:'', username:'', role:'', email:'', group_id:'', group_name:'', quota:{}, must_change_password:false },
+	    emailReady: false,    // SMTP 已配置（public-config），驱动账号页的绑定入口
+	    bindOpen: false,
+	    bindSending: false, bindSaving: false, bindCountdown: 0,
+	    bindForm: { email:'', code:'', password:'' },
 	    users: [],
 	    groups: [],
 	    myCodes: [],          // 规则表单用的本人访问码（普通用户）
@@ -1802,6 +1836,11 @@ function portForwardApp() {
 
     showAccountModal() {
       this.pwForm = { old_password:'', new_password:'' }
+      this.bindOpen = false
+      // 绑定入口依赖 SMTP 状态；public-config 是公开端点，每次打开取一次。
+      fetch('/api/auth/public-config').then(r => r.json()).then(d => {
+        if (d.success && d.data) this.emailReady = !!d.data.email_ready
+      }).catch(() => {})
       this._accountModal.show()
     },
 
@@ -1827,6 +1866,72 @@ function portForwardApp() {
       } catch (e) {
         showToast('danger', _t('网络错误: ','Network error: ') + e.message)
       } finally { this.pwSaving = false }
+    },
+
+    // --- 绑定/更换邮箱（登录自助；SMTP 已配置才可用）---
+
+    openBindEmail() {
+      this.bindForm = { email: this.me.email || '', code: '', password: '' }
+      this.bindCountdown = 0
+      this.bindOpen = true
+    },
+
+    async sendBindCode() {
+      if (this.bindCountdown > 0) return
+      if (!this.bindForm.email.trim()) {
+        showToast('warning', _t('请先填写新邮箱','Enter the new email first'))
+        return
+      }
+      this.bindSending = true
+      try {
+        const res = await fetch('/api/account/email-code', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ email: this.bindForm.email.trim() })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('验证码已发送','Code sent'))
+          let n = 60
+          this.bindCountdown = n
+          const timer = setInterval(() => {
+            n--
+            this.bindCountdown = n
+            if (n <= 0) clearInterval(timer)
+          }, 1000)
+        } else {
+          showToast('danger', d.message || _t('发送失败','Send failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.bindSending = false }
+    },
+
+    async bindEmail() {
+      if (!this.bindForm.email.trim() || !this.bindForm.code.trim() || !this.bindForm.password) {
+        showToast('warning', _t('请填写新邮箱、验证码与当前密码','Fill in the new email, the code and the current password'))
+        return
+      }
+      this.bindSaving = true
+      try {
+        const res = await fetch('/api/account/email', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            email: this.bindForm.email.trim(),
+            code: this.bindForm.code.trim(),
+            password: this.bindForm.password
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('邮箱已绑定','Email bound'))
+          this.me.email = this.bindForm.email.trim().toLowerCase()
+          this.bindOpen = false
+        } else {
+          showToast('danger', d.message || _t('绑定失败','Bind failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally { this.bindSaving = false }
     },
 
     async logout() {

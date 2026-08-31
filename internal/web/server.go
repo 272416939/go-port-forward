@@ -274,6 +274,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		loginIPFail:   users.NewRateLimiter(30, 15*time.Minute),
 		loginUserFail: users.NewRateLimiter(10, 15*time.Minute),
 		emailCodeIP:   users.NewRateLimiter(20, time.Hour),
+		bindCodeIP:    users.NewRateLimiter(20, time.Hour),
 	}
 
 	// 认证（公开 + 登录后）
@@ -281,6 +282,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/logout", h.logout)
 	mux.HandleFunc("GET /api/auth/me", s.authed(h.me))
 	mux.HandleFunc("POST /api/auth/password", s.authed(h.changePassword))
+
+	// 账号自助绑定/更换邮箱（登录后；SMTP 未配置时报 501 语义错误）
+	mux.HandleFunc("POST /api/account/email-code", s.authed(h.bindEmailCode))
+	mux.HandleFunc("POST /api/account/email", s.authed(h.bindEmail))
 
 	// 自助注册与找回密码（公开；注册受全局开关控制）
 	mux.HandleFunc("GET /api/auth/public-config", h.publicConfig)

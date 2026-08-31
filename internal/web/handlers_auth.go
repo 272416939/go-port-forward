@@ -3,11 +3,13 @@ package web
 // 认证接口：登录、登出、当前身份、自助改密。
 
 import (
+	"errors"
 	"net/http"
 
 	"go-port-forward/internal/auth"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
+	"go-port-forward/internal/storage"
 )
 
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +70,13 @@ func (h *handler) me(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
+	// 会话里的身份是登录时的快照；邮箱这类自助资料要反映库里的最新值。
+	// 应急后门没有存储记录，保持快照。停用等状态由中间件与会话撤销兜底。
+	if me.ID != "rescue" {
+		if fresh, err := h.users.Get(me.ID); err == nil {
+			me = fresh
+		}
+	}
 	h.writeIdentity(w, me)
 }
 
@@ -115,4 +124,64 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	// 改密会注销全部会话（含本次请求用的那个），前端需要重新登录。
 	h.sessions.ClearCookie(w)
 	okWithMessage(w, nil, "密码已修改，请重新登录 | password changed, please sign in again")
+}
+
+// bindEmailCode handles POST /api/account/email-code —— 向要绑定的新邮箱发码。
+//
+// 与公开发码端点（/api/auth/email-code）隔离：bind 用途必须带登录态，
+// 公开端点不受理。应急后门账号没有存储记录，无可绑定。
+func (h *handler) bindEmailCode(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		unauthorized(w)
+		return
+	}
+	if me.ID == "rescue" {
+		fail(w, http.StatusBadRequest, "应急账号不支持绑定邮箱 | the rescue account cannot bind an email")
+		return
+	}
+	var req models.BindEmailCodeRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.bindCodeIP.Allow(clientIP(r)) {
+		logger.S.Warnw("绑定邮箱发码被限频 | bind email code rate limited", "remote", r.RemoteAddr)
+		fail(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试 | too many requests, please try again later")
+		return
+	}
+	if err := h.users.SendBindEmailCode(me.ID, req.Email); err != nil {
+		writePublicError(w, err)
+		return
+	}
+	okWithMessage(w, nil, "验证码已发送，请查收邮箱（10 分钟内有效） | the code has been sent")
+}
+
+// bindEmail handles POST /api/account/email —— 绑定/更换自己的邮箱。
+func (h *handler) bindEmail(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		unauthorized(w)
+		return
+	}
+	if me.ID == "rescue" {
+		fail(w, http.StatusBadRequest, "应急账号不支持绑定邮箱 | the rescue account cannot bind an email")
+		return
+	}
+	var req models.BindEmailRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.users.BindOwnEmail(me.ID, req.Password, req.Email, req.Code); err != nil {
+		if errors.Is(err, storage.ErrEmailExists) {
+			// 与注册同一纪律：不回显「这个邮箱有没有被注册」，避免登录用户
+			// 拿绑定接口绘制本站用户名单。
+			fail(w, http.StatusBadRequest, "绑定失败：该邮箱不可用 | failed to bind: this email is unavailable")
+			return
+		}
+		writePublicError(w, err)
+		return
+	}
+	okWithMessage(w, nil, "邮箱已绑定 | email bound")
 }

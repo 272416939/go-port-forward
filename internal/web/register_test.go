@@ -202,3 +202,75 @@ func TestWritePublicErrorEmailMapping(t *testing.T) {
 
 func strptr(s string) *string { return &s }
 func intptr(i int) *int       { return &i }
+
+// 绑定/更换邮箱：登录态 + 当前密码 + purpose=bind 验证码三重前置；
+// 重复邮箱按防枚举纪律脱敏；bind 的码不得跨用途使用。
+func TestBindEmailFlow(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+	if _, err := f.svc.UpdateSMTP(&models.UpdateSMTPRequest{
+		Host: strptr("smtp.x.com"), Port: intptr(587), From: strptr("n@x.com"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SetVerifier(emailtest.NewFixed())
+
+	// 未登录 → 401。
+	rec := httptest.NewRecorder()
+	f.h.bindEmail(rec, postJSON("/api/account/email", `{"email":"a@x.com","code":"654321","password":"password123"}`, nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录应 401，got %d", rec.Code)
+	}
+	// 发码端点同样要登录态。
+	rec = httptest.NewRecorder()
+	f.h.bindEmailCode(rec, postJSON("/api/account/email-code", `{"email":"a@x.com"}`, nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("发码未登录应 401，got %d", rec.Code)
+	}
+
+	// 当前密码错误 → 401。
+	rec = httptest.NewRecorder()
+	f.h.bindEmail(rec, postJSON("/api/account/email", `{"email":"a@x.com","code":"654321","password":"wrong-pass"}`, f.alice))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("密码错误应 401，got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 登录态发码 → 固定码生效（SendBindEmailCode 会规范化邮箱）。
+	rec = httptest.NewRecorder()
+	f.h.bindEmailCode(rec, postJSON("/api/account/email-code", `{"email":"Alice@X.com"}`, f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("发码应成功，got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 正确密码 + 固定验证码 → 绑定成功，me 回显 email。
+	rec = httptest.NewRecorder()
+	f.h.bindEmail(rec, postJSON("/api/account/email", `{"email":"Alice@X.com","code":"654321","password":"password123"}`, f.alice))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("绑定应成功，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	f.h.me(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/auth/me", nil), f.alice))
+	if !strings.Contains(rec.Body.String(), `"email":"alice@x.com"`) {
+		t.Fatalf("me 应带回规范化后的 email：%s", rec.Body.String())
+	}
+
+	// bob 重新发码后再绑同一邮箱：验证码通过，卡在唯一性 → 400 且文案脱敏
+	// （不出现「已注册」语义）。
+	rec = httptest.NewRecorder()
+	f.h.bindEmailCode(rec, postJSON("/api/account/email-code", `{"email":"alice@x.com"}`, f.bob))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bob 发码应成功，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	f.h.bindEmail(rec, postJSON("/api/account/email", `{"email":"alice@x.com","code":"654321","password":"password123"}`, f.bob))
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "already") {
+		t.Fatalf("重复邮箱应 400 脱敏：got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// purpose 隔离：bind 签发的码不能用于找回密码（reset 键下没有条目）。
+	rec = httptest.NewRecorder()
+	f.h.forgotPassword(rec, postJSON("/api/auth/forgot-password", `{"email":"alice@x.com","code":"654321","new_password":"newpass123"}`, nil))
+	if rec.Code == http.StatusOK {
+		t.Fatal("bind 验证码不得用于重置密码")
+	}
+}

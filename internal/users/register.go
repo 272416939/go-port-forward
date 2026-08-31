@@ -209,6 +209,59 @@ func (s *Service) SendEmailCode(emailRaw, purpose string) error {
 	return s.verifier.Issue(email, purpose)
 }
 
+// SendBindEmailCode 向登录用户要绑定的新邮箱发验证码（purpose=bind）。
+//
+// 与公开发码端点隔离：bind 必须携带登录态，公开端点永远不受理 bind 用途，
+// 否则它就成了「向任意邮箱投递可信邮件」的匿名通道。
+func (s *Service) SendBindEmailCode(userID, emailRaw string) error {
+	smtpCfg, err := s.store.SMTPConfig()
+	if err != nil {
+		return err
+	}
+	if !smtpCfg.Configured() {
+		return fmt.Errorf("%w: 邮件功能未配置 | email is not configured", ErrEmailNotConfigured)
+	}
+	email, err := models.ValidateEmail(emailRaw)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUser, err)
+	}
+	return s.verifier.Issue(email, models.PurposeBind)
+}
+
+// BindOwnEmail 给账号绑定/更换邮箱。验证码证明新邮箱的控制权，当前密码
+// 证明请求者不是偷来的会话——邮箱一旦绑上就开通了找回密码的通路，只凭
+// cookie 就能绑等于给了会话劫持者一条改密旁路（改密本身要旧密码）。
+// 唯一性由 storage.UpdateUserEmail 在写事务内把关。
+func (s *Service) BindOwnEmail(userID, password, emailRaw, code string) error {
+	smtpCfg, err := s.store.SMTPConfig()
+	if err != nil {
+		return err
+	}
+	if !smtpCfg.Configured() {
+		return fmt.Errorf("%w: 邮件功能未配置 | email is not configured", ErrEmailNotConfigured)
+	}
+	u, err := s.store.GetUser(userID)
+	if err != nil {
+		return err
+	}
+	// 先验密码再验码：密码错了不该消费掉验证码（它是限频资源）。
+	if !auth.CheckPassword(u.PasswordHash, password) {
+		return ErrBadCredentials
+	}
+	email, err := models.ValidateEmail(emailRaw)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUser, err)
+	}
+	if err := s.verifier.Verify(email, models.PurposeBind, code); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUser, err)
+	}
+	if err := s.store.UpdateUserEmail(userID, email); err != nil {
+		return err
+	}
+	logger.S.Infow("账号已绑定邮箱 | email bound", "user", u.Username, "has_email", email != "")
+	return nil
+}
+
 // ResetPasswordWithCode 凭邮箱验证码重置密码。
 //
 // 与 SendEmailCode 同源的防枚举考量在重置这一步不成立——验证码已验证通过，

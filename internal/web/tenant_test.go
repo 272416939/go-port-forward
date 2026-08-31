@@ -92,6 +92,7 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 			loginIPFail:   users.NewRateLimiter(1000, 15*time.Minute),
 			loginUserFail: users.NewRateLimiter(1000, 15*time.Minute),
 			emailCodeIP:   users.NewRateLimiter(1000, time.Hour),
+			bindCodeIP:    users.NewRateLimiter(1000, time.Hour),
 		},
 		svc:    svc,
 		admin:  mk("admin", models.RoleAdmin, ""),

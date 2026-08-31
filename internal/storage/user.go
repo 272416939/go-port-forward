@@ -244,6 +244,53 @@ func (s *boltStore) SaveUser(u *models.User) error {
 	})
 }
 
+// UpdateUserEmail 自助绑定/更换邮箱。与 CreateUser 同一套唯一性纪律：查重
+// 与写入必须在同一个写事务里，两个并发绑定同一邮箱只有一方能成功。事务内
+// 重读记录只改 Email 字段——用外部传来的整个模型覆盖会踩掉并发改动的其他
+// 字段（丢更新）。
+func (s *boltStore) UpdateUserEmail(id, email string) error {
+	want := strings.ToLower(strings.TrimSpace(email))
+	if want == "" {
+		return fmt.Errorf("storage: email is required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(usersBucket)
+		v := b.Get([]byte(id))
+		if v == nil {
+			return fmt.Errorf("%w: %s", ErrUserNotFound, id)
+		}
+		var r userRecord
+		if err := json.Unmarshal(v, &r); err != nil {
+			return err
+		}
+		dup := false
+		if err := b.ForEach(func(k, ov []byte) error {
+			if string(k) == id {
+				return nil
+			}
+			var other userRecord
+			if err := json.Unmarshal(ov, &other); err != nil {
+				return err
+			}
+			if strings.EqualFold(strings.TrimSpace(other.Email), want) {
+				dup = true
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if dup {
+			return fmt.Errorf("%w: %s", ErrEmailExists, want)
+		}
+		r.Email = want
+		data, err := json.Marshal(&r)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(id), data)
+	})
+}
+
 // DeleteUser 删除用户；拒绝删掉最后一个管理员（否则面板将无人可管）。
 func (s *boltStore) DeleteUser(id string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {

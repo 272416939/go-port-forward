@@ -32,6 +32,7 @@ type handler struct {
 	loginIPFail   *users.RateLimiter // 登录失败按源 IP 计数
 	loginUserFail *users.RateLimiter // 登录失败按用户名计数
 	emailCodeIP   *users.RateLimiter // 验证码发送按源 IP 计数（成功请求也计）
+	bindCodeIP    *users.RateLimiter // 绑定邮箱发码按源 IP 计数（登录态端点）
 }
 
 type dashboardResponse struct {
