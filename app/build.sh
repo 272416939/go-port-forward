@@ -30,7 +30,23 @@ build_client() {
     log "Done: $OUT/pf-client.exe + wintun.dll"
 }
 
+pack_release_zip() {
+    # 发布分发单元：exe 与 wintun.dll 必须同目录，打成 zip 一起发。
+    # Git Bash 无 zip 命令，回退 PowerShell Compress-Archive；两者皆无则跳过并提示。
+    local zip_name="pf-client-${VERSION}-windows-amd64.zip"
+    if command -v zip >/dev/null 2>&1; then
+        (cd "$OUT" && zip -q "$zip_name" pf-client.exe wintun.dll)
+    elif command -v pwsh >/dev/null 2>&1; then
+        pwsh -NoProfile -Command "Compress-Archive -Path 'bin/pf-client.exe','bin/wintun.dll' -DestinationPath 'bin/${zip_name}' -Force"
+    else
+        log "跳过 zip 打包：既无 zip 也无 pwsh"
+        return 0
+    fi
+    log "Packaged: $OUT/$zip_name"
+}
+
 mkdir -p "$OUT"
 build_client
+pack_release_zip
 
 log "版本: $VERSION；产物在 app/$OUT/"
