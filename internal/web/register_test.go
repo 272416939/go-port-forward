@@ -7,11 +7,13 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"go-port-forward/internal/email"
 	"go-port-forward/internal/models"
 	"go-port-forward/pkg/emailtest"
 )
@@ -180,6 +182,21 @@ func TestSettingsCarriesSMTPConfigured(t *testing.T) {
 	f.h.getSettings(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/settings", nil), f.admin))
 	if !strings.Contains(rec.Body.String(), `"smtp_configured":true`) {
 		t.Fatalf("配置后应返回 smtp_configured=true：%s", rec.Body.String())
+	}
+}
+
+// 发信失败 / 验证码限频必须按语义映射（503/429），不能兜底成 500——
+// 那会把「邮件服务暂时不可用」显示成「服务器内部错误」。
+func TestWritePublicErrorEmailMapping(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writePublicError(rec, fmt.Errorf("%w: dial tcp: refused", email.ErrSendFailed))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("发送失败应映射 503，got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	writePublicError(rec, fmt.Errorf("%w: 请 1 分钟后再试", email.ErrCodeRateLimited))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("验证码限频应映射 429，got %d", rec.Code)
 	}
 }
 

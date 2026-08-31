@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"mime"
 	"mime/quotedprintable"
@@ -28,6 +29,15 @@ import (
 // SendTimeout 是一次 SMTP 会话的上限。SMTP 服务器挂起是真实场景，
 // 不能让一个验证码请求拖住 HTTP 工作线程。
 const SendTimeout = 5 * time.Second
+
+// 服务层错误 sentinel：Issue 的失败必须能被上层按语义映射成 4xx/5xx，
+// 裸 fmt.Errorf 会被 writeUserError 兜底成「服务器内部错误」。
+var (
+	// ErrSendFailed 表示 SMTP 已配置但发信失败（主机不可达、认证被拒等）。
+	ErrSendFailed = errors.New("email send failed")
+	// ErrCodeRateLimited 表示验证码发送触发限频（60s 重发间隔 / 每小时上限）。
+	ErrCodeRateLimited = errors.New("email code rate limited")
+)
 
 // Mailer 是发信能力的抽象（测试用 fake 替换，不打真邮件）。
 type Mailer interface {
@@ -248,11 +258,11 @@ func (s *VerificationService) Issue(email, purpose string) error {
 	if len(times) >= CodeHourlyLimit {
 		s.mu.Unlock()
 		logger.S.Warnw("验证码发送被限频", "email", maskEmail(email))
-		return fmt.Errorf("发送过于频繁，请稍后再试 | too many requests")
+		return fmt.Errorf("%w: 发送过于频繁，请稍后再试 | too many requests", ErrCodeRateLimited)
 	}
 	if len(times) > 0 && now.Sub(times[len(times)-1]) < CodeResendGap {
 		s.mu.Unlock()
-		return fmt.Errorf("发送过于频繁，请 1 分钟后再试 | please wait a minute before resending")
+		return fmt.Errorf("%w: 发送过于频繁，请 1 分钟后再试 | please wait a minute before resending", ErrCodeRateLimited)
 	}
 
 	code, err := randomCode()
@@ -269,7 +279,7 @@ func (s *VerificationService) Issue(email, purpose string) error {
 
 	if err := s.Mailer.Send(email, verificationSubject(purpose), verificationBody(code, purpose)); err != nil {
 		logger.S.Warnw("验证码邮件发送失败", "email", maskEmail(email), "err", err)
-		return fmt.Errorf("验证码邮件发送失败，请稍后重试 | failed to send the code")
+		return fmt.Errorf("%w: 验证码邮件发送失败，请稍后重试 | failed to send the code", ErrSendFailed)
 	}
 	logger.S.Infow("验证码已发送", "email", maskEmail(email), "purpose", purpose)
 	return nil

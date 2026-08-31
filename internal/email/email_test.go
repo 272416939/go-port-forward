@@ -6,6 +6,7 @@ package email
 // 单测锁的是验证码的安全语义与邮件消息的编码正确性。
 
 import (
+	"errors"
 	"io"
 	"mime/quotedprintable"
 	"strings"
@@ -109,16 +110,18 @@ func TestPurposeIsolation(t *testing.T) {
 	}
 }
 
-// 60 秒重发间隔 + 每小时 5 封上限。不限频的话，发码接口就是一条现成的
-// 垃圾邮件中继。
+	// 60 秒重发间隔 + 每小时 5 封上限。不限频的话，发码接口就是一条现成的
+	// 垃圾邮件中继。
 func TestIssueRateLimit(t *testing.T) {
 	s, _ := newTestService()
 	if err := s.Issue("a@x.com", models.PurposeRegister); err != nil {
 		t.Fatal(err)
 	}
-	// 60 秒内重发被拒。
+	// 60 秒内重发被拒，且必须带限频 sentinel（上层映射 429 用）。
 	if err := s.Issue("a@x.com", models.PurposeRegister); err == nil {
 		t.Fatal("60 秒内的重发应被拒绝")
+	} else if !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("重发间隔错误应包装 ErrCodeRateLimited：%v", err)
 	}
 	// 用测试时钟快进，把 5 封发满。
 	base := s.Now()
@@ -132,10 +135,26 @@ func TestIssueRateLimit(t *testing.T) {
 	s.Now = func() time.Time { return base.Add(5 * 61 * time.Second) }
 	if err := s.Issue("a@x.com", models.PurposeRegister); err == nil {
 		t.Fatal("超出每小时上限应被拒绝")
+	} else if !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("每小时上限错误应包装 ErrCodeRateLimited：%v", err)
 	}
 	// 另一个邮箱不受影响。
 	if err := s.Issue("b@x.com", models.PurposeRegister); err != nil {
 		t.Fatalf("限频应按邮箱隔离：%v", err)
+	}
+}
+
+// 发送失败必须包装 ErrSendFailed：上层靠它映射 503 与「稍后重试」文案，
+// 裸错误会被兜底成「服务器内部错误」（LESSONS#70 同源）。
+func TestIssueSendFailureWrapped(t *testing.T) {
+	s, m := newTestService()
+	m.err = errors.New("dial tcp: connection refused")
+	err := s.Issue("a@x.com", models.PurposeRegister)
+	if err == nil {
+		t.Fatal("mailer 失败应上抛")
+	}
+	if !errors.Is(err, ErrSendFailed) {
+		t.Fatalf("应包装 ErrSendFailed：%v", err)
 	}
 }
 

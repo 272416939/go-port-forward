@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 
+	"go-port-forward/internal/email"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
 	"go-port-forward/internal/storage"
@@ -104,8 +105,12 @@ func writePublicError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, users.ErrEmailNotConfigured):
 		fail(w, http.StatusNotImplemented, err.Error())
-	case errors.Is(err, users.ErrRateLimited):
+	case errors.Is(err, users.ErrRateLimited), errors.Is(err, email.ErrCodeRateLimited):
 		fail(w, http.StatusTooManyRequests, err.Error())
+	case errors.Is(err, email.ErrSendFailed):
+		// SMTP 已配置但发信失败：是上游邮件服务的问题，不是站点故障，
+		// 必须把「稍后重试」的原文带给用户而不是兜底成服务器内部错误。
+		fail(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, users.ErrRegistrationClosed):
 		fail(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, storage.ErrEmailExists), errors.Is(err, storage.ErrUserExists):

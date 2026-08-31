@@ -164,6 +164,11 @@ let emailReady = false
       emailReady = !!d.data.email_ready
       document.getElementById('tabRegister').hidden = !d.data.registration_open
       document.getElementById('tabForgot').hidden = !emailReady
+      // 邮箱输入框只在已配置 SMTP 时出现：未配置时后端本就忽略邮箱字段；
+      // 已配置时邮箱与验证码必填（后端强制，前端同步入 required 提前拦截）。
+      document.getElementById('rgEmailBox').hidden = !emailReady
+      document.getElementById('rgEmail').required = emailReady
+      document.getElementById('rgCode').required = emailReady
     }
   } catch (e) { /* 拿不到就只显示登录，最坏情况可用 */ }
 })()
