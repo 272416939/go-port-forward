@@ -217,6 +217,8 @@ The generated file is a flat YAML with **no comments, keys sorted alphabetically
 indent**; `storage.path` and `log.path` are written as absolute paths anchored at the
 executable's directory (shown relative below for readability).
 
+**① 原样生成 | As generated**（无注释，可与文件逐行对照 uncommented, line-by-line comparable）
+
 ```yaml
 forward:
     buffer_size: 32768
@@ -266,6 +268,71 @@ web:
   旧配置带上它也能加载，但该项被忽略并在启动时告警一次。
   `tunnel.psk` is deprecated — every access code now carries its own key; the field is
   written empty and ignored with a one-time startup warning when present in old configs.
+
+**② 逐项注释 | Annotated, key by key**（键顺序与生成文件一致，可直接对照；`storage.path` /
+`log.path` 生成时为 exe 目录锚定的绝对路径，此处以相对形式示意。same key order as the
+generated file; the two path keys are absolute at generation time）
+
+```yaml
+forward:                     # ── 转发核心 | Forwarding core ──
+    buffer_size: 32768       # I/O 缓冲区大小（字节）| I/O buffer size (bytes)
+    connlog_max_entries: 2000
+                             # 连接日志保留上限的兜底值；正式生效值在面板「全局设置 → 每用户日志保留上限」
+                             # （默认 10000 条，超出裁掉最旧）| Fallback cap only; the effective
+                             # per-user cap lives in Global Settings (default 10000 rows)
+    dial_timeout: 10         # 出站连接超时（秒）| Outbound dial timeout (seconds)
+    pool_size: 0             # 转发协程池容量，0 = 自动（CPU 数 × 64）| Forwarding pool, 0 = auto (NumCPU × 64)
+    udp_timeout: 30          # UDP 会话空闲超时（秒），超时会话回收、下个包新建 | UDP session idle timeout (s)
+gc:                          # ── 内存回收 | Garbage collection ──
+    enable_monitoring: true  # 性能监控 | Performance monitoring
+    enabled: true            # 周期性 GC 开关 | Periodic GC switch
+    interval_seconds: 300    # GC 间隔（秒）| GC interval (seconds)
+    memory_threshold_mb: 100 # 内存超过该值（MB）触发 GC，0 = 关闭 | Threshold-triggered GC (MB), 0 = off
+    strategy: standard       # standard 标准 / aggressive 激进（GC 后向系统归还内存）/
+                             # gentle 温和（仅内存压力大时执行）/ adaptive 自适应（按内存增长速度调整）
+log:                         # ── 日志 | Logging ──
+    compress: true           # 滚动归档是否压缩 | Compress rotated logs
+    level: info              # debug / info / warn / error。例行日志已降为 debug，info 级很安静
+                             # routine logs are debug-level; info stays quiet
+    max_age_days: 30         # 日志保留天数 | Days to keep
+    max_backups: 5           # 保留的历史文件份数 | Rotated files to keep
+    max_size_mb: 50          # 单文件上限（MB），超出滚动 | Max size per file (MB)
+    path: logs/app.log       # 日志文件（生成时为 exe 目录绝对路径）| written as an absolute path
+                             # anchored at the exe directory
+pool:                        # ── 全局协程池 | Global goroutine pool ──
+    pre_alloc: true          # 启动时预分配池槽位 | Pre-allocate pool slots at startup
+    size: 10000              # 池容量 | Pool capacity
+storage:                     # ── 存储 | Storage ──
+    path: data/rules.db      # bbolt 数据库（规则/用户/访问码/连接日志/SMTP 全在此）；
+                             # 生成时为 exe 目录绝对路径 | bbolt database, absolute path at the
+                             # exe directory in the generated file
+tunnel:                      # ── 内置隧道服务端 | Built-in tunnel server ──
+    enabled: false           # 开启后隧道服务端随主程序常驻；完整回程配置仅 Linux 生效（见透明模式章节）
+                             # embeds the tunnel server; the full return-path setup is Linux-only
+    listen: :7947            # 隧道 UDP 监听，防火墙记得放行 | Tunnel UDP listen — allow it in the firewall
+    nat: true                # 自动配置回程路径：ip_forward + fwmark 策略路由 + FORWARD/INPUT 规则；
+                             # 刻意不使用 MASQUERADE（见透明模式章节）| auto-configure the return
+                             # path; deliberately no MASQUERADE
+    psk: ""                  # 已废弃：多用户协议为每个访问码独立密钥，此项被忽略并告警一次
+                             # deprecated & ignored; kept empty so old configs still load
+    public_addr: ""          # 兜底：写进接入码的中转机地址（host 或 host:port，如 1.2.3.4:7947）。
+                             # 优先用面板「全局设置 → 中转机地址」；两处都空时自动探测公网 IP，
+                             # 面板经 CDN/反代时务必显式配置 | fallback relay address embedded
+                             # in access codes; prefer Global Settings, set explicitly behind CDN
+    tun_addr: 10.66.0.1/16   # 服务端隧道地址 + 访问码地址池（一个访问码占一个地址；/24 仅 253 个会耗尽）
+                             # server address + access-code address pool
+    tun_name: pftun0         # TUN 设备名 | TUN device name
+web:                         # ── 管理面板 | Web panel ──
+    host: 127.0.0.1          # 面板监听地址；多用户对外时改 0.0.0.0 并置于 TLS 反代之后
+                             # listen address; use 0.0.0.0 behind a TLS proxy for multi-user serving
+    port: 8989               # 面板端口 | Panel port
+    secure_cookie: false     # 会话 cookie 加 Secure 标记；仅 HTTPS 访问时开启，否则浏览器拒存
+                             # cookie、登录直接失败 | enable ONLY behind HTTPS
+    # username: admin        # ── 以下两行默认不写入文件；需要应急后门时手动添加 ──
+    # password: secret       # 仅从本机回环访问时生效（忘记管理员密码时 SSH 到机器上救急）；
+                             # 对公网生效不可配置 | loopback-only rescue account, add manually;
+                             # not configurable beyond loopback
+```
 
 ### 字段逐项讲解 | Field Reference
 
