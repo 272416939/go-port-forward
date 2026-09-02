@@ -16,6 +16,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// udpSocketBuffer 是 UDP socket 读写缓冲的目标值。Linux 实际生效值受
+// net.core.rmem_max/wmem_max 钳制。
+const udpSocketBuffer = 4 << 20 // 4MB
+
 // udpAddrKey 是 UDP 地址的固定大小可比较 key，避免每包调用 String() 产生字符串分配。
 // udpAddrKey is a fixed-size comparable key for UDP addresses, avoiding per-packet
 // string allocation from String().
@@ -255,6 +259,16 @@ func (f *UDPForwarder) finalizeSession(sess *udpSession, ev models.ConnEvent) {
 	})
 }
 
+// relayBack 是透明模式回程的最后一跳，绝不可省。
+//
+// 透明转发链路：玩家包 → 本转发器 → 透明 socket（以玩家 IP:端口 为源）写入
+// 隧道 → 后端。后端回包沿隧道回到中转机后被写进 pftun0，fwmark 策略路由把
+// 它「本机投递」（setup_linux.go 的 local 表 + INPUT 只放行 ESTABLISHED），
+// conntrack 按反向元组把它送进这个透明 socket 的接收队列——就是这里读出来
+// 的那个包。再经转发口（src=监听端口 19132 这类）发回玩家，源端口正好是
+// 玩家当初请求的端口。删掉这个 goroutine，所有透明回包会静默烂在接收队列
+// 里：入向照常、回程全灭、日志零痕迹（2026-09-02 全服进不去事故的根因，
+// 当时的注释误称「回包不经过此 socket」，未实测即删码，教训见 LESSONS#15）。
 func (f *UDPForwarder) relayBack(clientAddr *net.UDPAddr, sess *udpSession) {
 	defer f.wg.Done()
 	// Use pooled buffer for relay
@@ -273,10 +287,6 @@ func (f *UDPForwarder) relayBack(clientAddr *net.UDPAddr, sess *udpSession) {
 	}
 }
 
-// udpSocketBuffer 是 UDP socket 读写缓冲的目标值。Linux 实际生效值受
-// net.core.rmem_max/wmem_max 钳制。
-const udpSocketBuffer = 4 << 20 // 4MB
-
 func (f *UDPForwarder) cleanupLoop() {
 	defer f.wg.Done()
 	ticker := time.NewTicker(f.timeout / 2)
@@ -286,27 +296,17 @@ func (f *UDPForwarder) cleanupLoop() {
 		case <-f.stopCh:
 			return
 		case <-ticker.C:
-			// Close 必须在锁内、先于条目摘除对外生效：否则出现「条目已删、
-			// 旧 socket 仍绑着玩家源端口」的窗口，期间同 key 的新包会走完整
-			// 建会话路径去 bind，撞 EADDRINUSE 被丢弃（2026-09-02 生产日志
-			// 实录：玩家重连复用 NAT 端口正好落进窗口，RakNet 握手全灭）。
-			// Close 是微秒级 syscall，留在锁内；慢的 finalizeSession（要拿
-			// sessionRegistry 的锁 + 发日志）继续留在锁外，风暴清理不卡热路径。
-			now := time.Now()
-			expired := make([]*udpSession, 0, 16)
 			f.mu.Lock()
+			now := time.Now()
 			for k, s := range f.sessions {
 				if now.Sub(s.lastSeen) > f.timeout {
 					_ = s.upstream.Close()
+					f.finalizeSession(s, models.ConnEventLeave)
 					delete(f.sessions, k)
-					expired = append(expired, s)
+					f.active.Add(-1)
 				}
 			}
 			f.mu.Unlock()
-			for _, s := range expired {
-				f.finalizeSession(s, models.ConnEventLeave)
-				f.active.Add(-1)
-			}
 		}
 	}
 }
@@ -345,15 +345,26 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 		return nil, false
 	}
 
-	// 注册表登记与 join 日志都在锁外做：obtain 要拿 sessionRegistry 的锁
-	//（每 10 秒的活跃 IP 快照会把它排他占住一阵），拿在 f.mu 临界区里，
-	// 就形成「f.mu → sessionRegistry.mu」的锁链——快照期间所有老会话的包
-	// 都在 f.mu 上排队。
-	skey := sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr)
-	var sinfo *sessionInfo
+	f.mu.Lock()
+	if sess, ok := f.sessions[key]; ok {
+		sess.lastSeen = now
+		f.mu.Unlock()
+		_ = up.Close()
+		return sess, false
+	}
+	if f.isStopping() {
+		f.mu.Unlock()
+		_ = up.Close()
+		return nil, false
+	}
+	sess = &udpSession{
+		upstream: up,
+		lastSeen: now,
+		key:      sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr),
+	}
 	if f.svc != nil && f.svc.sessions != nil {
-		sinfo = f.svc.sessions.obtain(skey, &sessionInfo{
-			key:      skey,
+		sess.sinfo = f.svc.sessions.obtain(sess.key, &sessionInfo{
+			key:      sess.key,
 			Protocol: models.ProtocolUDP,
 			RuleID:   f.rule.ID,
 			RuleName: f.rule.Name,
@@ -372,53 +383,21 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 			Event:    models.ConnEventJoin,
 		})
 	}
-
-	// 关键区只做 map 插入与双检：并发创建时输家关掉多余的 socket。
-	f.mu.Lock()
-	if sess, ok := f.sessions[key]; ok {
-		sess.lastSeen = now
-		f.mu.Unlock()
-		_ = up.Close()
-		return sess, false
-	}
-	if f.isStopping() {
-		f.mu.Unlock()
-		_ = up.Close()
-		return nil, false
-	}
-	sess = &udpSession{
-		upstream: up,
-		lastSeen: now,
-		key:      skey,
-		sinfo:    sinfo,
-	}
 	f.sessions[key] = sess
 	f.active.Add(1)
 	f.totalConns.Add(1)
+	f.wg.Add(1)
+	go f.relayBack(cloneUDPAddr(srcAddr), sess)
 	f.mu.Unlock()
-
-	// relayBack 在锁外起。透明模式的回包不经此 socket（见 dialUpstream 注释），
-	// 起 goroutine 也永远读不到数据——直接跳过，省下每个会话一个挂起的
-	// goroutine + fd；重试风暴下的会话峰值因此减半。
-	if !f.rule.Transparent {
-		f.wg.Add(1)
-		go f.relayBack(cloneUDPAddr(srcAddr), sess)
-	}
 	return sess, true
 }
 
 // dialUpstream 建立到目标的上游 socket；透明模式以玩家 IP:端口 为源绑定
-// （IP_TRANSPARENT，需 root；回包经隧道/SNAT 独立路径返回，不经过此 socket）。
+// （IP_TRANSPARENT，需 root）。回包沿 fwmark 策略路由本机投递回到这个
+// socket 的接收队列，由 relayBack 读出并经转发口发回玩家（见 relayBack 注释）。
 func (f *UDPForwarder) dialUpstream(srcAddr *net.UDPAddr) (*net.UDPConn, error) {
 	if !f.rule.Transparent {
-		up, err := net.DialUDP("udp", nil, f.targetAddr)
-		if err != nil {
-			return nil, err
-		}
-		// 通用模式的回包从这里读（relayBack），缓冲与转发口对齐。
-		_ = up.SetReadBuffer(udpSocketBuffer)
-		_ = up.SetWriteBuffer(udpSocketBuffer)
-		return up, nil
+		return net.DialUDP("udp", nil, f.targetAddr)
 	}
 	pc, err := transparentListenPacket(srcAddr.String())
 	if err != nil {
