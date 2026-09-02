@@ -286,22 +286,24 @@ func (f *UDPForwarder) cleanupLoop() {
 		case <-f.stopCh:
 			return
 		case <-ticker.C:
-			// 持锁只做「收集并摘除过期条目」这一件轻事。close 是 syscall、
-			// finalizeSession 要拿 sessionRegistry 的锁——放在 f.mu 里，风暴
-			// 制造出成千短命会话时，每轮清理突发会把该规则所有玩家的包全部
-			// 卡住（周期性全服卡顿的组成部分）。
+			// Close 必须在锁内、先于条目摘除对外生效：否则出现「条目已删、
+			// 旧 socket 仍绑着玩家源端口」的窗口，期间同 key 的新包会走完整
+			// 建会话路径去 bind，撞 EADDRINUSE 被丢弃（2026-09-02 生产日志
+			// 实录：玩家重连复用 NAT 端口正好落进窗口，RakNet 握手全灭）。
+			// Close 是微秒级 syscall，留在锁内；慢的 finalizeSession（要拿
+			// sessionRegistry 的锁 + 发日志）继续留在锁外，风暴清理不卡热路径。
 			now := time.Now()
 			expired := make([]*udpSession, 0, 16)
 			f.mu.Lock()
 			for k, s := range f.sessions {
 				if now.Sub(s.lastSeen) > f.timeout {
+					_ = s.upstream.Close()
 					delete(f.sessions, k)
 					expired = append(expired, s)
 				}
 			}
 			f.mu.Unlock()
 			for _, s := range expired {
-				_ = s.upstream.Close()
 				f.finalizeSession(s, models.ConnEventLeave)
 				f.active.Add(-1)
 			}
