@@ -4,6 +4,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-09-02
+
+**客户端无需更新**：本版本改动全部在服务端，pf-client 客户端代码零变化
+（重新发布的客户端压缩包仅随版本号刷新，内容与 1.0.0 一致，现有安装可继续使用）。
+
+### Fixed
+
+- **修复全代理突然失联、重启服务器才恢复的根因**：ufw/宝塔等共存防火墙工具在
+  reload 或增删规则时会整表 flush iptables（filter/nat/mangle 全清），把隧道回程
+  只在启动时装配一次的内核规则（mangle 标记/策略路由/INPUT/FORWARD）连带清掉——
+  症状为控制面照常、玩家入站照常、所有透明代理静默失联、日志零痕迹。现由守护
+  协程每 30 秒幂等校验，缺失自动补装，并在日志留下「规则何时被清」的时间戳
+- 隧道日志「丢弃源地址不匹配（疑似伪造）」不再误报：客户端 Windows 网卡的
+  IPv6 等非 IPv4 后台流量降为 debug 记录；真实源地址伪造嫌疑仍保持 warn
+
 ## [1.0.0] - 2026-08-31
 
 首个正式版本。基于上游 [shibingli/go-port-forward](https://github.com/shibingli/go-port-forward)
