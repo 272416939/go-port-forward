@@ -12,13 +12,11 @@ import (
 
 // 回程标记与专用路由表：把从 TUN 进来的包（Windows 后端发给玩家的回包）
 // 强制走「本机投递」表，交给透明 socket 收取，而不是按目的地址转发出去。
-const (
-	returnMark  = "0x7947"
-	returnTable = "7947"
-	// cmdTimeout 是每条外部命令的上限。这些命令跑在启动与关停路径上，
-	// 一旦 iptables 等待 xtables 锁挂住，整个进程就停不下来。
-	cmdTimeout = 5 * time.Second
-)
+// cmdTimeout 是每条外部命令的上限。这些命令跑在启动与关停路径上，
+// 一旦 iptables 等待 xtables 锁挂住，整个进程就停不下来。
+// （回程标记与专用路由表常量、各条规则的 spec 在 returnpath.go：安装与
+// 守护校验必须共用同一份，spec 漂移会让守护协程每轮误判缺失。）
+const cmdTimeout = 5 * time.Second
 
 func run(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -90,7 +88,7 @@ func setupReturnPath(tunName string) error {
 		_, _ = run("sysctl", "-w", key+"=2")
 	}
 
-	if err := ensureRule("mangle", "PREROUTING", "-i", tunName, "-p", "udp", "-j", "MARK", "--set-mark", returnMark); err != nil {
+	if err := ensureRule("mangle", markRuleSpec(tunName)...); err != nil {
 		return fmt.Errorf("标记 TUN 入向包失败: %w", err)
 	}
 	if err := ensureIPRule(); err != nil {
@@ -119,36 +117,20 @@ func setupReturnPath(tunName string) error {
 	// 隧道内互访的内核兜底：用户态检查（tunnelapp.go isTunnelInternal）之外，
 	// A 访问 B 的包在内核里是同一张 TUN 的进与出，直接丢弃。必须插在链首，
 	// 否则会被下面的放行规则先匹配掉。
-	if err := ensureRuleFirst("filter", "FORWARD", "-i", tunName, "-o", tunName, "-j", "DROP"); err != nil {
+	if err := ensureRuleFirst("filter", hairpinRuleSpec(tunName)...); err != nil {
 		return fmt.Errorf("配置隧道内互访拦截失败: %w", err)
 	}
 	// 非透明规则或将来其它用途仍可能走转发路径（云镜像 FORWARD 常为 DROP）。
-	if err := ensureRule("filter", "FORWARD", "-i", tunName, "-j", "ACCEPT"); err != nil {
+	if err := ensureRule("filter", forwardInSpec(tunName)...); err != nil {
 		return err
 	}
-	return ensureRule("filter", "FORWARD", "-o", tunName, "-j", "ACCEPT")
+	return ensureRule("filter", forwardOutSpec(tunName)...)
 }
 
 // lockInputOnInterface 把 TUN 接口的 INPUT 收紧为「只放行既有连接的回包」。
-//
-// 最终顺序（链首起）：ESTABLISHED,RELATED ACCEPT → DROP → 其余原有规则。
-// 插入顺序是先 DROP(1) 再 ESTABLISHED(1)——后者把前者顶到 2。
-// 旧版的全放行 ACCEPT 一并删除：它若还在（且位置靠前），新连接照样通。
+// 命令序列与说明见 returnpath.go 的 lockInputOnInterfaceWith。
 func lockInputOnInterface(tunName string) error {
-	est := []string{"-i", tunName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
-	drop := []string{"-i", tunName, "-j", "DROP"}
-
-	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, est...)...)
-	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, drop...)...)
-	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT")
-
-	if _, err := run("iptables", append([]string{"-t", "filter", "-I", "INPUT", "1"}, drop...)...); err != nil {
-		return fmt.Errorf("收紧 TUN 入站（DROP）失败: %w", err)
-	}
-	if _, err := run("iptables", append([]string{"-t", "filter", "-I", "INPUT", "1"}, est...)...); err != nil {
-		return fmt.Errorf("收紧 TUN 入站（放行回包）失败: %w", err)
-	}
-	return nil
+	return lockInputOnInterfaceWith(run, tunName)
 }
 
 // ensureIPRule 添加 fwmark → 专用路由表的策略路由规则。
@@ -167,11 +149,18 @@ func ensureIPRule() error {
 func teardownReturnPath(tunName string) {
 	_, _ = run("ip", "rule", "del", "fwmark", returnMark, "lookup", returnTable)
 	_, _ = run("ip", "route", "flush", "table", returnTable)
-	_, _ = run("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", tunName, "-p", "udp", "-j", "MARK", "--set-mark", returnMark)
-	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "DROP")
+	_, _ = run("iptables", append([]string{"-t", "mangle", "-D"}, markRuleSpec(tunName)...)...)
+	est, drop := inputRuleSpecs(tunName)
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, est...)...)
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D", "INPUT"}, drop...)...)
 	_, _ = run("iptables", "-t", "filter", "-D", "INPUT", "-i", tunName, "-j", "ACCEPT") // 旧版全放行规则
-	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-o", tunName, "-j", "DROP")
-	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-i", tunName, "-j", "ACCEPT")
-	_, _ = run("iptables", "-t", "filter", "-D", "FORWARD", "-o", tunName, "-j", "ACCEPT")
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D"}, hairpinRuleSpec(tunName)...)...)
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D"}, forwardInSpec(tunName)...)...)
+	_, _ = run("iptables", append([]string{"-t", "filter", "-D"}, forwardOutSpec(tunName)...)...)
+}
+
+// verifyReturnPath 用真实命令执行器校验并修复回程内核状态。
+// 守护协程入口，判定逻辑见 returnpath.go 的 verifyReturnPathWith。
+func verifyReturnPath(tunName string) (bool, error) {
+	return verifyReturnPathWith(run, tunName)
 }

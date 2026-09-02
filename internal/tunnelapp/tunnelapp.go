@@ -111,6 +111,7 @@ type Server struct {
 	lastAuthErr  atomic.Int64 // 认证失败告警限频锚点
 	lastNoRoute  atomic.Int64 // 出向找不到会话的告警限频锚点
 	lastSpoof    atomic.Int64 // 源地址伪造告警限频锚点
+	lastNonIPv4  atomic.Int64 // 非 IPv4 隧道包丢弃的限频锚点
 	lastInternal atomic.Int64 // 隧道内互访告警限频锚点
 	lastReject   atomic.Int64 // 拒绝握手告警限频锚点
 
@@ -188,6 +189,9 @@ func Start(opt Options) (*Server, error) {
 	go s.pumpTunToClient(dev, udpConn) // TUN → 客户端（按目的地址分流）
 	go s.heartbeat(udpConn)            // 心跳
 	go s.janitor()                     // 空闲会话回收
+	if cfg.NAT {
+		go s.returnPathWatchdog() // 回程内核规则守护：被防火墙工具整表清空后自愈
+	}
 	if opt.SessionIPs != nil {
 		go s.pushSessionIPs(opt.SessionIPs, udpConn) // 回程路由同步（按访问码过滤）
 	}
@@ -235,6 +239,41 @@ func (s *Server) Stop() {
 			teardownReturnPath(s.cfg.TunName)
 		}
 	})
+}
+
+// returnPathWatchdog 周期校验透明回程的内核状态并自愈。
+//
+// ufw/宝塔等防火墙工具在 reload、enable 乃至增删单条规则时会整表 flush
+// iptables，把 setupReturnPath 装配的规则连带清掉：控制面完全正常、玩家
+// 入站照常、所有透明代理静默失联、日志零痕迹（2026-09-02 全代理失联事故
+// 的根因）。这里每 30 秒幂等校验一次，缺失才补装，并且仅在确实修复时打
+// 一条 info——它同时是「规则在何时被清」的时间戳。
+func (s *Server) returnPathWatchdog() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+		}
+		// 收敛关停竞态：Stop 会先关 stop 再 teardown，这里在发起任何修复
+		// 前重读一次 stop，避免补装的规则逃过 teardown 留在内核里。
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+		repaired, err := verifyReturnPath(s.cfg.TunName)
+		if err != nil {
+			logger.S.Warnw("回程内核状态校验失败", "err", err)
+			continue
+		}
+		if repaired {
+			logger.S.Infow("回程内核规则缺失已自动补装（此前可能被防火墙工具整表清空）",
+				"tun", s.cfg.TunName)
+		}
+	}
 }
 
 // PeerCount 返回当前在线的隧道客户端数（诊断用）。
@@ -352,7 +391,13 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 			// 少了这一条，A 可以伪造 B 的源地址，让后端把回包发给 B 的玩家，
 			// 也能借 conntrack 劫持 B 的透明会话——前面所有隔离都成了纸面的。
 			src, ok := srcIP4(plain)
-			if !ok || src != ps.tunIP {
+			if !ok {
+				// 解不出 IPv4 头：几乎必然是客户端网卡上的 Windows 后台流量
+				// （IPv6 路由请求、组播等），不构成源地址伪造，降为 debug。
+				s.logNonIPv4(ps, len(plain))
+				continue
+			}
+			if src != ps.tunIP {
 				s.logSpoof(ps, src)
 				continue
 			}
@@ -516,6 +561,21 @@ func (s *Server) logReject(from *net.UDPAddr, ident Identity, reason tunnel.Reje
 		"bound_device", models.FingerprintLabel(ident.Fingerprint), "src", from)
 }
 
+// logNonIPv4 限频记录解不出 IPv4 头的隧道包。TUN 是三层设备，这类包进不了
+// 任何 IPv4 会话，丢弃即可；来源几乎必然是客户端网卡上的 Windows 后台流量
+// （IPv6 路由请求等），周期性出现、无安全含义，降为 debug。
+// （曾与真实源伪造共用一条「疑似伪造」warn，运维看到只会白紧张。）
+func (s *Server) logNonIPv4(ps *peerSession, pktLen int) {
+	if !throttle(&s.lastNonIPv4, 10) {
+		return
+	}
+	logger.S.Debugw("丢弃非 IPv4 的隧道包（多为客户端网卡的 IPv6 后台流量）",
+		"user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP, "len", pktLen)
+}
+
+// logSpoof 限频记录「IPv4 头合法但源地址 ≠ 会话分配地址」的包——这才是值得
+// 警惕的伪造嫌疑。非 IPv4 流量走 logNonIPv4（debug），两者共用一条日志会把
+// 背景噪声升级成假警报。
 func (s *Server) logSpoof(ps *peerSession, src netip.Addr) {
 	if !throttle(&s.lastSpoof, 10) {
 		return
