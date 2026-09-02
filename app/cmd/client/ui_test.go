@@ -118,7 +118,7 @@ func TestUIServerServesAndGuards(t *testing.T) {
 // eligible 是防止把隧道自身流量或本机流量导进 TUN 的唯一守卫。
 func TestRouteEligibility(t *testing.T) {
 	relay := "203.0.113.9"
-	m := newRouteManager(relay, testAddressing, func(string, ...any) {})
+	m := newRouteManager(relay, testAddressing, nil, func(string, ...any) {})
 
 	rejected := []string{
 		relay,                    // 中转机自己：会形成隧道环路
@@ -161,7 +161,7 @@ func ipv4(src, dst [4]byte, total int) []byte {
 // 字节必须按方向归到正确的 IP 上：入站看源地址，回程看目的地址。方向搞反
 // 会让两列数字互换，而界面上看起来一切正常。
 func TestPerIPByteAttribution(t *testing.T) {
-	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
 
 	// 预置两条状态，避免 ensure() 真的去跑 route.exe 改动系统路由表。
 	alice, bob := "111.29.236.135", "8.8.8.8"
@@ -173,12 +173,12 @@ func TestPerIPByteAttribution(t *testing.T) {
 	tunIP := [4]byte{10, 66, 0, 2}
 
 	// 玩家 alice 的入站包：源 = alice，计入 alice 的 down。
-	m.countInbound(ipv4(aliceIP, tunIP, 100))
-	m.countInbound(ipv4(aliceIP, tunIP, 200))
+	m.deliverInbound(ipv4(aliceIP, tunIP, 100))
+	m.deliverInbound(ipv4(aliceIP, tunIP, 200))
 	// 后端发给 alice 的回程包：目的 = alice，计入 alice 的 up。
 	m.countOutbound(ipv4(tunIP, aliceIP, 50))
 	// bob 只有入站。
-	m.countInbound(ipv4(bobIP, tunIP, 70))
+	m.deliverInbound(ipv4(bobIP, tunIP, 70))
 
 	got := m.view()
 	if len(got) != 2 {
@@ -201,7 +201,7 @@ func TestPerIPByteAttribution(t *testing.T) {
 // countOutbound 绝不能安装路由：它在 TUN 读循环里逐包调用，而安装要起
 // route.exe 子进程（几十毫秒），会拖垮吞吐。
 func TestCountOutboundNeverInstallsRoute(t *testing.T) {
-	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
 	m.countOutbound(ipv4([4]byte{10, 66, 0, 2}, [4]byte{8, 8, 8, 8}, 100))
 	if len(m.states) != 0 {
 		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", len(m.states))
@@ -210,7 +210,7 @@ func TestCountOutboundNeverInstallsRoute(t *testing.T) {
 
 // 非 IPv4 或过短的包不能让计数逻辑 panic（隧道里出现畸形包不该拖垮客户端）。
 func TestCountIgnoresMalformedPackets(t *testing.T) {
-	m := newRouteManager("203.0.113.9", testAddressing, func(string, ...any) {})
+	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
 	for _, pkt := range [][]byte{
 		nil,
 		{},
@@ -218,7 +218,7 @@ func TestCountIgnoresMalformedPackets(t *testing.T) {
 		make([]byte, 19),               // 短于 IPv4 头
 		append([]byte{0x60}, make([]byte, 39)...), // IPv6
 	} {
-		m.countInbound(pkt)
+		m.deliverInbound(pkt)
 		m.countOutbound(pkt)
 	}
 	if len(m.states) != 0 {

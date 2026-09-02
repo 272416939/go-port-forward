@@ -56,22 +56,52 @@ func (f *fakeRoutes) delCount() int {
 	return len(f.dels)
 }
 
-// testRouteManager 造一个不起后台 goroutine 的管理器：回收与删除都由测试
-// 显式驱动，避免时序竞争。
-func testRouteManager(t *testing.T, f *fakeRoutes) *routeManager {
+// tunRecorder 替身 TUN 写出口：记录安装器代写的缓冲包及其顺序。
+type tunRecorder struct {
+	mu   sync.Mutex
+	pkts [][]byte
+}
+
+func (r *tunRecorder) write(p []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pkts = append(r.pkts, append([]byte(nil), p...))
+	return nil
+}
+
+func (r *tunRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.pkts)
+}
+
+func (r *tunRecorder) all() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]byte, len(r.pkts))
+	copy(out, r.pkts)
+	return out
+}
+
+// testRouteManager 造一个不起后台 goroutine 的管理器：回收、删除与安装都由
+// 测试显式驱动，避免时序竞争。
+func testRouteManager(t *testing.T, f *fakeRoutes) (*routeManager, *tunRecorder) {
 	t.Helper()
+	w := &tunRecorder{}
 	return &routeManager{
-		states:   map[string]*routeState{},
-		removals: make(chan string, removeQueue),
-		relayIP:  "203.0.113.1",
-		addressing: tunnelAddressing{
-			ClientIP: "10.66.0.2", Mask: "255.255.0.0", Gateway: "10.66.0.1",
-		},
-		logf:     func(string, ...any) {},
-		addRoute: f.add,
-		delRoute: f.del,
-		stop:     make(chan struct{}),
-	}
+			states:      map[string]*routeState{},
+			removals:    make(chan string, removeQueue),
+			installWake: make(chan struct{}, 1),
+			relayIP:     "203.0.113.1",
+			addressing: tunnelAddressing{
+				ClientIP: "10.66.0.2", Mask: "255.255.0.0", Gateway: "10.66.0.1",
+			},
+			logf:     t.Logf,
+			addRoute: f.add,
+			delRoute: f.del,
+			writeTun: w.write,
+			stop:     make(chan struct{}),
+		}, w
 }
 
 // drainRemovals 同步执行一遍 removeWorker 的循环体，把队列排空。
@@ -86,10 +116,15 @@ func drainRemovals(m *routeManager) {
 	}
 }
 
+// drainInstalls 同步跑一遍安装器循环体，把当前到期的安装任务处理完。
+func drainInstalls(m *routeManager) {
+	m.installDue()
+}
+
 // 中转机地址、本机隧道地址、网关都不能装 /32 路由——给它们装会把隧道自身的
 // UDP 流量或本机流量导进 TUN，整条隧道立刻断。
 func TestEligibleExcludesTunnelAndPrivate(t *testing.T) {
-	m := testRouteManager(t, newFakeRoutes())
+	m, _ := testRouteManager(t, newFakeRoutes())
 	for _, ip := range []string{
 		"", "203.0.113.1", "10.66.0.1", "10.66.0.2",
 		"192.168.1.10", "127.0.0.1", "224.0.0.1", "169.254.1.1",
@@ -111,11 +146,10 @@ func TestEligibleExcludesTunnelAndPrivate(t *testing.T) {
 // 直连源站的流量，所以要尽快回收。
 func TestMarkEndedUsesShortGrace(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 
-	if st := m.ensure("1.2.3.4"); st == nil {
-		t.Fatal("安装应成功")
-	}
+	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	m.markEnded([]string{"1.2.3.4"})
 	drainRemovals(m)
 	if !f.has("1.2.3.4") {
@@ -141,8 +175,9 @@ func TestMarkEndedUsesShortGrace(t *testing.T) {
 // 否则短宽限期一到就把正在用的路由删掉。
 func TestEnsureCancelsEnded(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	m.markEnded([]string{"1.2.3.4"})
 
 	m.ensure("1.2.3.4") // 又收到入站包
@@ -165,10 +200,12 @@ func TestEnsureCancelsEnded(t *testing.T) {
 // 在列表里一闪而过，按缺席删除会把正在进行的会话反复掐断。
 func TestSyncDoesNotDeleteMerelyAbsentIP(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 
 	m.sync([]string{"5.6.7.8"}) // 1.2.3.4 缺席
+	drainInstalls(m)
 	drainRemovals(m)
 
 	if !f.has("1.2.3.4") {
@@ -183,8 +220,9 @@ func TestSyncDoesNotDeleteMerelyAbsentIP(t *testing.T) {
 // 任何活跃会话」时不推送 routes，而那恰是最需要清残留路由的时刻。
 func TestPruneRemovesIdleWithoutPush(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 
 	m.mu.Lock()
 	m.states["1.2.3.4"].lastSeen = time.Now().Add(-routeIdleGrace - time.Second)
@@ -202,8 +240,9 @@ func TestPruneRemovesIdleWithoutPush(t *testing.T) {
 func TestRemovalRetriesThenGivesUp(t *testing.T) {
 	f := newFakeRoutes()
 	f.failDel["1.2.3.4"] = 1 // 第一次失败，第二次成功
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 
 	m.prune()
@@ -228,8 +267,9 @@ func TestRemovalRetriesThenGivesUp(t *testing.T) {
 func TestRemovalGivesUpAfterMaxTries(t *testing.T) {
 	f := newFakeRoutes()
 	f.failDel["1.2.3.4"] = 99 // 永远失败
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 
 	for i := 0; i < routeDeleteTries+2; i++ {
@@ -247,7 +287,6 @@ func TestRemovalGivesUpAfterMaxTries(t *testing.T) {
 	}
 }
 
-// expire 把某条路由的空闲时间推到宽限期之外。
 func expire(m *routeManager, ip string) {
 	m.mu.Lock()
 	if st := m.states[ip]; st != nil {
@@ -265,8 +304,9 @@ func expire(m *routeManager, ip string) {
 // 该玩家永久收不到回包。
 func TestRemovalReinstallsWhenReactivated(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 	m.prune() // 标记 removing 并入队
 
@@ -276,24 +316,31 @@ func TestRemovalReinstallsWhenReactivated(t *testing.T) {
 		return f.del(dest)
 	}
 	drainRemovals(m)
+	drainInstalls(m)
 
 	m.mu.Lock()
 	st := m.states["1.2.3.4"]
+	installing := st != nil && st.installing.Load()
 	m.mu.Unlock()
 	if st == nil {
 		t.Fatal("删除期间重新活跃，条目不应被摘掉")
+	}
+	if installing {
+		t.Fatal("重装完成后不得仍处于 installing 状态")
 	}
 	if !f.has("1.2.3.4") {
 		t.Fatal("路由必须被立刻重装，否则该玩家收不到任何回包")
 	}
 }
 
-// 重装失败要摘掉条目，让下一个入站包重新走完整安装路径，而不是留一个
-// 「条目在、路由没了」的永久黑洞。
-func TestReinstallFailureDropsEntry(t *testing.T) {
+// 重装失败不能摘掉条目：条目在而路由没装上时保持 installing，由安装器按
+// 指数退避重试直至成功。摘掉条目 + 后续包反复重演 route.exe 是旧实现的
+// 逐包重演病根；直接放弃则留下「条目在、路由没了」的永久黑洞。
+func TestReinstallFailureBacksOff(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 	m.prune()
 
@@ -303,12 +350,27 @@ func TestReinstallFailureDropsEntry(t *testing.T) {
 	}
 	m.addRoute = func(string, string) error { return fmt.Errorf("模拟安装失败") }
 	drainRemovals(m)
+	drainInstalls(m)
 
 	m.mu.Lock()
-	_, still := m.states["1.2.3.4"]
+	st := m.states["1.2.3.4"]
+	installing := st != nil && st.installing.Load()
 	m.mu.Unlock()
-	if still {
-		t.Fatal("重装失败必须摘掉条目，否则 ensure 走快路径永不重装")
+	if st == nil {
+		t.Fatal("重装失败条目必须保留，交回安装器退避重试")
+	}
+	if !installing {
+		t.Fatal("路由没装上必须保持 installing，否则后续包会在无路由时直写 TUN")
+	}
+
+	// 退避到期 + 安装恢复后自愈。
+	m.mu.Lock()
+	st.nextTry = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+	m.addRoute = f.add
+	drainInstalls(m)
+	if !f.has("1.2.3.4") {
+		t.Fatal("退避到期后应重装成功")
 	}
 }
 
@@ -317,8 +379,9 @@ func TestReinstallFailureDropsEntry(t *testing.T) {
 func TestRemovalFailureWithReactivationKeepsEntry(t *testing.T) {
 	f := newFakeRoutes()
 	f.failDel["1.2.3.4"] = 99
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 	m.prune()
 
@@ -330,12 +393,16 @@ func TestRemovalFailureWithReactivationKeepsEntry(t *testing.T) {
 
 	m.mu.Lock()
 	st := m.states["1.2.3.4"]
+	installing := st != nil && st.installing.Load()
 	m.mu.Unlock()
 	if st == nil {
 		t.Fatal("路由还在系统里，条目不能被摘掉")
 	}
 	if st.delFails != 0 {
 		t.Fatalf("delFails = %d，重新活跃时不应累计失败", st.delFails)
+	}
+	if installing {
+		t.Fatal("删除失败意味着路由仍在，不得再走安装流程")
 	}
 	if !f.has("1.2.3.4") {
 		t.Fatal("删除失败意味着路由仍在，替身状态不符")
@@ -345,9 +412,10 @@ func TestRemovalFailureWithReactivationKeepsEntry(t *testing.T) {
 // cleanup 必须清空全部路由：重握手/退出时残留任何一条都会污染直连。
 func TestCleanupRemovesAll(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
 	m.ensure("5.6.7.8")
+	drainInstalls(m)
 
 	m.cleanup()
 	if f.has("1.2.3.4") || f.has("5.6.7.8") {
@@ -362,8 +430,9 @@ func TestCleanupRemovesAll(t *testing.T) {
 // 路由吸进隧道，反而会给这条残留路由续命，永远不会自愈。
 func TestCountOutboundDoesNotRefreshLastSeen(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
+	m, _ := testRouteManager(t, f)
 	m.ensure("1.2.3.4")
+	drainInstalls(m)
 	expire(m, "1.2.3.4")
 
 	m.mu.Lock()
@@ -384,20 +453,188 @@ func TestCountOutboundDoesNotRefreshLastSeen(t *testing.T) {
 	}
 }
 
-// countInbound 要按源 IP 装路由并计入 down 方向。
-func TestCountInboundInstallsRoute(t *testing.T) {
+// 新 IP 的入站包必须缓冲等安装，绝不能在无路由时直写 TUN（回包会从物理网卡
+// 漏出去），也绝不能同步起 route.exe 阻塞读循环——后者正是旧实现「一个玩家
+// 进服全服卡一下」的病根。
+func TestDeliverInboundBuffersUntilInstalled(t *testing.T) {
 	f := newFakeRoutes()
-	m := testRouteManager(t, f)
-	m.countInbound(ipv4Packet("1.2.3.4", "10.66.0.2"))
+	m, w := testRouteManager(t, f)
+	pkt := ipv4Packet("1.2.3.4", "10.66.0.2")
 
+	if m.deliverInbound(pkt) {
+		t.Fatal("新 IP 的首包应被缓冲，不能直接放行写 TUN")
+	}
+	if f.has("1.2.3.4") {
+		t.Fatal("deliverInbound 不得同步安装路由（那会阻塞读循环）")
+	}
+	if w.count() != 0 {
+		t.Fatal("路由未就绪前不得写入 TUN")
+	}
+
+	drainInstalls(m)
 	if !f.has("1.2.3.4") {
-		t.Fatal("入站包应即时安装回程路由")
+		t.Fatal("安装器应完成安装")
+	}
+	if w.count() != 1 {
+		t.Fatalf("缓冲的首包应由安装器代写一次，实际写了 %d 个", w.count())
 	}
 	m.mu.Lock()
 	down := m.states["1.2.3.4"].bytesDown.Load()
 	m.mu.Unlock()
 	if down == 0 {
-		t.Fatal("字节数应计入 down 方向")
+		t.Fatal("字节数应计入 down 方向（缓冲期间也要计数）")
+	}
+}
+
+// 安装完成后的后续包走快路径直接放行，安装器不再代写。
+func TestDeliverInboundFastPathAfterInstall(t *testing.T) {
+	f := newFakeRoutes()
+	m, w := testRouteManager(t, f)
+	m.deliverInbound(ipv4Packet("1.2.3.4", "10.66.0.2"))
+	drainInstalls(m)
+
+	if !m.deliverInbound(ipv4Packet("1.2.3.4", "10.66.0.2")) {
+		t.Fatal("路由就位后应直接放行")
+	}
+	if w.count() != 1 {
+		t.Fatalf("快路径的包由 pump 写，安装器不应代写，实际代写 %d 个", w.count())
+	}
+}
+
+// 不合格地址（私网/中转机/网关等）直接放行且不登记状态。
+func TestDeliverInboundIneligiblePassesThrough(t *testing.T) {
+	m, _ := testRouteManager(t, newFakeRoutes())
+	if !m.deliverInbound(ipv4Packet("192.168.1.10", "10.66.0.2")) {
+		t.Fatal("不合格地址应直接放行")
+	}
+	if len(m.states) != 0 {
+		t.Fatal("不合格地址不应登记状态条目")
+	}
+}
+
+// 缓冲有上限：溢出的包被丢弃（RakNet 会重传），不会撑爆内存；安装恢复后
+// 补写的数量不超过上限。
+func TestDeliverInboundDropsOverflow(t *testing.T) {
+	f := newFakeRoutes()
+	m, w := testRouteManager(t, f)
+	m.addRoute = func(string, string) error { return fmt.Errorf("模拟安装失败") }
+
+	for i := 0; i < installPendingCap+3; i++ {
+		if m.deliverInbound(ipv4Packet("1.2.3.4", "10.66.0.2")) {
+			t.Fatal("安装未完成期间包应被缓冲或丢弃，不得放行")
+		}
+	}
+	m.mu.Lock()
+	pending := len(m.states["1.2.3.4"].pending)
+	m.mu.Unlock()
+	if pending != installPendingCap {
+		t.Fatalf("缓冲深度 = %d，应封顶在 %d", pending, installPendingCap)
+	}
+
+	// 安装恢复后退避到期，补写恰好上限个包。
+	m.mu.Lock()
+	m.states["1.2.3.4"].nextTry = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+	m.addRoute = f.add
+	drainInstalls(m)
+	if w.count() != installPendingCap {
+		t.Fatalf("补写包数 = %d，应为上限 %d", w.count(), installPendingCap)
+	}
+}
+
+// 缓冲包按到达顺序补写，不能乱序。
+func TestDeliverInboundPreservesOrder(t *testing.T) {
+	f := newFakeRoutes()
+	m, w := testRouteManager(t, f)
+	for i := 0; i < 3; i++ {
+		pkt := ipv4Packet("1.2.3.4", "10.66.0.2")
+		pkt[4] = byte(i) // 包内一个可区分的字节（仅测试用）
+		m.deliverInbound(pkt)
+	}
+	drainInstalls(m)
+	all := w.all()
+	if len(all) != 3 {
+		t.Fatalf("应补写 3 个包，实际 %d 个", len(all))
+	}
+	for i, p := range all {
+		if p[4] != byte(i) {
+			t.Fatalf("第 %d 个补写包顺序错乱", i)
+		}
+	}
+}
+
+// 安装失败不删除条目、不逐包重演 route.exe：退避期内后续包只进缓冲，
+// 不触发新的安装尝试。
+func TestInstallFailureBacksOffWithoutPerPacketExec(t *testing.T) {
+	f := newFakeRoutes()
+	m, _ := testRouteManager(t, f)
+	calls := 0
+	m.addRoute = func(dest, gateway string) error {
+		calls++
+		return fmt.Errorf("模拟安装失败")
+	}
+
+	m.deliverInbound(ipv4Packet("1.2.3.4", "10.66.0.2"))
+	drainInstalls(m)
+	if calls != 1 {
+		t.Fatalf("首包只应尝试一次安装，实际 %d 次", calls)
+	}
+
+	m.deliverInbound(ipv4Packet("1.2.3.4", "10.66.0.2"))
+	drainInstalls(m) // nextTry 在未来，不应触发重试
+	if calls != 1 {
+		t.Fatalf("退避期内不得重试安装，实际已尝试 %d 次", calls)
+	}
+
+	// 条目必须保留且仍为 installing（旧实现失败即删条目，后续每包重演）。
+	m.mu.Lock()
+	st := m.states["1.2.3.4"]
+	installing := st != nil && st.installing.Load()
+	m.mu.Unlock()
+	if st == nil || !installing {
+		t.Fatal("安装失败后条目必须保留并保持 installing")
+	}
+
+	// 退避到期后恢复安装。
+	m.mu.Lock()
+	st.nextTry = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+	m.addRoute = f.add
+	drainInstalls(m)
+	if !f.has("1.2.3.4") {
+		t.Fatal("退避到期后应安装成功")
+	}
+}
+
+// 安装执行期间条目被回收（prune/cleanup）：刚装上的路由必须立刻撤销，
+// 否则留下一条没有状态条目的孤儿 /32，吸走该 IP 全部回包且无人再管。
+func TestOrphanRouteRolledBack(t *testing.T) {
+	f := newFakeRoutes()
+	m, _ := testRouteManager(t, f)
+	m.addRoute = func(dest, gateway string) error {
+		m.mu.Lock()
+		delete(m.states, dest) // 模拟安装执行期间条目被回收
+		m.mu.Unlock()
+		return f.add(dest, gateway)
+	}
+	m.ensure("1.2.3.4")
+	drainInstalls(m)
+
+	if f.has("1.2.3.4") {
+		t.Fatal("条目已消失时装上的路由必须被撤销（孤儿 /32）")
+	}
+}
+
+// installBackoff 指数退避并封顶。
+func TestInstallBackoffCaps(t *testing.T) {
+	cases := map[int]time.Duration{
+		0: time.Second, 1: time.Second, 2: 2 * time.Second,
+		3: 4 * time.Second, 10: installBackoffMax, 100: installBackoffMax,
+	}
+	for fails, want := range cases {
+		if got := installBackoff(fails); got != want {
+			t.Errorf("installBackoff(%d) = %v，应为 %v", fails, got, want)
+		}
 	}
 }
 

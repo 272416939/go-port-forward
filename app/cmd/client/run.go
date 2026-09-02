@@ -45,6 +45,10 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 		e.fail("创建 UDP socket 失败：%v", err)
 		return
 	}
+	// 默认 ~200KB 的读缓冲只够一百多个 MTU 包，玩家进服的下行突发会在内核
+	// 层丢包且应用层毫无感知。设置失败沿用系统默认，无害。
+	_ = udp.SetReadBuffer(4 << 20)
+	_ = udp.SetWriteBuffer(4 << 20)
 	defer udp.Close()
 
 	dev, err := tunnet.Open(tunName, 1400)
@@ -75,8 +79,9 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 			if sess == nil || rm == nil {
 				continue
 			}
-			pkt := make([]byte, n)
-			copy(pkt, buf[:n])
+			// 直接用 buf 切片：countOutbound 只同步读头部，SealData 在下一轮
+			// Read 之前同步消费完毕，逐包 make+copy 是纯浪费的分配。
+			pkt := buf[:n]
 			e.statTunToTunnel.Add(1)
 			e.bytesUp.Add(int64(n))
 			rm.countOutbound(pkt)
@@ -166,12 +171,12 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 
 			// 路由管理器依赖隧道地址（网关是 /32 回程路由的下一跳，
 			// 本机与网关地址必须排除在可安装地址之外）。
-			// 旧管理器要 close 而不是 cleanup——它带着回收 goroutine，
+			// 旧管理器要 close 而不是 cleanup——它带着回收与安装 goroutine，
 			// 只清路由会把 goroutine 泄漏到进程结束。
 			if rm := rmHolder.Load(); rm != nil {
 				rm.close()
 			}
-			rm := newRouteManager(serverAddr.IP.String(), addressing, e.logf)
+			rm := newRouteManager(serverAddr.IP.String(), addressing, dev.WritePacket, e.logf)
 			rmHolder.Store(rm)
 			e.routes.Store(rm)
 		}
@@ -301,11 +306,13 @@ func (e *Engine) pump(ctx context.Context, udp *net.UDPConn, dev *tunnet.Device,
 			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
 				e.statTunnelToTun.Add(1)
 				e.bytesDown.Add(int64(len(plain)))
-				// 必须先装回程路由再写 TUN：后端回包可能在微秒内产生，
-				// 路由晚一步，回包就从物理网卡漏出去了。
-				rm.countInbound(plain)
-				if werr := dev.WritePacket(plain); werr != nil {
-					e.logWriteErr(werr)
+				// 路由未就绪时包由路由管理器缓冲、安装器装好后代写：
+				// 新 IP 的 route.exe（几十毫秒）绝不能阻塞其他玩家的包，
+				// 这是旧实现「一个玩家进服全服卡一下」的病根。
+				if rm.deliverInbound(plain) {
+					if werr := dev.WritePacket(plain); werr != nil {
+						e.logWriteErr(werr)
+					}
 				}
 			}
 		case n > 0 && buf[0] == tunnel.TypeCtrl:

@@ -110,6 +110,11 @@ func (f *UDPForwarder) Start() error {
 	}
 	f.conn = conn
 	f.targetAddr = targetAddr
+	// 默认 ~200KB 的读缓冲只够一百多个 MTU 包，玩家进服/重试风暴的突发会在
+	// 内核层丢包，应用层毫无感知。实际生效值受 net.core.rmem_max 钳制，
+	// 设置失败沿用系统默认，不影响转发。
+	_ = conn.SetReadBuffer(udpSocketBuffer)
+	_ = conn.SetWriteBuffer(udpSocketBuffer)
 
 	f.wg.Add(2)
 	go f.readLoop()
@@ -268,6 +273,10 @@ func (f *UDPForwarder) relayBack(clientAddr *net.UDPAddr, sess *udpSession) {
 	}
 }
 
+// udpSocketBuffer 是 UDP socket 读写缓冲的目标值。Linux 实际生效值受
+// net.core.rmem_max/wmem_max 钳制。
+const udpSocketBuffer = 4 << 20 // 4MB
+
 func (f *UDPForwarder) cleanupLoop() {
 	defer f.wg.Done()
 	ticker := time.NewTicker(f.timeout / 2)
@@ -277,17 +286,25 @@ func (f *UDPForwarder) cleanupLoop() {
 		case <-f.stopCh:
 			return
 		case <-ticker.C:
-			f.mu.Lock()
+			// 持锁只做「收集并摘除过期条目」这一件轻事。close 是 syscall、
+			// finalizeSession 要拿 sessionRegistry 的锁——放在 f.mu 里，风暴
+			// 制造出成千短命会话时，每轮清理突发会把该规则所有玩家的包全部
+			// 卡住（周期性全服卡顿的组成部分）。
 			now := time.Now()
+			expired := make([]*udpSession, 0, 16)
+			f.mu.Lock()
 			for k, s := range f.sessions {
 				if now.Sub(s.lastSeen) > f.timeout {
-					_ = s.upstream.Close()
-					f.finalizeSession(s, models.ConnEventLeave)
 					delete(f.sessions, k)
-					f.active.Add(-1)
+					expired = append(expired, s)
 				}
 			}
 			f.mu.Unlock()
+			for _, s := range expired {
+				_ = s.upstream.Close()
+				f.finalizeSession(s, models.ConnEventLeave)
+				f.active.Add(-1)
+			}
 		}
 	}
 }
@@ -326,26 +343,15 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 		return nil, false
 	}
 
-	f.mu.Lock()
-	if sess, ok := f.sessions[key]; ok {
-		sess.lastSeen = now
-		f.mu.Unlock()
-		_ = up.Close()
-		return sess, false
-	}
-	if f.isStopping() {
-		f.mu.Unlock()
-		_ = up.Close()
-		return nil, false
-	}
-	sess = &udpSession{
-		upstream: up,
-		lastSeen: now,
-		key:      sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr),
-	}
+	// 注册表登记与 join 日志都在锁外做：obtain 要拿 sessionRegistry 的锁
+	//（每 10 秒的活跃 IP 快照会把它排他占住一阵），拿在 f.mu 临界区里，
+	// 就形成「f.mu → sessionRegistry.mu」的锁链——快照期间所有老会话的包
+	// 都在 f.mu 上排队。
+	skey := sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr)
+	var sinfo *sessionInfo
 	if f.svc != nil && f.svc.sessions != nil {
-		sess.sinfo = f.svc.sessions.obtain(sess.key, &sessionInfo{
-			key:      sess.key,
+		sinfo = f.svc.sessions.obtain(skey, &sessionInfo{
+			key:      skey,
 			Protocol: models.ProtocolUDP,
 			RuleID:   f.rule.ID,
 			RuleName: f.rule.Name,
@@ -364,12 +370,38 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 			Event:    models.ConnEventJoin,
 		})
 	}
+
+	// 关键区只做 map 插入与双检：并发创建时输家关掉多余的 socket。
+	f.mu.Lock()
+	if sess, ok := f.sessions[key]; ok {
+		sess.lastSeen = now
+		f.mu.Unlock()
+		_ = up.Close()
+		return sess, false
+	}
+	if f.isStopping() {
+		f.mu.Unlock()
+		_ = up.Close()
+		return nil, false
+	}
+	sess = &udpSession{
+		upstream: up,
+		lastSeen: now,
+		key:      skey,
+		sinfo:    sinfo,
+	}
 	f.sessions[key] = sess
 	f.active.Add(1)
 	f.totalConns.Add(1)
-	f.wg.Add(1)
-	go f.relayBack(cloneUDPAddr(srcAddr), sess)
 	f.mu.Unlock()
+
+	// relayBack 在锁外起。透明模式的回包不经此 socket（见 dialUpstream 注释），
+	// 起 goroutine 也永远读不到数据——直接跳过，省下每个会话一个挂起的
+	// goroutine + fd；重试风暴下的会话峰值因此减半。
+	if !f.rule.Transparent {
+		f.wg.Add(1)
+		go f.relayBack(cloneUDPAddr(srcAddr), sess)
+	}
 	return sess, true
 }
 
@@ -377,7 +409,14 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 // （IP_TRANSPARENT，需 root；回包经隧道/SNAT 独立路径返回，不经过此 socket）。
 func (f *UDPForwarder) dialUpstream(srcAddr *net.UDPAddr) (*net.UDPConn, error) {
 	if !f.rule.Transparent {
-		return net.DialUDP("udp", nil, f.targetAddr)
+		up, err := net.DialUDP("udp", nil, f.targetAddr)
+		if err != nil {
+			return nil, err
+		}
+		// 通用模式的回包从这里读（relayBack），缓冲与转发口对齐。
+		_ = up.SetReadBuffer(udpSocketBuffer)
+		_ = up.SetWriteBuffer(udpSocketBuffer)
+		return up, nil
 	}
 	pc, err := transparentListenPacket(srcAddr.String())
 	if err != nil {

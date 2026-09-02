@@ -176,7 +176,9 @@ func (l *connLogger) loop() {
 // sessionRegistry 跟踪当前活跃的客户端会话（conntrack 风格视图），TCP/UDP 通用。
 // sessionRegistry tracks currently-active client sessions; shared by TCP and UDP.
 type sessionRegistry struct {
-	mu sync.Mutex
+	// RWMutex：快照是周期性的只读全量遍历，与热路径的登记/移除用读写锁分开，
+	// 避免风暴期间快照把会话登记卡住。
+	mu sync.RWMutex
 	m  map[string]*sessionInfo
 }
 
@@ -225,8 +227,8 @@ func (r *sessionRegistry) snapshot() []models.SessionEntry {
 	if r == nil {
 		return nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]models.SessionEntry, 0, len(r.m))
 	for _, si := range r.m {
 		out = append(out, si.view())

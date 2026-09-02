@@ -113,7 +113,13 @@ type Server struct {
 	lastSpoof    atomic.Int64 // 源地址伪造告警限频锚点
 	lastNonIPv4  atomic.Int64 // 非 IPv4 隧道包丢弃的限频锚点
 	lastInternal atomic.Int64 // 隧道内互访告警限频锚点
-	lastReject   atomic.Int64 // 拒绝握手告警限频锚点
+	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
+	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
+
+	// helloQ 是握手包队列：握手要做存储读写（设备绑定要写库），放在唯一
+	// 的入向泵里同步处理，重试风暴时每次 fsync 都会卡住全体玩家的包。
+	// 单 worker 串行消费，兼而保证同一客户端的重传 Hello 按到达序处理。
+	helloQ chan helloTask
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -170,6 +176,11 @@ func Start(opt Options) (*Server, error) {
 		return nil, fmt.Errorf("隧道 UDP 监听失败 %s: %w", cfg.Listen, err)
 	}
 	udpConn := udp.(*net.UDPConn)
+	// 默认 ~200KB 的读缓冲只够一百多个 MTU 包，玩家进服/重试风暴的突发会在
+	// 内核层丢包，应用层毫无感知。实际生效值受 net.core.rmem_max 钳制，
+	// 设置失败沿用系统默认，不影响转发。
+	_ = udpConn.SetReadBuffer(tunnelSocketBuffer)
+	_ = udpConn.SetWriteBuffer(tunnelSocketBuffer)
 
 	s := &Server{
 		cfg:      cfg,
@@ -178,6 +189,7 @@ func Start(opt Options) (*Server, error) {
 		peers:    newRegistry(),
 		identity: opt.Identity,
 		binder:   opt.Binder,
+		helloQ:   make(chan helloTask, helloQueueCap),
 		tunPool:  pool,
 		gateway:  gateway,
 		stop:     make(chan struct{}),
@@ -185,7 +197,8 @@ func Start(opt Options) (*Server, error) {
 		pushPrev: make(map[string][]string),
 	}
 
-	go s.loop(dev, udpConn)            // 客户端 → TUN（含握手状态机）
+	go s.loop(dev, udpConn)            // 客户端 → TUN（握手异步分发）
+	go s.helloWorker(udpConn)          // 握手专用 worker（存储 I/O 不进数据泵）
 	go s.pumpTunToClient(dev, udpConn) // TUN → 客户端（按目的地址分流）
 	go s.heartbeat(udpConn)            // 心跳
 	go s.janitor()                     // 空闲会话回收
@@ -341,7 +354,51 @@ func (s *Server) EvictCode(codeID string) bool {
 	return true
 }
 
-// loop 客户端 → TUN 泵（含握手状态机）。
+// tunnelSocketBuffer 是隧道 UDP socket 读写缓冲的目标值。
+const tunnelSocketBuffer = 4 << 20 // 4MB
+
+// helloQueueCap 是握手包队列深度。正常情况下握手频率极低（接入 + 空闲重握手），
+// 队列的意义是把重试风暴的突发握手从数据泵上摘下来；满了就丢弃——客户端会
+// 重发 Hello，不值得为它阻塞数据面。
+const helloQueueCap = 128
+
+// helloTask 是一条待处理的握手包。pkt 必须是拷贝：读循环的 buf 逐包复用。
+type helloTask struct {
+	pkt  []byte
+	from *net.UDPAddr
+}
+
+// queueHello 把握手包投递给专用 worker，绝不在数据泵里同步处理握手——
+// 握手要做存储读写（设备绑定要写库），重试风暴时每次 fsync 都会把全体玩家
+// 的入向包卡住（「有人疯狂重连全服卡顿」的服务端病根）。
+func (s *Server) queueHello(pkt []byte, from *net.UDPAddr) {
+	task := helloTask{pkt: append([]byte(nil), pkt...), from: from}
+	select {
+	case s.helloQ <- task:
+	default:
+		now := time.Now().Unix()
+		last := s.lastHelloDrop.Load()
+		if now-last >= 5 && s.lastHelloDrop.CompareAndSwap(last, now) {
+			logger.S.Warnw("握手队列已满，丢弃 Hello（客户端会重试）", "from", from)
+		}
+	}
+}
+
+// helloWorker 串行处理握手包。单 worker 既把存储 I/O 挪出数据泵，也天然保证
+// 同一客户端的重传 Hello 按到达序处理——并发处理会为同一次握手生成两个不同的
+// Accept 会话密钥，客户端与服务端可能各认一个，数据包互相解不开。
+func (s *Server) helloWorker(udpConn *net.UDPConn) {
+	for {
+		select {
+		case <-s.stop:
+			return
+		case task := <-s.helloQ:
+			s.handleHello(udpConn, task.pkt, task.from)
+		}
+	}
+}
+
+// loop 客户端 → TUN 泵。握手包只入队，状态机的实际执行在 helloWorker。
 func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 	defer close(s.done)
 	buf := make([]byte, tunnel.MaxPacket+64)
@@ -361,7 +418,7 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 		}
 
 		if pkt[0] == tunnel.TypeHello {
-			s.handleHello(udpConn, pkt, from)
+			s.queueHello(pkt, from)
 			continue
 		}
 
@@ -480,10 +537,15 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr
 	}
 
 	// 设备绑定：首次握手登记指纹，之后其它设备一律拒绝。
+	// 指纹未变化（重握手是常态）时直接短路：每次握手都写库会把 fsync 拖进
+	// 握手路径，重试风暴下就是持续卡顿。活跃地址已由 TouchCode 异步刷新，
+	// 无需借这里重写。
 	fp := hex.EncodeToString(hello.Device[:])
-	if err := s.binder.BindDevice(ident.CodeID, fp, models.FingerprintLabel(fp), from.String()); err != nil {
-		reject(tunnel.RejectDeviceMismatch)
-		return
+	if ident.Fingerprint != fp {
+		if err := s.binder.BindDevice(ident.CodeID, fp, models.FingerprintLabel(fp), from.String()); err != nil {
+			reject(tunnel.RejectDeviceMismatch)
+			return
+		}
 	}
 
 	// 并发隧道上限：本访问码已在线时是重连，不占新配额。
@@ -654,9 +716,9 @@ func (s *Server) pumpTunToClient(dev *tunnet.Device, udpConn *net.UDPConn) {
 			s.logTunnelInternal(ps, src, "源")
 			continue
 		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		if _, werr := udpConn.WriteToUDP(ps.sess.SealData(pkt), ps.addr); werr != nil {
+		// 直接用 buf 切片：SealData 在下一轮 ReadPacket 覆盖 buf 之前同步
+		// 消费完毕，逐包 make+copy 是纯浪费的分配。
+		if _, werr := udpConn.WriteToUDP(ps.sess.SealData(buf[:n]), ps.addr); werr != nil {
 			// 单个 peer 写失败不再终止整个泵——那会让一个客户端的网络问题
 			// 掐断所有其它用户的隧道。
 			s.logWriteErr(werr)

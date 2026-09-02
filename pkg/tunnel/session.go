@@ -16,10 +16,10 @@ type Session struct {
 	key       *[32]byte
 	sendNonce uint64
 
-	recvMu    sync.Mutex
-	recvMax   uint64
-	recvStale uint64 // 窗口下界之前的计数一律拒绝
-	recvSeen  map[uint64]struct{}
+	recvMu   sync.Mutex
+	recvMax  uint64               // 已接受的最高包计数
+	recvBase uint64               // 窗口下界（= recvMax-recvWindow+1，最小 1）
+	recvBits [recvWindow / 8]byte // 环形位图：计数 c 的位下标 = c % recvWindow
 }
 
 // 接收重放窗口大小（可容忍的最大乱序包数）。
@@ -36,7 +36,7 @@ func DeriveSessionKey(shared *[32]byte, psk []byte) *[32]byte {
 func NewSession(key *[32]byte) *Session {
 	return &Session{
 		key:      key,
-		recvSeen: make(map[uint64]struct{}),
+		recvBase: 1,
 	}
 }
 
@@ -137,32 +137,46 @@ func (s *Session) IsPing(p []byte) bool {
 }
 
 // acceptCounter 滑动窗口重放检查：接受单调递增与窗口内的未见计数。
+//
+// 用「计数对窗口取模」的环形位图实现 O(1) 判定：位下标 = c % recvWindow。
+// 窗口宽恰好等于位图长，窗口 [recvBase, recvMax] 内的计数与位一一对应；
+// 窗口前移时幸存计数的位**原地不动**（含义不漂移），只需清掉滑出区间
+// [recvBase, newBase) 的位——顺序流量下每包清 1 位。语义与旧 map 实现
+// 逐条等价：窗口 [max-recvWindow+1, max]、下界之下拒绝、重复拒绝、大跳变
+// 接受。旧实现窗口每次前移都全表扫描（顺序流量下每包 O(8192) 次 map
+// 迭代），是隧道热路径上最大的单项 CPU 开销（两端都要付）。
 func (s *Session) acceptCounter(c uint64) bool {
+	if c == 0 {
+		return false // 发送端计数从 1 开始，0 只能是伪造
+	}
 	s.recvMu.Lock()
 	defer s.recvMu.Unlock()
-	if s.recvSeen == nil {
-		s.recvSeen = make(map[uint64]struct{})
-	}
-	if c <= s.recvStale {
-		return false
-	}
-	if _, dup := s.recvSeen[c]; dup {
-		return false
-	}
-	s.recvSeen[c] = struct{}{}
 	if c > s.recvMax {
-		// 窗口前移，淘汰滑出窗口的旧计数（注意下溢保护）
-		s.recvMax = c
-		var floor uint64
+		newBase := uint64(1)
 		if c > recvWindow {
-			floor = c - recvWindow
+			newBase = c - recvWindow + 1
 		}
-		for k := range s.recvSeen {
-			if k <= floor {
-				delete(s.recvSeen, k)
+		if newBase > s.recvBase {
+			n := newBase - s.recvBase // 待淘汰的计数个数（按下标取模可能绕回）
+			if n > recvWindow {
+				n = recvWindow // 跨度超过一个窗口时等价全清
+			}
+			start := s.recvBase % recvWindow
+			for i := uint64(0); i < n; i++ {
+				off := (start + i) % recvWindow
+				s.recvBits[off/8] &^= 1 << (off % 8)
 			}
 		}
-		s.recvStale = floor
+		s.recvBase = newBase
+		s.recvMax = c
 	}
+	if c < s.recvBase {
+		return false // 窗口下界之前，一律拒绝
+	}
+	off := c % recvWindow
+	if s.recvBits[off/8]&(1<<(off%8)) != 0 {
+		return false // 重放
+	}
+	s.recvBits[off/8] |= 1 << (off % 8)
 	return true
 }
