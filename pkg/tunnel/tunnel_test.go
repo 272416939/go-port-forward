@@ -670,3 +670,85 @@ func TestConcurrentSealCountersAreUnique(t *testing.T) {
 		t.Fatalf("TxPackets = %d，期望 %d", v.TxPackets, writers*perWriter)
 	}
 }
+
+// 心跳/探测的明文绝不能借接收侧的暂存组装：Seal* 允许并发（服务端有数据泵、
+// 心跳、路由推送三个发送者），而接收泵同时在往 ctrlBuf 里解密。这条用「一边
+// 连续解 Ctrl 一边发满尺寸探测」逼出那种交叉写。
+func TestProbeAndReceiveDoNotShareScratch(t *testing.T) {
+	client, server := sessionPair(t, 0)
+
+	// 预生成一批 Ctrl 包，接收侧循环解它们（每次都会用到 ctrlBuf）。
+	const rounds = 300
+	ips := []string{"203.0.113.7", "198.51.100.9", "192.0.2.33"}
+	ctrls := make([][]byte, rounds)
+	for i := range ctrls {
+		wire, err := server.SealCtrl(sealBuf(), CtrlMessage{Kind: CtrlKindRoutes, IPs: ips})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctrls[i] = append([]byte(nil), wire...)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+
+	wg.Add(1)
+	go func() { // 接收泵：解 Ctrl，校验内容不被踩坏
+		defer wg.Done()
+		for _, w := range ctrls {
+			msg, err := client.OpenCtrl(w)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(msg.IPs) != len(ips) || msg.IPs[0] != ips[0] || msg.IPs[2] != ips[2] {
+				errCh <- errors.New("控制消息内容被并发写坏：" + msg.Kind)
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() { // 心跳：并发发满尺寸探测包
+		defer wg.Done()
+		buf := make([]byte, 0, ProbeBufSize)
+		for i := 0; i < rounds; i++ {
+			pad := client.MTU() - 1
+			wire := client.SealPing(buf[:0], 7, pad)
+			id, plainLen, err := server.OpenPing(wire)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if id != 7 || plainLen != pad+1 {
+				errCh <- errors.New("探测包明文被并发写坏")
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+}
+
+// 满尺寸探测包封装后不得超出协议上限，否则收包缓冲装不下、探测永远失败。
+func TestProbePacketFitsMaxPacket(t *testing.T) {
+	s := mustSession(t, 0)
+	buf := make([]byte, 0, ProbeBufSize)
+	wire := s.SealPing(buf[:0], 1, MaxTunMTU-1)
+	if len(wire) > MaxPacket {
+		t.Fatalf("满尺寸探测包 %d 字节超出 MaxPacket %d", len(wire), MaxPacket)
+	}
+	// 按 ProbeBufSize 备量时不该发生扩容（扩容说明常量算小了）。
+	if cap(buf) < len(wire) {
+		t.Fatalf("ProbeBufSize=%d 装不下 %d 字节的探测包", ProbeBufSize, len(wire))
+	}
+	id, plainLen, err := s.OpenPing(wire)
+	if err != nil || id != 1 || plainLen != MaxTunMTU {
+		t.Fatalf("OpenPing = %d/%d/%v", id, plainLen, err)
+	}
+}

@@ -261,7 +261,8 @@ func (e *Engine) pumpTunToTunnel(ctx context.Context, udp *net.UDPConn,
 func (e *Engine) heartbeat(ctx context.Context, udp *net.UDPConn) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
-	buf := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
+	// 探测包的明文与密文同时占用这块缓冲（明文借尾部组装），按两倍 MTU 备量。
+	buf := make([]byte, 0, tunnel.ProbeBufSize)
 	for {
 		select {
 		case <-ctx.Done():

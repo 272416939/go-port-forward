@@ -187,6 +187,13 @@ type CtrlMessage struct {
 	IPs  []string `json:"ips,omitempty"` // 目的 IP 列表（按 Kind 解释）
 }
 
+// ProbeBufSize 是心跳/探测发送缓冲应有的容量。
+//
+// 满尺寸探测包的明文与密文同时存在于调用方缓冲里（明文借缓冲尾部组装，见
+// Session.SealPing 的说明），所以要按两倍 MTU 备量。备不够只是多一次分配、
+// 不会出错，但探测恰好发生在链路已经不稳的时候，不该再给 GC 添活。
+const ProbeBufSize = 2*MaxTunMTU + SealOverhead + NonceSize
+
 // ClampTunMTU 把任意 MTU 值收进 [MinTunMTU, MaxTunMTU]。0 与越界值一律回落到
 // MaxTunMTU：宁可按缺省值工作（对端也是这个缺省），也不要按一个算错的小值
 // 长期跑——那是静默的吞吐损失。

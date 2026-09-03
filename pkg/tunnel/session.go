@@ -266,8 +266,47 @@ func (s *Session) OpenCtrl(p []byte) (CtrlMessage, error) {
 // 判断某个尺寸的隧道包能否穿过链路（分片丢失是整包全损，不探测就只能靠固定
 // MTU 猜）。普通心跳传 padLen = 0。
 func (s *Session) SealPing(dst []byte, probeID byte, padLen int) []byte {
-	plain := s.probeBuf(probeID, padLen)
-	return s.SealInto(dst, TypePing, plain)
+	if padLen < 0 {
+		padLen = 0
+	}
+	plain := s.stageProbe(&dst, 1+padLen)
+	plain[0] = probeID
+	return s.sealCounter(dst, TypePing, s.nextCounter(), plain)
+}
+
+// SealPong 封装心跳应答。明文 = [probeID(1)][observedLen(2 BE)]。
+func (s *Session) SealPong(dst []byte, probeID byte, observedLen int) []byte {
+	plain := s.stageProbe(&dst, 3)
+	if observedLen < 0 {
+		observedLen = 0
+	}
+	if observedLen > 0xFFFF {
+		observedLen = 0xFFFF
+	}
+	plain[0] = probeID
+	binary.BigEndian.PutUint16(plain[1:], uint16(observedLen))
+	return s.sealCounter(dst, TypePong, s.nextCounter(), plain)
+}
+
+// stageProbe 在 dst 容量的尾部划出一块清零的明文区（不改变 dst 的长度）。
+//
+// 为什么不用会话内的暂存：Seal* 允许并发调用（服务端有数据泵、心跳、路由推送
+// 三个发送者），而 ctrlBuf 是接收泵的解密暂存——心跳借它组装明文就会与接收泵
+// 同时写同一块内存，症状是探测长度或控制消息偶发损坏，且两者都静默。
+// 调用方缓冲是每个发送者各自持有的，借它的尾部天然无竞争。
+//
+// 尾部布局（沿用 sealCounter 的 nonce 借位手法）：
+//
+//	[base .. 密文输出 ..][nonce][明文]
+//
+// 三段互不重叠，Seal 写密文时不会踩到还没读完的明文。
+func (s *Session) stageProbe(dst *[]byte, n int) []byte {
+	base := len(*dst)
+	need := base + SealOverhead + n + NonceSize + n
+	*dst = grow(*dst, need)
+	plain := (*dst)[need-n : need]
+	clear(plain)
+	return plain
 }
 
 // OpenPing 打开心跳包，返回 probeID 与明文长度。
@@ -286,20 +325,6 @@ func (s *Session) OpenPing(p []byte) (probeID byte, plainLen int, err error) {
 	return plain[0], len(plain), nil
 }
 
-// SealPong 封装心跳应答。明文 = [probeID(1)][observedLen(2 BE)]。
-func (s *Session) SealPong(dst []byte, probeID byte, observedLen int) []byte {
-	var plain [3]byte
-	plain[0] = probeID
-	if observedLen < 0 {
-		observedLen = 0
-	}
-	if observedLen > 0xFFFF {
-		observedLen = 0xFFFF
-	}
-	binary.BigEndian.PutUint16(plain[1:], uint16(observedLen))
-	return s.SealInto(dst, TypePong, plain[:])
-}
-
 // OpenPong 打开心跳应答。
 func (s *Session) OpenPong(p []byte) (probeID byte, observedLen int, err error) {
 	if len(p) < 1 || p[0] != TypePong {
@@ -314,20 +339,6 @@ func (s *Session) OpenPong(p []byte) (probeID byte, observedLen int, err error) 
 		return 0, 0, ErrBadPacket
 	}
 	return plain[0], int(binary.BigEndian.Uint16(plain[1:3])), nil
-}
-
-// probeBuf 组装 Ping 明文（复用 ctrlBuf 尾部，避免每次心跳分配）。
-func (s *Session) probeBuf(probeID byte, padLen int) []byte {
-	if padLen < 0 {
-		padLen = 0
-	}
-	if 1+padLen > len(s.ctrlBuf) {
-		padLen = len(s.ctrlBuf) - 1
-	}
-	buf := s.ctrlBuf[:1+padLen]
-	clear(buf)
-	buf[0] = probeID
-	return buf
 }
 
 // acceptCounter 滑动窗口重放检查：接受单调递增与窗口内的未见计数。
