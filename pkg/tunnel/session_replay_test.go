@@ -49,7 +49,7 @@ func (o *mapOracle) accept(c uint64) bool {
 func TestReplayWindowBitmapMatchesMapOracle(t *testing.T) {
 	rng := rand.New(rand.NewSource(7947))
 	newSession := func() *Session {
-		return NewSession(&[32]byte{})
+		return mustSession(t, 0)
 	}
 
 	for round := 0; round < 200; round++ {
@@ -92,7 +92,7 @@ func TestReplayWindowBitmapMatchesMapOracle(t *testing.T) {
 // O(窗口)。这里无法直接测指令数，改测行为侧面——连续推进一大段后，
 // 窗口之外的陈旧计数必须被拒绝（位确实被清掉了）。
 func TestReplayWindowEvictsOldCounters(t *testing.T) {
-	s := NewSession(&[32]byte{})
+	s := mustSession(t, 0)
 	// 隔一个跳一个：偶数计数从未到达，留给「窗口内未见」分支。
 	for c := uint64(1); c <= recvWindow*3; c += 2 {
 		if !s.acceptCounter(c) {

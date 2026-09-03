@@ -13,9 +13,9 @@ import (
 
 // 握手域分隔标签，避免不同方向的 MAC 互挪。版本后缀让新旧端天然互不认证。
 var (
-	helloDomain  = []byte("pfapp-hello-v3")
-	acceptDomain = []byte("pfapp-accept-v3")
-	rejectDomain = []byte("pfapp-reject-v3")
+	helloDomain  = []byte("pfapp-hello-v4")
+	acceptDomain = []byte("pfapp-accept-v4")
+	rejectDomain = []byte("pfapp-reject-v4")
 )
 
 // 握手时间戳容忍窗口（防重放 + 容忍时钟偏差）。
@@ -23,11 +23,13 @@ const helloMaxAge = 10 * time.Minute
 
 // 报文长度（含 1 字节类型前缀）。
 const (
-	helloLen   = 1 + 1 + UIDSize + FingerprintSize + 32 + 8 + 32 // 122
-	acceptLen  = 1 + 1 + 32 + 4 + 1 + 4 + 32                     // 75
-	rejectLen  = 1 + 1 + 1 + 32                                  // 35
-	helloLenV1 = 1 + 32 + 8 + 32                                 // 73，仅用于识别旧客户端
-	helloLenV2 = 1 + 1 + UIDSize + 32 + 8 + 32                   // 90，同上
+	helloLen  = 1 + 1 + UIDSize + FingerprintSize + 32 + 8 + 32 // 122
+	acceptLen = 1 + 1 + 32 + 4 + 1 + 4 + 2 + 1 + 32             // 78
+	rejectLen = 1 + 1 + 1 + 32                                  // 35
+	// 旧版本 Hello 的长度，仅用于识别旧客户端。v3 与 v4 的 Hello 长度相同
+	// （字段没变），v3 靠版本字节识别。
+	helloLenV1 = 1 + 32 + 8 + 32               // 73
+	helloLenV2 = 1 + 1 + UIDSize + 32 + 8 + 32 // 90
 )
 
 // macPSK 计算 HMAC-SHA256(secret, domain || parts...)。
@@ -138,16 +140,23 @@ func ParseClientHello(secret, b []byte) (*ClientHello, error) {
 //
 // TunIP/Prefix/Gateway 是服务端为该访问码分配的隧道内地址，全部纳入 MAC——
 // 否则中间人可以把客户端的隧道地址改成别人的，绕过服务端的隔离检查。
+//
+// MTU/Feats 同样进 MAC：能改 MTU 的中间人可以把隧道压到不可用的小值（静默的
+// 吞吐攻击），能改 Feats 的可以单向关掉 FEC（一端发、一端不认，那些校验包会
+// 被当未知类型丢弃，表现成「开了纠错反而更卡」）。
 type ServerAccept struct {
 	Eph     [32]byte // 服务端临时 X25519 公钥
 	TunIP   [4]byte  // 分配给客户端的隧道内地址
 	Prefix  uint8    // 隧道网段前缀长度
 	Gateway [4]byte  // 隧道内网关（服务端的隧道地址）
+	MTU     uint16   // 服务端算出的隧道 MTU（客户端据此设置 wintun）
+	Feats   uint8    // 会话特性开关（FeatFEC / FeatTailDup）
 	MAC     [32]byte
 }
 
 // NewServerAccept 生成服务端应答包，返回服务端临时私钥。
-func NewServerAccept(secret []byte, clientEph [32]byte, tunIP, gateway netip.Addr, prefix int) (*ServerAccept, *[32]byte, error) {
+func NewServerAccept(secret []byte, clientEph [32]byte, tunIP, gateway netip.Addr,
+	prefix, mtu int, feats uint8) (*ServerAccept, *[32]byte, error) {
 	if !tunIP.Is4() || !gateway.Is4() {
 		return nil, nil, ErrBadPacket
 	}
@@ -158,14 +167,24 @@ func NewServerAccept(secret []byte, clientEph [32]byte, tunIP, gateway netip.Add
 	if err != nil {
 		return nil, nil, err
 	}
-	a := &ServerAccept{Eph: *pub, TunIP: tunIP.As4(), Prefix: uint8(prefix), Gateway: gateway.As4()}
+	a := &ServerAccept{
+		Eph:     *pub,
+		TunIP:   tunIP.As4(),
+		Prefix:  uint8(prefix),
+		Gateway: gateway.As4(),
+		MTU:     uint16(ClampTunMTU(mtu)),
+		Feats:   feats,
+	}
 	a.MAC = a.mac(secret, clientEph)
 	return a, priv, nil
 }
 
 func (a *ServerAccept) mac(secret []byte, clientEph [32]byte) [32]byte {
+	var mtuBE [2]byte
+	binary.BigEndian.PutUint16(mtuBE[:], a.MTU)
 	return macPSK(secret, acceptDomain,
-		[]byte{Version}, a.Eph[:], clientEph[:], a.TunIP[:], []byte{a.Prefix}, a.Gateway[:])
+		[]byte{Version}, a.Eph[:], clientEph[:], a.TunIP[:], []byte{a.Prefix},
+		a.Gateway[:], mtuBE[:], []byte{a.Feats})
 }
 
 // TunAddr 返回分配到的隧道内地址。
@@ -174,6 +193,9 @@ func (a *ServerAccept) TunAddr() netip.Addr { return netip.AddrFrom4(a.TunIP) }
 // GatewayAddr 返回隧道内网关地址。
 func (a *ServerAccept) GatewayAddr() netip.Addr { return netip.AddrFrom4(a.Gateway) }
 
+// TunMTU 返回下发的隧道 MTU（越界值回落到缺省）。
+func (a *ServerAccept) TunMTU() int { return ClampTunMTU(int(a.MTU)) }
+
 // ECDHShared 计算 X25519 共享密钥（box.Precompute 语义）。
 func ECDHShared(peerPub, myPriv *[32]byte) *[32]byte {
 	shared := new([32]byte)
@@ -181,7 +203,7 @@ func ECDHShared(peerPub, myPriv *[32]byte) *[32]byte {
 	return shared
 }
 
-// Marshal 序列化为 UDP 载荷：[0x02]ver||eph||tunIP||prefix||gw||mac。
+// Marshal 序列化为 UDP 载荷：[0x02]ver||eph||tunIP||prefix||gw||mtu||feats||mac。
 func (a *ServerAccept) Marshal() []byte {
 	out := make([]byte, 0, acceptLen)
 	out = append(out, TypeAccept, Version)
@@ -189,6 +211,8 @@ func (a *ServerAccept) Marshal() []byte {
 	out = append(out, a.TunIP[:]...)
 	out = append(out, a.Prefix)
 	out = append(out, a.Gateway[:]...)
+	out = binary.BigEndian.AppendUint16(out, a.MTU)
+	out = append(out, a.Feats)
 	out = append(out, a.MAC[:]...)
 	return out
 }
@@ -198,11 +222,13 @@ func ParseServerAccept(secret, b []byte, clientEph [32]byte) (*ServerAccept, err
 	if len(b) < 1 || b[0] != TypeAccept {
 		return nil, ErrBadPacket
 	}
+	// 版本先判：v3 服务端的 Accept 是 75 字节，长度检查会先把它报成
+	// ErrBadPacket，而真正的原因是版本不匹配（运维会去查密钥而不是查版本）。
+	if len(b) >= 2 && b[1] != Version {
+		return nil, ErrOldVersion
+	}
 	if len(b) < acceptLen {
 		return nil, ErrBadPacket
-	}
-	if b[1] != Version {
-		return nil, ErrOldVersion
 	}
 	a := &ServerAccept{}
 	off := 2
@@ -214,6 +240,10 @@ func ParseServerAccept(secret, b []byte, clientEph [32]byte) (*ServerAccept, err
 	off++
 	copy(a.Gateway[:], b[off:off+4])
 	off += 4
+	a.MTU = binary.BigEndian.Uint16(b[off : off+2])
+	off += 2
+	a.Feats = b[off]
+	off++
 	copy(a.MAC[:], b[off:off+32])
 
 	want := a.mac(secret, clientEph)
@@ -265,11 +295,14 @@ func (r *ServerReject) Marshal() []byte {
 // 必须验 MAC：不验的话任何人都能伪造一个 Reject 让客户端停止重连——那是一个
 // 单包就能生效的拒绝服务。
 func ParseServerReject(secret, b []byte, clientEph [32]byte) (*ServerReject, error) {
-	if len(b) < rejectLen || b[0] != TypeReject {
+	if len(b) < 1 || b[0] != TypeReject {
 		return nil, ErrBadPacket
 	}
-	if b[1] != Version {
+	if len(b) >= 2 && b[1] != Version {
 		return nil, ErrOldVersion
+	}
+	if len(b) < rejectLen {
+		return nil, ErrBadPacket
 	}
 	r := &ServerReject{Reason: RejectReason(b[2])}
 	copy(r.MAC[:], b[3:3+32])
