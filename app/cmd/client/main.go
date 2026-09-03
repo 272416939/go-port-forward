@@ -32,9 +32,13 @@ func main() {
 	// WebView2 的消息循环必须固定在创建它的 OS 线程上。
 	runtime.LockOSThread()
 
+	// 软内存上限（GC 的节奏阀，不是缓冲上限——所有缓冲自身都有固定上界）。
+	memLimitMB := applyMemoryLimit()
+
 	openStartupLog()
 	defer closeStartupLog()
 	diag("可执行文件：%s", exePath())
+	diag("软内存上限：%d MB", memLimitMB)
 	diag("Windows 版本：%s", windowsVersion())
 	diag("管理员权限：%v", syssetup.IsElevated())
 
