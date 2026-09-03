@@ -12,6 +12,7 @@ package main
 //     玩家全部回包，进不来服务器。
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ import (
 )
 
 // withLifecycleStubs 把提权与设备指纹换成恒真替身，让 Start 能走进状态机。
+// Start 会把凭据落盘到 exe 目录的 pf-client.conf，结束必须清掉——否则同包
+// 后跑的用例（如 ui_test 的「拒绝缺凭据」）会读到这份配置，行为取决于文件
+// 而不是用例自己的布置。
 func withLifecycleStubs(t *testing.T) {
 	t.Helper()
 	oldElev, oldFP := isElevatedFn, deviceFingerprintFn
@@ -27,7 +31,10 @@ func withLifecycleStubs(t *testing.T) {
 	deviceFingerprintFn = func() (string, error) {
 		return strings.Repeat("ab", tunnel.FingerprintSize), nil
 	}
-	t.Cleanup(func() { isElevatedFn, deviceFingerprintFn = oldElev, oldFP })
+	t.Cleanup(func() {
+		isElevatedFn, deviceFingerprintFn = oldElev, oldFP
+		_ = os.Remove(confPath())
+	})
 }
 
 func testConf(addr string) clientConfig {

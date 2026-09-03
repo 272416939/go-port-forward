@@ -115,18 +115,51 @@ func (s *uiServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	// 三个字段都空时沿用已保存的凭据（界面上的「连接」按钮不必每次重填）。
-	if strings.TrimSpace(req.Code) == "" && strings.TrimSpace(req.CodeID) == "" && strings.TrimSpace(req.Secret) == "" {
-		saved := loadConfig()
-		if saved.complete() {
-			if a := strings.TrimSpace(req.Addr); a != "" {
-				saved.Addr = a
-			}
-			s.start(w, saved)
+	code := strings.TrimSpace(req.Code)
+	addr := strings.TrimSpace(req.Addr)
+	codeID := strings.TrimSpace(req.CodeID)
+	secret := strings.TrimSpace(req.Secret)
+
+	// 粘贴了完整接入码：一次带齐地址、访问码 ID 与密钥（手工地址可覆盖）。
+	if code != "" {
+		conf, err := parseConnectInput(code, addr, codeID, secret)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.start(w, conf)
+		return
 	}
-	conf, err := parseConnectInput(req.Code, req.Addr, req.CodeID, req.Secret)
+
+	// 密钥留空 = 沿用已保存的凭据。界面在连接成功后会清掉接入码与密钥两个
+	// 输入框（已落盘，留在界面上只是泄漏面），只回填地址与访问码 ID——所以
+	// 「断开后重连」发来的请求形态是 code 空、code_id 有值、secret 空。旧判据
+	// 「三个字段都空才沿用已保存」在这种形态下永不成立，重连必然 400，而错误
+	// 提示又被 1 秒一次的状态轮询抹掉，用户看到的就是「点连接没反应」（2026-09-03
+	// 二次实测的真正根因）。这正是界面占位符「已保存（留空即沿用）」承诺的语义。
+	if secret == "" {
+		saved := loadConfig()
+		if !saved.complete() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "请粘贴接入码建立连接（可在面板的「我的访问码」中获取）"})
+			return
+		}
+		if codeID != "" && codeID != saved.CodeID {
+			// 换了身份却不带密钥：沿用旧密钥必然握手失败，明确拒绝并指引，
+			// 不让用户对着「无应答」排查半天。
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "访问码 ID 与已保存的不一致：换用其他访问码请粘贴对应接入码，或同时补填隧道密钥"})
+			return
+		}
+		if addr != "" {
+			saved.Addr = addr
+		}
+		s.start(w, saved)
+		return
+	}
+
+	// 密钥非空：手工三项（访问码 ID + 密钥）。
+	conf, err := parseConnectInput("", addr, codeID, secret)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

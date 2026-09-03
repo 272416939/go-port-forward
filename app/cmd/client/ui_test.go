@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,11 @@ func TestUIServerServesAndGuards(t *testing.T) {
 	})
 
 	t.Run("连接接口拒绝缺凭据的请求", func(t *testing.T) {
+		// 配置文件是全局状态（其他用例的 Start 会落盘完整凭据），这里测的是
+		// 「没有已保存凭据」的分支，必须显式清掉，行为才不取决于文件顺序。
+		if err := os.Remove(confPath()); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("清理配置文件: %v", err)
+		}
 		// 空请求、只有地址没有凭据、损坏的接入码：都必须 400 而不是
 		// 带着空凭据去握手（那样服务端只会静默丢包，用户看到的是「无应答」）。
 		for _, body := range []string{

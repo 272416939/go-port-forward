@@ -34,6 +34,10 @@ const STATE_TEXT = {
 // dirty 为真时不要用服务端返回的值覆盖用户正在输入的内容。
 const dirty = { addr: false, codeId: false };
 let busy = false;
+// 点击类操作（连接/断开）的报错要「粘住」：状态轮询每秒重绘错误框（只显示
+// 引擎自身的 last_error），不粘住的话操作报错 1 秒内就被抹掉——用户看到的
+// 就是「点了没反应」（2026-09-03 实测）。
+let actionError = '';
 // stopped 在用户主动退出后置位：此后不再轮询，避免把"进程已退出"报成故障。
 let stopped = false;
 
@@ -234,7 +238,8 @@ function render(s) {
   renderLink(s);
 
   // 连接中不显示上一次的失败原因，避免误读为当前状态。
-  showError(s.state === 'error' ? s.last_error : '');
+  // 操作报错优先于引擎错误：它更新，且正对着用户刚做的动作。
+  showError(actionError || (s.state === 'error' ? s.last_error : ''));
   // 终态错误（换了设备、访问码被停用）不会自动重试，标签要说清楚，
   // 否则用户会以为再等一会儿就好了。
   if (s.state === 'error' && s.terminal) ui.stateText.textContent = '已停止（需处理）';
@@ -259,6 +264,7 @@ async function poll() {
 
 ui.connect.addEventListener('click', async () => {
   busy = true;
+  actionError = '';
   showError('');
   try {
     await api('/api/connect', {
@@ -277,6 +283,7 @@ ui.connect.addEventListener('click', async () => {
     dirty.addr = false;
     dirty.codeId = false;
   } catch (err) {
+    actionError = err.message;
     showError(err.message);
   } finally {
     busy = false;
@@ -286,9 +293,11 @@ ui.connect.addEventListener('click', async () => {
 
 ui.disconnect.addEventListener('click', async () => {
   busy = true;
+  actionError = '';
   try {
     await api('/api/disconnect', { method: 'POST' });
   } catch (err) {
+    actionError = err.message;
     showError(err.message);
   } finally {
     busy = false;
