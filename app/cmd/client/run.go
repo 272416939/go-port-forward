@@ -361,6 +361,10 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 	uid tunnel.UID, device [tunnel.FingerprintSize]byte, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
 	var none tunnelAddressing
 	buf := make([]byte, tunnel.MaxPacket+64)
+	// 8 次尝试共用的「残留包已忽略」日志锚点：残留包在握手期间可能持续到达
+	// （服务端旧会话的心跳 5 秒一个），只提示一次，别刷屏。
+	staleLogged := false
+attemptLoop:
 	for attempt := 1; attempt <= handshakeTries; attempt++ {
 		if ctx.Err() != nil {
 			return nil, none, ctx.Err()
@@ -372,49 +376,65 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 		if _, err := udp.Write(hello.Marshal()); err != nil {
 			return nil, none, err
 		}
-		_ = udp.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		n, err := udp.Read(buf)
-		if err != nil {
-			e.logf("等待服务端应答 (%d/%d)…", attempt, handshakeTries)
-			continue
-		}
-		// 服务端明确拒绝：必须验 MAC 才采信。不验的话任何人都能伪造一个
-		// Reject 让客户端停止重连——单包就能做到的拒绝服务。
-		if n > 0 && buf[0] == tunnel.TypeReject {
-			rej, rerr := tunnel.ParseServerReject(secret, buf[:n], hello.Eph)
-			if rerr != nil {
-				e.logf("收到无法验证的拒绝应答，已忽略 (%d/%d)…", attempt, handshakeTries)
-				continue
+		// 同一个 1.5 秒窗口内排空非应答包，只认 Accept 与 Reject：
+		// 断开后服务端的旧会话在 janitor 回收前（最长 3 分钟）仍会向本地址发
+		// 心跳与路由推送，而客户端快速重连时 NAT（EIM 映射）与 OS 都可能复用
+		// 刚释放的源端口——残留包就这样落进握手 socket 的接收队列。它们不是
+		// 应答，忽略后继续等；此前它们会掉进 Accept 解析失败，被误报成
+		// 「接入码可能已失效，请在面板重新获取」，把用户引去重置接入码
+		//（2026-09-03 用户实测：反复断开/连接后握手必报接入码失效）。
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for {
+			_ = udp.SetReadDeadline(deadline)
+			n, err := udp.Read(buf)
+			if err != nil {
+				e.logf("等待服务端应答 (%d/%d)…", attempt, handshakeTries)
+				continue attemptLoop
 			}
-			return nil, none, &rejectedError{reason: rej.Reason}
-		}
-		accept, err := tunnel.ParseServerAccept(secret, buf[:n], hello.Eph)
-		if err != nil {
-			if errors.Is(err, tunnel.ErrOldVersion) {
-				return nil, none, fmt.Errorf("中转机的服务端版本过旧（隧道协议已升级），请让管理员升级服务端后重试")
+			// 服务端明确拒绝：必须验 MAC 才采信。不验的话任何人都能伪造一个
+			// Reject 让客户端停止重连——单包就能做到的拒绝服务。
+			if n > 0 && buf[0] == tunnel.TypeReject {
+				rej, rerr := tunnel.ParseServerReject(secret, buf[:n], hello.Eph)
+				if rerr != nil {
+					e.logf("收到无法验证的拒绝应答，已忽略 (%d/%d)…", attempt, handshakeTries)
+					continue
+				}
+				return nil, none, &rejectedError{reason: rej.Reason}
 			}
-			return nil, none, fmt.Errorf("%v（接入码可能已失效，请在面板重新获取）", err)
+			if n > 0 && buf[0] == tunnel.TypeAccept {
+				accept, aerr := tunnel.ParseServerAccept(secret, buf[:n], hello.Eph)
+				if aerr != nil {
+					if errors.Is(aerr, tunnel.ErrOldVersion) {
+						return nil, none, fmt.Errorf("中转机的服务端版本过旧（隧道协议已升级），请让管理员升级服务端后重试")
+					}
+					return nil, none, fmt.Errorf("%v（接入码可能已失效，请在面板重新获取）", aerr)
+				}
+				_ = udp.SetReadDeadline(time.Time{})
+				shared := tunnel.ECDHShared(&accept.Eph, priv)
+				// 方向密钥：客户端发 c2s、收 s2c，服务端反接。v3 两个方向共用一把
+				// 密钥且计数都从 1 开始，等于每包都在重用 (key, nonce)。
+				c2s, s2c, kerr := tunnel.DeriveSessionKeys(shared, secret, hello.Eph, accept.Eph)
+				if kerr != nil {
+					return nil, none, fmt.Errorf("派生会话密钥失败：%v", kerr)
+				}
+				sess, serr := tunnel.NewClientSession(c2s, s2c, uint32(accept.Feats), accept.TunMTU())
+				if serr != nil {
+					return nil, none, fmt.Errorf("建立会话失败：%v", serr)
+				}
+				addressing := tunnelAddressing{
+					ClientIP: accept.TunAddr().String(),
+					Mask:     prefixToMask(int(accept.Prefix)),
+					Gateway:  accept.GatewayAddr().String(),
+				}
+				e.probeDone.Store(false)
+				e.probeTries.Store(0)
+				return sess, addressing, nil
+			}
+			if !staleLogged {
+				staleLogged = true
+				e.logf("忽略上一轮会话的残留包，继续等待握手应答 (%d/%d)…", attempt, handshakeTries)
+			}
 		}
-		_ = udp.SetReadDeadline(time.Time{})
-		shared := tunnel.ECDHShared(&accept.Eph, priv)
-		// 方向密钥：客户端发 c2s、收 s2c，服务端反接。v3 两个方向共用一把
-		// 密钥且计数都从 1 开始，等于每包都在重用 (key, nonce)。
-		c2s, s2c, kerr := tunnel.DeriveSessionKeys(shared, secret, hello.Eph, accept.Eph)
-		if kerr != nil {
-			return nil, none, fmt.Errorf("派生会话密钥失败：%v", kerr)
-		}
-		sess, serr := tunnel.NewClientSession(c2s, s2c, uint32(accept.Feats), accept.TunMTU())
-		if serr != nil {
-			return nil, none, fmt.Errorf("建立会话失败：%v", serr)
-		}
-		addressing := tunnelAddressing{
-			ClientIP: accept.TunAddr().String(),
-			Mask:     prefixToMask(int(accept.Prefix)),
-			Gateway:  accept.GatewayAddr().String(),
-		}
-		e.probeDone.Store(false)
-		e.probeTries.Store(0)
-		return sess, addressing, nil
 	}
 
 	// 8 次 v4 握手全部无应答：用一条 v3 格式的探测包再试一次。服务端对版本
