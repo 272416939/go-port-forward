@@ -11,11 +11,14 @@ import (
 
 // fakeTun 是可注入的 tun.Device：按脚本返回批读结果，并记录写入内容。
 type fakeTun struct {
-	batch   int
-	reads   [][][]byte // 每次 Read 交付的包组
-	readIdx int
-	written [][]byte
-	wrOff   int
+	batch    int
+	reads    [][][]byte // 每次 Read 交付的包组
+	readIdx  int
+	written  [][]byte
+	wrOff    int
+	writes   int // Write 被调用的次数（批量写的验证锚点）
+	wrErr    error
+	wrGroups []int // 每次 Write 收到的包数
 }
 
 func (f *fakeTun) File() *os.File { return nil }
@@ -41,17 +44,22 @@ func (f *fakeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 
 func (f *fakeTun) Write(bufs [][]byte, offset int) (int, error) {
 	f.wrOff = offset
+	f.writes++
+	f.wrGroups = append(f.wrGroups, len(bufs))
+	if f.wrErr != nil {
+		return 0, f.wrErr
+	}
 	for _, b := range bufs {
 		f.written = append(f.written, append([]byte(nil), b[offset:]...))
 	}
 	return len(bufs), nil
 }
 
-func (f *fakeTun) MTU() (int, error)          { return 1400, nil }
-func (f *fakeTun) Name() (string, error)      { return "fake", nil }
-func (f *fakeTun) Events() <-chan tun.Event   { return nil }
-func (f *fakeTun) Close() error               { return nil }
-func (f *fakeTun) BatchSize() int             { return f.batch }
+func (f *fakeTun) MTU() (int, error)        { return 1400, nil }
+func (f *fakeTun) Name() (string, error)    { return "fake", nil }
+func (f *fakeTun) Events() <-chan tun.Event { return nil }
+func (f *fakeTun) Close() error             { return nil }
+func (f *fakeTun) BatchSize() int           { return f.batch }
 
 // ipPacket 造一个长度为 n 的可辨识 IPv4 包（首字节 0x45，尾字节为标记）。
 func ipPacket(n int, tag byte) []byte {
@@ -140,5 +148,245 @@ func TestReadPacketDropsOversizePacket(t *testing.T) {
 	}
 	if d.Dropped() != 1 {
 		t.Fatalf("Dropped = %d, 期望 1", d.Dropped())
+	}
+}
+
+// 按 ReadBufSize 分配的缓冲必须能容纳设备可能交出的任意包：调用方此前硬编码
+// 1500，MTU 一提高就变成静默丢包。
+func TestReadBufSizeCoversDeviceBuffers(t *testing.T) {
+	for _, batch := range []int{1, 4} {
+		f := &fakeTun{batch: batch}
+		d := newDevice(f, 1400)
+		if d.ReadBufSize() < d.MTU() {
+			t.Fatalf("batch=%d: ReadBufSize %d 小于 MTU %d", batch, d.ReadBufSize(), d.MTU())
+		}
+		pkt := ipPacket(d.ReadBufSize(), 0x7F)
+		f.reads = [][][]byte{{pkt}}
+		buf := make([]byte, d.ReadBufSize())
+		n, err := d.ReadPacket(buf)
+		if err != nil {
+			t.Fatalf("batch=%d: ReadPacket: %v", batch, err)
+		}
+		if n != len(pkt) || d.Dropped() != 0 {
+			t.Fatalf("batch=%d: n=%d dropped=%d，按 ReadBufSize 分配不该丢包", batch, n, d.Dropped())
+		}
+	}
+}
+
+// SetMTU 只允许在读缓冲能容纳的范围内调整：协商只往下调，越界值必须被忽略
+// 而不是把 MTU 设成一个读缓冲装不下的数（那会让每个满长包静默丢弃）。
+func TestSetMTURespectsBufferCapacity(t *testing.T) {
+	d := newDevice(&fakeTun{batch: 4}, 1400)
+	d.SetMTU(1300)
+	if d.MTU() != 1300 {
+		t.Fatalf("下调 MTU 失败: %d", d.MTU())
+	}
+	d.SetMTU(60000)
+	if d.MTU() != 1300 {
+		t.Fatalf("超出读缓冲容量的 MTU 必须被忽略，得到 %d", d.MTU())
+	}
+	d.SetMTU(0)
+	if d.MTU() != 1300 {
+		t.Fatalf("非法 MTU 必须被忽略，得到 %d", d.MTU())
+	}
+}
+
+// 批量写：N 个包必须只产生一次底层 Write，且每个包都落在 Offset 之后、内容
+// 逐字节保真、顺序保持。这三条任何一条错都是数据面故障。
+func TestBatchWriteCoalescesIntoOneCall(t *testing.T) {
+	f := &fakeTun{batch: 8}
+	d := newDevice(f, 1400)
+	b := d.NewBatch(0)
+	if b.Cap() != 8 {
+		t.Fatalf("批容量 = %d，期望跟随设备 BatchSize", b.Cap())
+	}
+
+	pkts := [][]byte{ipPacket(40, 1), ipPacket(1400, 2), ipPacket(64, 3)}
+	for _, p := range pkts {
+		if !b.Add(p) {
+			t.Fatal("批未满时 Add 不应失败")
+		}
+	}
+	if b.Len() != len(pkts) {
+		t.Fatalf("Len = %d, 期望 %d", b.Len(), len(pkts))
+	}
+	if f.writes != 0 {
+		t.Fatal("Flush 之前不得触发底层写")
+	}
+	if err := b.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if f.writes != 1 {
+		t.Fatalf("底层 Write 调用次数 = %d，期望 1（批量化的全部意义）", f.writes)
+	}
+	if f.wrOff != Offset {
+		t.Fatalf("写入 offset = %d, 期望 %d", f.wrOff, Offset)
+	}
+	if len(f.written) != len(pkts) {
+		t.Fatalf("写出包数 = %d, 期望 %d", len(f.written), len(pkts))
+	}
+	for i, want := range pkts {
+		if !bytes.Equal(f.written[i], want) {
+			t.Fatalf("第 %d 个包内容不符（顺序或暂存复用出错）", i)
+		}
+	}
+	if b.Len() != 0 {
+		t.Fatal("Flush 后批必须清空")
+	}
+	// 空批 Flush 不得产生 syscall。
+	if err := b.Flush(); err != nil || f.writes != 1 {
+		t.Fatalf("空批 Flush 应是空操作: err=%v writes=%d", err, f.writes)
+	}
+}
+
+// Next/Commit 是零拷贝入口：调用方把明文直接解进槽位再提交，写出的内容必须
+// 与它写入的逐字节一致。
+func TestBatchNextCommitWritesInPlace(t *testing.T) {
+	f := &fakeTun{batch: 4}
+	d := newDevice(f, 1400)
+	b := d.NewBatch(2)
+
+	want := ipPacket(120, 0xAA)
+	dst := b.Next()
+	if dst == nil || len(dst) != 0 {
+		t.Fatalf("Next 应返回长度 0 的可写切片，得到 %v", dst)
+	}
+	dst = append(dst, want...)
+	b.Commit(len(dst))
+
+	// 未 Commit 的槽位必须被放弃，不进入写出序列。
+	if second := b.Next(); second == nil {
+		t.Fatal("第二个槽位应可用")
+	}
+	if b.Len() != 1 {
+		t.Fatalf("Len = %d，未 Commit 的槽位不该计入", b.Len())
+	}
+	if err := b.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if len(f.written) != 1 || !bytes.Equal(f.written[0], want) {
+		t.Fatalf("写出内容不符: %x", f.written)
+	}
+}
+
+// 批满必须能被调用方感知（Next 返回 nil / Add 返回 false），否则包会被静默
+// 丢掉——那正是「链路通但业务不通」的经典形态。
+func TestBatchReportsFull(t *testing.T) {
+	d := newDevice(&fakeTun{batch: 1}, 1400)
+	b := d.NewBatch(2)
+	if !b.Add(ipPacket(40, 1)) || !b.Add(ipPacket(40, 2)) {
+		t.Fatal("前两个包应成功入批")
+	}
+	if b.Next() != nil {
+		t.Fatal("批满时 Next 必须返回 nil")
+	}
+	if b.Add(ipPacket(40, 3)) {
+		t.Fatal("批满时 Add 必须返回 false 让调用方 Flush")
+	}
+}
+
+// 超出单槽容量的包丢弃并计数，但不得卡住整批。
+func TestBatchDropsOversizePacket(t *testing.T) {
+	f := &fakeTun{batch: 4}
+	d := newDevice(f, 1400)
+	b := d.NewBatch(2)
+
+	huge := make([]byte, writeSegment+1)
+	if !b.Add(huge) {
+		t.Fatal("超规格包应被丢弃并视为已处理，不能卡住整批")
+	}
+	if d.Dropped() != 1 {
+		t.Fatalf("Dropped = %d，期望 1", d.Dropped())
+	}
+	ok := ipPacket(50, 9)
+	if !b.Add(ok) {
+		t.Fatal("超规格包不应占用槽位")
+	}
+	if err := b.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if len(f.written) != 1 || !bytes.Equal(f.written[0], ok) {
+		t.Fatalf("只应写出合规包: %d 个", len(f.written))
+	}
+}
+
+// 整批写失败必须把错误上抛：静默丢弃写错误曾让「服务端每个包都写失败」的
+// 故障在日志里一个字都没有。
+func TestBatchFlushPropagatesError(t *testing.T) {
+	f := &fakeTun{batch: 4, wrErr: errors.New("boom")}
+	d := newDevice(f, 1400)
+	b := d.NewBatch(2)
+	b.Add(ipPacket(40, 1))
+	if err := b.Flush(); err == nil {
+		t.Fatal("底层写失败必须上抛")
+	}
+	if b.Len() != 0 {
+		t.Fatal("失败后批也要清空，否则下一轮会重复写同一批")
+	}
+}
+
+// 暂存复用的经典风险是串包：连续多批写入，每批内容必须互不污染。
+func TestBatchReuseDoesNotLeakAcrossFlushes(t *testing.T) {
+	f := &fakeTun{batch: 4}
+	d := newDevice(f, 1400)
+	b := d.NewBatch(3)
+
+	for round := 0; round < 5; round++ {
+		var want [][]byte
+		for i := 0; i < 3; i++ {
+			// 长度递减：若暂存切片长度没被正确重置，上一轮的尾部会漏出来。
+			p := ipPacket(300-round*40-i*7, byte(round*10+i))
+			want = append(want, p)
+			if !b.Add(p) {
+				t.Fatalf("round %d: Add 失败", round)
+			}
+		}
+		if err := b.Flush(); err != nil {
+			t.Fatalf("round %d: Flush: %v", round, err)
+		}
+		got := f.written[len(f.written)-3:]
+		for i := range want {
+			if !bytes.Equal(got[i], want[i]) {
+				t.Fatalf("round %d 第 %d 个包被污染: len %d vs %d",
+					round, i, len(got[i]), len(want[i]))
+			}
+		}
+	}
+	if f.writes != 5 {
+		t.Fatalf("底层 Write 次数 = %d，期望 5", f.writes)
+	}
+}
+
+func BenchmarkBatchWrite64(b *testing.B) {
+	f := &fakeTun{batch: 64}
+	d := newDevice(f, 1400)
+	batch := d.NewBatch(64)
+	pkt := ipPacket(1400, 7)
+	b.SetBytes(int64(len(pkt)) * 64)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		f.written = f.written[:0]
+		for j := 0; j < 64; j++ {
+			batch.Add(pkt)
+		}
+		if err := batch.Flush(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWritePacket(b *testing.B) {
+	f := &fakeTun{batch: 1}
+	d := newDevice(f, 1400)
+	pkt := ipPacket(1400, 7)
+	b.SetBytes(int64(len(pkt)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		f.written = f.written[:0]
+		if err := d.WritePacket(pkt); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
