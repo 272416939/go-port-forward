@@ -22,6 +22,22 @@ import (
 	"pfapp/internal/syssetup"
 )
 
+const (
+	// pumpIdleTimeout 是「多久收不到任何入站包就重握手」。
+	//
+	// 客户端 NAT 换端口（手机切网、运营商 UDP 会话老化）后，服务端在会话表里
+	// 查不到新来源、按设计静默丢弃（防反射放大，正确，不能改）。客户端感知
+	// 恢复的唯一途径就是这个读超时。
+	//
+	// 从 30s 降到 10s：服务端心跳 5 秒一个，10 秒 = 连续错过两个心跳 + 余量。
+	// 误判的代价是多一次握手（一个 RTT + 两次 X25519，微秒级 CPU），收益是
+	// 最差恢复时间从 30 秒压到 10 秒。
+	pumpIdleTimeout = 10 * time.Second
+	// probeStartDelay 是隧道建立后开始探测路径 MTU 的延迟。
+	// 让进服的首波流量先过去，探测不与它抢。
+	probeStartDelay = 2 * time.Second
+)
+
 func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	serverAddr, err := net.ResolveUDPAddr("udp", conf.Addr)
 	if err != nil {
@@ -51,61 +67,22 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	_ = udp.SetWriteBuffer(4 << 20)
 	defer udp.Close()
 
-	dev, err := tunnet.Open(tunName, 1400)
+	// 网卡按协议上限创建；服务端在握手应答里下发实际 MTU，若更小则在
+	// applyAddressing 之后下调（只能往下调，网卡缓冲不必重建）。
+	dev, err := tunnet.Open(tunName, tunnel.MaxTunMTU)
 	if err != nil {
 		e.fail("创建虚拟网卡失败（请确认以管理员运行）：%v", err)
 		return
 	}
 	defer dev.Close()
+	e.dev.Store(dev)
+	defer e.dev.Store(nil)
 
 	// 网卡就绪前 TUN 上不会有流量，出向泵起得早一点无害；它自己会在
 	// sess 或路由管理器尚未就绪时丢包。
 	var rmHolder atomic.Pointer[routeManager]
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, rerr := dev.ReadPacket(buf)
-			if rerr != nil {
-				return
-			}
-			if n == 0 || ctx.Err() != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				continue
-			}
-			sess := e.session()
-			rm := rmHolder.Load()
-			if sess == nil || rm == nil {
-				continue
-			}
-			// 直接用 buf 切片：countOutbound 只同步读头部，SealData 在下一轮
-			// Read 之前同步消费完毕，逐包 make+copy 是纯浪费的分配。
-			pkt := buf[:n]
-			e.statTunToTunnel.Add(1)
-			e.bytesUp.Add(int64(n))
-			rm.countOutbound(pkt)
-			if _, werr := udp.Write(sess.SealData(pkt)); werr != nil {
-				return
-			}
-		}
-	}()
-
-	// 心跳
-	go func() {
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				if sess := e.session(); sess != nil {
-					_, _ = udp.Write(sess.SealPing())
-				}
-			}
-		}
-	}()
+	go e.pumpTunToTunnel(ctx, udp, dev, &rmHolder)
+	go e.heartbeat(ctx, udp)
 
 	// configured 记录已按下发地址配好系统。重握手时正常拿到同一个地址
 	//（隧道地址持久绑定用户），只有真的变了才重配。
@@ -180,10 +157,15 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 			rmHolder.Store(rm)
 			e.routes.Store(rm)
 		}
+		// 服务端下发的 MTU 可能小于协议上限（链路 MTU 反算 / 开启纠错时让出
+		// 校验包开销）。网卡 MTU 必须同步下调，否则本机应用会发出超过隧道
+		// 承载能力的包——封装后被 IP 分片，而分片丢一片等于整包全损。
+		e.applyMTU(dev, sess.MTU())
 
 		e.setSession(sess)
 		e.setState(StateConnected, "")
-		e.logf("✔ 隧道已建立（本机隧道地址 %s）。", addressing.ClientIP)
+		e.logf("✔ 隧道已建立（本机隧道地址 %s，MTU %d%s）。",
+			addressing.ClientIP, sess.MTU(), featureLabel(sess.Features()))
 
 		rm := rmHolder.Load()
 		if perr := e.pump(ctx, udp, dev, sess, rm); perr != nil && ctx.Err() == nil {
@@ -197,6 +179,151 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 
 	e.setSession(nil)
 }
+
+// featureLabel 把协商到的特性位翻成一句可读的后缀。
+func featureLabel(feats uint32) string {
+	switch {
+	case feats&tunnel.FeatFEC != 0 && feats&tunnel.FeatTailDup != 0:
+		return "，已启用前向纠错与小包冗余"
+	case feats&tunnel.FeatFEC != 0:
+		return "，已启用前向纠错"
+	case feats&tunnel.FeatTailDup != 0:
+		return "，已启用小包冗余"
+	default:
+		return ""
+	}
+}
+
+// applyMTU 把协商到的 MTU 应用到虚拟网卡。
+func (e *Engine) applyMTU(dev *tunnet.Device, mtu int) {
+	if mtu <= 0 || mtu == dev.MTU() {
+		return
+	}
+	dev.SetMTU(mtu)
+	if err := syssetup.SetInterfaceMTU(tunName, mtu); err != nil {
+		// 只影响本机应用发出的包尺寸，隧道本身照常工作，所以不算致命。
+		e.logf("[!] 设置虚拟网卡 MTU 失败（大包可能被分片）：%v", err)
+		return
+	}
+	e.logf("虚拟网卡 MTU 已调整为 %d。", mtu)
+}
+
+// pumpTunToTunnel 是出向泵：TUN 读出 → 封装 → 发往服务端。
+//
+// 零分配（OPT-3）：读缓冲与封装缓冲各一块，全生命周期复用；封装直接写进
+// 输出缓冲，不再每包 make。
+func (e *Engine) pumpTunToTunnel(ctx context.Context, udp *net.UDPConn,
+	dev *tunnet.Device, rmHolder *atomic.Pointer[routeManager]) {
+	buf := make([]byte, dev.ReadBufSize())
+	out := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
+	for {
+		n, rerr := dev.ReadPacket(buf)
+		if rerr != nil {
+			return
+		}
+		if n == 0 || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		sess := e.session()
+		rm := rmHolder.Load()
+		if sess == nil || rm == nil {
+			continue
+		}
+		// 直接用 buf 切片：countOutbound 只同步读头部，封装在下一轮
+		// Read 之前同步消费完毕，逐包 make+copy 是纯浪费的分配。
+		pkt := buf[:n]
+		e.statTunToTunnel.Add(1)
+		e.bytesUp.Add(int64(n))
+		rm.countOutbound(pkt)
+		wire, extra := sess.SealDataFEC(out[:0], pkt)
+		if _, werr := udp.Write(wire); werr != nil {
+			return
+		}
+		if extra != nil {
+			// 纠错校验包 / 冗余副本必须是独立的数据报：合并进同一个包等于
+			// 让校验与数据同生共死，一次丢包同时带走两者。
+			if _, werr := udp.Write(extra); werr != nil {
+				return
+			}
+		}
+	}
+}
+
+// heartbeat 周期心跳，兼做路径 MTU 探测。
+//
+// 探测原理：Ping 的明文用零填充到目标尺寸，服务端 Pong 回显它实际收到的明文
+// 长度。收不到回显说明这个尺寸过不了链路（封装后被分片且丢了片），据此下调
+// 本机 MTU。固定 MTU 在 PPPoE(1492)/4G 这类链路上会贴上限，而分片丢失是整包
+// 全损——FEC 也救不回来（它看不到分片）。
+func (e *Engine) heartbeat(ctx context.Context, udp *net.UDPConn) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	buf := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			sess := e.session()
+			if sess == nil {
+				continue
+			}
+			e.probeSentAt.Store(time.Now().UnixNano())
+			if _, err := udp.Write(sess.SealPing(buf[:0], 0, 0)); err != nil {
+				continue
+			}
+			e.maybeProbeMTU(udp, sess, buf)
+		}
+	}
+}
+
+// maybeProbeMTU 在会话稳定后发一个满尺寸探测包。
+//
+// 只探一次「当前 MTU 能否穿过」：连续两轮心跳都收不到该探测的回显就下调。
+// 不做逐档二分——那要么慢要么在弱网上误判，而实际链路 MTU 的档位很少
+// （1500 / 1492 PPPoE / 1480 隧道 / 1400）。
+func (e *Engine) maybeProbeMTU(udp *net.UDPConn, sess *tunnel.Session, buf []byte) {
+	if e.probeDone.Load() {
+		return
+	}
+	target := sess.MTU()
+	// 探测包的明文尺寸 = 目标 MTU，封装后正好是该 MTU 下最大的隧道包。
+	pad := target - 1
+	if pad <= 0 {
+		return
+	}
+	id := byte(e.probeID.Add(1))
+	if id == 0 {
+		id = byte(e.probeID.Add(1))
+	}
+	e.probeWant.Store(int64(id)<<32 | int64(target))
+	if _, err := udp.Write(sess.SealPing(buf[:0], id, pad)); err != nil {
+		return
+	}
+	e.probeTries.Add(1)
+	if e.probeTries.Load() >= 3 {
+		// 连续三轮探测都没有回显：链路装不下当前 MTU，退一档。
+		if next := target - probeStep; next >= tunnel.MinTunMTU {
+			e.logf("[!] 路径 MTU 探测失败，下调至 %d（链路可能有更小的 MTU）", next)
+			sess.SetMTU(next)
+			if dev := e.dev.Load(); dev != nil {
+				e.applyMTU(dev, next)
+			}
+		} else {
+			e.probeDone.Store(true)
+		}
+		e.probeTries.Store(0)
+	}
+}
+
+// probeStep 是路径 MTU 探测每次下调的步长。
+//
+// 72 = 1400 → 1328，一步跨过 PPPoE(1492-53=1439) 与常见隧道封装（1480-53=1427）
+// 之下的安全区。步长太小会探很多轮，太大会白损失吞吐。
+const probeStep = 72
 
 // applyAddressing 按服务端下发的地址配置虚拟网卡、静态邻居与防火墙放行。
 func (e *Engine) applyAddressing(a tunnelAddressing) error {
@@ -230,6 +357,7 @@ func (e *Engine) fail(format string, a ...any) {
 func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 	uid tunnel.UID, device [tunnel.FingerprintSize]byte, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
 	var none tunnelAddressing
+	buf := make([]byte, tunnel.MaxPacket+64)
 	for attempt := 1; attempt <= handshakeTries; attempt++ {
 		if ctx.Err() != nil {
 			return nil, none, ctx.Err()
@@ -241,7 +369,6 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 		if _, err := udp.Write(hello.Marshal()); err != nil {
 			return nil, none, err
 		}
-		buf := make([]byte, tunnel.MaxPacket+64)
 		_ = udp.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
 		n, err := udp.Read(buf)
 		if err != nil {
@@ -260,16 +387,31 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 		}
 		accept, err := tunnel.ParseServerAccept(secret, buf[:n], hello.Eph)
 		if err != nil {
+			if errors.Is(err, tunnel.ErrOldVersion) {
+				return nil, none, fmt.Errorf("中转机的服务端版本过旧（隧道协议已升级），请让管理员升级服务端后重试")
+			}
 			return nil, none, fmt.Errorf("%v（接入码可能已失效，请在面板重新获取）", err)
 		}
 		_ = udp.SetReadDeadline(time.Time{})
 		shared := tunnel.ECDHShared(&accept.Eph, priv)
+		// 方向密钥：客户端发 c2s、收 s2c，服务端反接。v3 两个方向共用一把
+		// 密钥且计数都从 1 开始，等于每包都在重用 (key, nonce)。
+		c2s, s2c, kerr := tunnel.DeriveSessionKeys(shared, secret, hello.Eph, accept.Eph)
+		if kerr != nil {
+			return nil, none, fmt.Errorf("派生会话密钥失败：%v", kerr)
+		}
+		sess, serr := tunnel.NewClientSession(c2s, s2c, uint32(accept.Feats), accept.TunMTU())
+		if serr != nil {
+			return nil, none, fmt.Errorf("建立会话失败：%v", serr)
+		}
 		addressing := tunnelAddressing{
 			ClientIP: accept.TunAddr().String(),
 			Mask:     prefixToMask(int(accept.Prefix)),
 			Gateway:  accept.GatewayAddr().String(),
 		}
-		return tunnel.NewSession(tunnel.DeriveSessionKey(shared, secret)), addressing, nil
+		e.probeDone.Store(false)
+		e.probeTries.Store(0)
+		return sess, addressing, nil
 	}
 	return nil, none, fmt.Errorf("服务端无应答（请检查地址、端口与中转机防火墙）")
 }
@@ -286,36 +428,52 @@ func prefixToMask(bits int) string {
 	return net.IP(mask).String()
 }
 
-// pump 收隧道包：Data→写 TUN，Ctrl→同步回程路由，Ping→Pong。
-// 30 秒无任何入站包返回错误，交由外层重握手。
+// pump 收隧道包：Data→写 TUN，Ctrl→同步回程路由，Ping→Pong，FEC→补包。
+// pumpIdleTimeout 内无任何入站包则返回错误，交由外层重握手。
+//
+// 零分配（OPT-3/7）：明文直接解进 TUN 写批的槽位，既没有明文分配也没有二次
+// 拷贝。批的边界是「本轮 socket 读不到更多包」——不定时、不等待。
 func (e *Engine) pump(ctx context.Context, udp *net.UDPConn, dev *tunnet.Device,
 	sess *tunnel.Session, rm *routeManager) error {
 	buf := make([]byte, tunnel.MaxPacket+64)
-	_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
+	out := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
+	batch := dev.NewBatch(0)
+	deadline := time.Now().Add(pumpIdleTimeout)
+	_ = udp.SetReadDeadline(deadline)
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		n, err := udp.Read(buf)
 		if err != nil {
+			_ = batch.Flush()
 			return err
 		}
-		_ = udp.SetReadDeadline(time.Now().Add(30 * time.Second))
-		switch {
-		case n > 0 && buf[0] == tunnel.TypeData:
-			if plain, oerr := sess.OpenData(buf[:n]); oerr == nil {
-				e.statTunnelToTun.Add(1)
-				e.bytesDown.Add(int64(len(plain)))
-				// 路由未就绪时包由路由管理器缓冲、安装器装好后代写：
-				// 新 IP 的 route.exe（几十毫秒）绝不能阻塞其他玩家的包，
-				// 这是旧实现「一个玩家进服全服卡一下」的病根。
-				if rm.deliverInbound(plain) {
-					if werr := dev.WritePacket(plain); werr != nil {
-						e.logWriteErr(werr)
+		// 只在超过一半窗口时才重设 deadline：此前每个入站包都要一次
+		// SetReadDeadline 系统调用，高 pps 下那是白付的开销。
+		if now := time.Now(); deadline.Sub(now) < pumpIdleTimeout/2 {
+			deadline = now.Add(pumpIdleTimeout)
+			_ = udp.SetReadDeadline(deadline)
+		}
+		if n == 0 {
+			continue
+		}
+		switch buf[0] {
+		case tunnel.TypeData:
+			e.deliverInbound(sess, rm, batch, buf[:n])
+		case tunnel.TypeFEC:
+			// 校验包本身不是数据：登记后取出被补回的包，走与普通 Data 完全
+			// 相同的路径（认证 + 重放窗口 + 回程路由门控一条不少）。
+			if sess.HandleFEC(buf[:n]) {
+				for {
+					rec := sess.Recover()
+					if rec == nil {
+						break
 					}
+					e.deliverInbound(sess, rm, batch, rec)
 				}
 			}
-		case n > 0 && buf[0] == tunnel.TypeCtrl:
+		case tunnel.TypeCtrl:
 			if msg, cerr := sess.OpenCtrl(buf[:n]); cerr == nil {
 				switch msg.Kind {
 				case "", tunnel.CtrlKindRoutes:
@@ -324,12 +482,71 @@ func (e *Engine) pump(ctx context.Context, udp *net.UDPConn, dev *tunnet.Device,
 					rm.markEnded(msg.IPs)
 				}
 			}
-		case n > 0 && buf[0] == tunnel.TypePing:
-			pong := make([]byte, 0, 1+tunnel.NonceSize+16)
-			pong = append(pong, tunnel.TypePong)
-			pong = append(pong, sess.Seal(nil)...)
-			_, _ = udp.Write(pong)
+		case tunnel.TypePing:
+			// 服务端心跳：回 Pong 并回显收到的明文长度（服务端侧的探测用）。
+			if id, plainLen, perr := sess.OpenPing(buf[:n]); perr == nil {
+				_, _ = udp.Write(sess.SealPong(out[:0], id, plainLen))
+			}
+		case tunnel.TypePong:
+			e.handlePong(sess, buf[:n])
 		}
+		// 冲刷 TUN 写批。
+		//
+		// 客户端这里不攒批：wintun 的 BatchSize 恒为 1（底层 Write 内部也是
+		// 逐包发送），攒批只会给入站包凭空加一轮延迟。批量接口在客户端的价值
+		// 不是合并 syscall（合并不了），而是消灭每包的 make+copy 与明文分配。
+		if batch.Len() > 0 {
+			if werr := batch.Flush(); werr != nil {
+				e.logWriteErr(werr)
+			}
+		}
+	}
+}
+
+// deliverInbound 解密一个 Data 包并按回程路由状态决定直写还是缓冲。
+func (e *Engine) deliverInbound(sess *tunnel.Session, rm *routeManager,
+	batch *tunnet.Batch, wire []byte) {
+	dst := batch.Next()
+	if dst == nil {
+		if werr := batch.Flush(); werr != nil {
+			e.logWriteErr(werr)
+		}
+		dst = batch.Next()
+		if dst == nil {
+			return
+		}
+	}
+	plain, oerr := sess.OpenData(dst, wire)
+	if oerr != nil {
+		return
+	}
+	e.statTunnelToTun.Add(1)
+	e.bytesDown.Add(int64(len(plain)))
+	// 路由未就绪时包由路由管理器缓冲、安装器装好后代写：
+	// 新 IP 的 route.exe（几十毫秒）绝不能阻塞其他玩家的包，
+	// 这是旧实现「一个玩家进服全服卡一下」的病根。
+	if rm.deliverInbound(plain) {
+		batch.Commit(len(plain))
+	}
+}
+
+// handlePong 处理服务端心跳应答：更新 RTT 与路径 MTU 探测结果。
+func (e *Engine) handlePong(sess *tunnel.Session, wire []byte) {
+	id, observed, err := sess.OpenPong(wire)
+	if err != nil {
+		return
+	}
+	if sent := e.probeSentAt.Load(); sent > 0 {
+		sess.Stats().ObserveRTT(time.Duration(time.Now().UnixNano() - sent))
+	}
+	if id == 0 {
+		return // 普通心跳
+	}
+	want := e.probeWant.Load()
+	if byte(want>>32) == id && observed >= int(want&0xFFFFFFFF) {
+		// 该尺寸的包确实穿过了链路：探测结束，当前 MTU 可用。
+		e.probeDone.Store(true)
+		e.probeTries.Store(0)
 	}
 }
 

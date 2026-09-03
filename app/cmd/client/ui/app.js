@@ -19,6 +19,11 @@ const ui = {
   bytesUp: el('bytesUp'), bytesDown: el('bytesDown'),
   rateUp: el('rateUp'), rateDown: el('rateDown'), pktLine: el('pktLine'),
   routeRows: el('routeRows'), routeCount: el('routeCount'), logs: el('logs'),
+  linkBadge: el('linkBadge'),
+  linkLoss: el('linkLoss'), linkLossHint: el('linkLossHint'),
+  linkReorder: el('linkReorder'), linkJitter: el('linkJitter'), linkRTT: el('linkRTT'),
+  linkFEC: el('linkFEC'), linkFECHint: el('linkFECHint'),
+  linkDrops: el('linkDrops'), linkDropsHint: el('linkDropsHint'),
 };
 
 const STATE_TEXT = {
@@ -107,11 +112,67 @@ function computeRates(s) {
   return rates;
 }
 
+// fmtPPM 把百万分之转成百分比字符串（后端用整数传，避免浮点在 JSON 里抖动）。
+function fmtPPM(ppm) {
+  if (!ppm) return '0%';
+  const pct = ppm / 10000;
+  return (pct < 0.01 ? '<0.01' : pct.toFixed(2)) + '%';
+}
+
+function fmtMS(ms) {
+  if (!ms) return '—';
+  return (ms < 1 ? ms.toFixed(2) : ms.toFixed(1)) + ' ms';
+}
+
+// 丢包率的档位：1% 是游戏体感的分界（60pps 下 1% ≈ 每秒卡 0.6 次）。
+function lossLevel(ppm) {
+  if (ppm >= 30000) return { cls: 'bad', text: '严重' };
+  if (ppm >= 10000) return { cls: 'warn', text: '偏高' };
+  if (ppm > 0) return { cls: 'ok', text: '轻微' };
+  return { cls: 'ok', text: '无' };
+}
+
+function renderLink(s) {
+  const link = s.link || {};
+  const connected = s.state === 'connected';
+  if (!connected) {
+    ui.linkBadge.textContent = '—';
+    ui.linkBadge.dataset.level = '';
+    for (const k of ['linkLoss', 'linkReorder', 'linkJitter', 'linkRTT', 'linkFEC', 'linkDrops']) {
+      ui[k].textContent = '—';
+    }
+    for (const k of ['linkLossHint', 'linkFECHint', 'linkDropsHint']) ui[k].textContent = '';
+    return;
+  }
+  const lvl = lossLevel(link.loss_ppm || 0);
+  ui.linkBadge.textContent = lvl.text;
+  ui.linkBadge.dataset.level = lvl.cls;
+  ui.linkLoss.textContent = fmtPPM(link.loss_ppm || 0);
+  // 丢包偏高时才提示纠错——没开的时候说「可以开」，开了的时候不啰嗦。
+  ui.linkLossHint.textContent = (link.loss_ppm || 0) >= 10000 && !link.fec_enabled
+    ? '可让管理员开启前向纠错' : '';
+  ui.linkReorder.textContent = fmtPPM(link.reorder_ppm || 0);
+  ui.linkJitter.textContent = fmtMS(link.jitter_ms || 0);
+  ui.linkRTT.textContent = fmtMS(link.rtt_ms || 0);
+
+  if (link.fec_enabled) {
+    ui.linkFEC.textContent = (link.fec_recovered || 0).toLocaleString() + ' 个';
+    ui.linkFECHint.textContent = '已启用' + (link.dup_enabled ? '（含小包冗余）' : '');
+  } else {
+    ui.linkFEC.textContent = '未启用';
+    ui.linkFECHint.textContent = link.dup_enabled ? '仅小包冗余' : '';
+  }
+
+  const drops = (link.pending_drops || 0) + (link.tun_dropped || 0) + Number(link.tx_dropped || 0);
+  ui.linkDrops.textContent = drops ? drops.toLocaleString() + ' 个' : '0';
+  ui.linkDropsHint.textContent = drops ? '进服瞬间可能卡顿' : '';
+}
+
 function renderRoutes(routes, rates) {
   const list = routes || [];
   ui.routeCount.textContent = list.length;
   if (list.length === 0) {
-    ui.routeRows.innerHTML = '<tr class="empty"><td colspan="4">暂无活跃玩家</td></tr>';
+    ui.routeRows.innerHTML = '<tr class="empty"><td colspan="5">暂无活跃玩家</td></tr>';
     return;
   }
   ui.routeRows.replaceChildren(...list.map((r) => {
@@ -121,6 +182,7 @@ function renderRoutes(routes, rates) {
       { text: fmtBytes(r.bytes_up), cls: 'num' },
       { text: fmtBytes(r.bytes_down), cls: 'num' },
       { text: fmtRate(rates.perIP.get(r.ip) || 0), cls: 'num muted' },
+      { text: r.drops ? String(r.drops) : '—', cls: r.drops ? 'num bad' : 'num muted' },
     ];
     for (const c of cells) {
       const td = document.createElement('td');
@@ -152,7 +214,7 @@ function render(s) {
   ui.identity.textContent = s.code_id ? s.code_id : '—';
   ui.device.textContent = s.device || '—';
   ui.tunIP.textContent = s.state === 'connected' && s.tun_ip
-    ? `${s.tun_ip}（网关 ${s.gateway || '—'}）` : '—';
+    ? `${s.tun_ip}（网关 ${s.gateway || '—'}${s.mtu ? '，MTU ' + s.mtu : ''}）` : '—';
   ui.uptime.textContent = formatUptime(s.uptime_sec);
 
   const rates = computeRates(s);
@@ -162,6 +224,7 @@ function render(s) {
   ui.rateDown.textContent = '↓ ' + fmtRate(rates.down);
   ui.pktLine.textContent = `数据包 ↑${(s.pkt_up || 0).toLocaleString()} / ↓${(s.pkt_down || 0).toLocaleString()}`;
   renderRoutes(s.routes, rates);
+  renderLink(s);
 
   // 连接中不显示上一次的失败原因，避免误读为当前状态。
   showError(s.state === 'error' ? s.last_error : '');

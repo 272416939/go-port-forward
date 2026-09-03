@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go-port-forward/pkg/tunnel"
+	"go-port-forward/pkg/tunnet"
 	"pfapp/internal/syssetup"
 )
 
@@ -62,12 +63,21 @@ type Engine struct {
 	routes atomic.Pointer[routeManager]
 	sess   atomic.Pointer[tunnel.Session]
 	addr   atomic.Pointer[tunnelAddressing] // 服务端下发的隧道地址
+	dev    atomic.Pointer[tunnet.Device]    // 当前虚拟网卡（MTU 调整与丢包统计用）
 
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（后端回包方向）
 	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
 	bytesUp         atomic.Int64 // 玩家 → 后端 累计字节
 	bytesDown       atomic.Int64 // 后端 → 玩家 累计字节
 	lastWriteErr    atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
+
+	// 路径 MTU 探测状态。probeWant 高 32 位是探测 ID、低 32 位是目标尺寸，
+	// 一个原子量携带两者，避免「ID 与尺寸各读一次」读到不同代的值。
+	probeID     atomic.Int32
+	probeWant   atomic.Int64
+	probeTries  atomic.Int32
+	probeDone   atomic.Bool
+	probeSentAt atomic.Int64 // 最近一次心跳的发出时刻（UnixNano），用于测 RTT
 }
 
 // session 返回当前会话；nil 表示尚未握手成功，此时数据包应丢弃。
@@ -100,6 +110,7 @@ type Snapshot struct {
 	Elevated  bool         `json:"elevated"`
 	TunIP     string       `json:"tun_ip"`
 	Gateway   string       `json:"gateway"`
+	MTU       int          `json:"mtu"`
 	UptimeSec int64        `json:"uptime_sec"`
 	PktUp     int64        `json:"pkt_up"`
 	PktDown   int64        `json:"pkt_down"`
@@ -107,6 +118,30 @@ type Snapshot struct {
 	BytesDown int64        `json:"bytes_down"`
 	Routes    []RouteEntry `json:"routes"`
 	Logs      []string     `json:"logs"`
+
+	// Link 是链路质量观测。没有它之前「卡」只能靠玩家描述——公网丢包、
+	// 内核缓冲丢包、路由安装缓冲溢出在界面上完全无法区分。
+	Link LinkStats `json:"link"`
+}
+
+// LinkStats 是面板展示的链路质量。
+type LinkStats struct {
+	// LossPPM / ReorderPPM 是百万分之（避免浮点在 JSON 里抖动）。
+	LossPPM    int64   `json:"loss_ppm"`
+	ReorderPPM int64   `json:"reorder_ppm"`
+	JitterMS   float64 `json:"jitter_ms"`
+	RTTMS      float64 `json:"rtt_ms"`
+	// FECRecovered 是靠前向纠错补回的包数——每一个都是一次没有发生的卡顿。
+	FECRecovered uint64 `json:"fec_recovered"`
+	FECEnabled   bool   `json:"fec_enabled"`
+	DupEnabled   bool   `json:"dup_enabled"`
+	// TxDropped 是发送失败丢弃（socket 缓冲满）。
+	TxDropped uint64 `json:"tx_dropped"`
+	// PendingDrops 是回程路由安装期间因缓冲溢出丢弃的入站包数。
+	// 非零意味着确实有玩家在进服瞬间卡过。
+	PendingDrops int64 `json:"pending_drops"`
+	// TunDropped 是虚拟网卡读侧因超出缓冲而丢弃的包数（正常恒为 0）。
+	TunDropped int64 `json:"tun_dropped"`
 }
 
 func (e *Engine) Snapshot() Snapshot {
@@ -135,11 +170,28 @@ func (e *Engine) Snapshot() Snapshot {
 	s.TunIP = addressing.ClientIP
 	s.Gateway = addressing.Gateway
 
-	if rm := e.routes.Load(); rm != nil {
+	rm := e.routes.Load()
+	if rm != nil {
 		s.Routes = rm.view()
+		s.Link.PendingDrops = rm.PendingDrops()
 	}
 	if s.Routes == nil {
 		s.Routes = []RouteEntry{}
+	}
+	if sess := e.session(); sess != nil {
+		v := sess.Stats().View()
+		s.MTU = sess.MTU()
+		s.Link.LossPPM = v.LossPPM
+		s.Link.ReorderPPM = v.ReorderPPM
+		s.Link.JitterMS = v.JitterMS
+		s.Link.RTTMS = v.RTTMS
+		s.Link.FECRecovered = v.FECRecovered
+		s.Link.TxDropped = v.TxDropped
+		s.Link.FECEnabled = sess.Features()&tunnel.FeatFEC != 0
+		s.Link.DupEnabled = sess.Features()&tunnel.FeatTailDup != 0
+	}
+	if dev := e.dev.Load(); dev != nil {
+		s.Link.TunDropped = dev.Dropped()
 	}
 	s.Logs = e.logs.all()
 	return s

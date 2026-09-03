@@ -90,6 +90,19 @@
   </main>
 
   <section class="card card-wide">
+    <h2>链路质量 <span class="count" id="linkBadge">—</span></h2>
+    <dl class="stats">
+      <div><dt>丢包率</dt><dd id="linkLoss">—</dd><dd class="rate" id="linkLossHint"></dd></div>
+      <div><dt>乱序率</dt><dd id="linkReorder">—</dd></div>
+      <div><dt>抖动</dt><dd id="linkJitter">—</dd></div>
+      <div><dt>往返延迟</dt><dd id="linkRTT">—</dd></div>
+      <div><dt>纠错补回</dt><dd id="linkFEC">—</dd><dd class="rate" id="linkFECHint"></dd></div>
+      <div><dt>本地丢弃</dt><dd id="linkDrops">—</dd><dd class="rate" id="linkDropsHint"></dd></div>
+    </dl>
+    <p class="hint">丢包率与乱序率分开看：高乱序而低丢包是正常的多路径链路，不影响游戏。抖动量的是入站包的到达节奏，只适合看相对变化。「本地丢弃」非零说明有玩家在进服瞬间被本机丢过包。</p>
+  </section>
+
+  <section class="card card-wide">
     <h2>活跃玩家流量 <span class="count" id="routeCount">0</span></h2>
     <div class="table-wrap">
       <table class="routes">
@@ -99,10 +112,11 @@
             <th class="num">↑ 上行</th>
             <th class="num">↓ 下行</th>
             <th class="num">速率</th>
+            <th class="num">丢弃</th>
           </tr>
         </thead>
         <tbody id="routeRows">
-          <tr class="empty"><td colspan="4">暂无活跃玩家</td></tr>
+          <tr class="empty"><td colspan="5">暂无活跃玩家</td></tr>
         </tbody>
       </table>
     </div>

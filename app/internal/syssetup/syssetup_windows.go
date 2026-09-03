@@ -24,6 +24,20 @@ func ConfigureInterface(ifaceName, ip, mask string) error {
 	return err
 }
 
+// SetInterfaceMTU 设置接口 MTU。
+//
+// 为什么需要它：服务端在握手应答里下发协商后的隧道 MTU（按链路 MTU 反算，
+// 开启前向纠错时还要让出校验包开销）。本机网卡若仍按更大的 MTU 工作，应用
+// 就会发出隧道装不下的包——封装后被 IP 分片，而分片丢一片等于整包全损。
+//
+// wintun 驱动自身的 MTU 由创建时的参数决定，这里改的是 Windows IP 层对该
+// 接口的 MTU 记账（决定本机 TCP MSS 与 UDP 分片行为），两者需要一致。
+func SetInterfaceMTU(ifaceName string, mtu int) error {
+	_, err := run("netsh", "interface", "ipv4", "set", "subinterface",
+		ifaceName, fmt.Sprintf("mtu=%d", mtu), "store=active")
+	return err
+}
+
 // AddRoute 添加 /32 回程路由（网关为隧道对端地址）。
 func AddRoute(destIP, gateway string) error {
 	_, err := run("route", "add", destIP, "mask", "255.255.255.255", gateway, "metric", "1")
