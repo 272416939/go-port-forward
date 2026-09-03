@@ -154,6 +154,11 @@ func (a *application) Start() error {
 	}
 	logger.S.Infow("starting", "name", serviceDisplay, "version", version, "build", buildTime)
 
+	// 配置文件升级说明在 Load 时产生、日志可用后补打（Load 早于 logger.Init）。
+	if note := config.TakeUpgradeNote(); note != "" {
+		logger.S.Infow(note)
+	}
+
 	// Bridge internal logger to pkg/logger so pkg/gc etc. can log
 	pkglogger.SetLogger(logger.L)
 

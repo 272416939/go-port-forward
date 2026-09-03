@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -110,6 +111,28 @@ type PoolConfig struct {
 
 var global *AppConfig
 
+// ConfigVersion 是配置文件的模式版本。没有 version 键的存量文件视为 v1。
+//
+// 版本号的用途只有一个：让「升级程序后，旧配置文件自动补全新增配置项」可以判定
+// 该不该写回。每次给配置增加/改名键时把它 +1，旧文件就会在下次启动时被合并
+// 重写（用户的自定义值原样保留，写回前的原文件备份为 <名字>.v<旧版本>.bak）。
+//
+// 注意：运行时行为不依赖版本号——缺失的键一律按代码默认值生效，即使升级
+// 写回失败也不影响启动。
+const ConfigVersion = 2
+// v2 = 新增 tunnel.io_mode / fec / tail_dup / udp_gro / udp_gso。
+
+// upgradedNote 记录最近一次配置文件升级的说明（Load 在 logger 初始化之前运行，
+// 这里只存字符串，由 main 在日志可用后取出打印一次）。
+var upgradedNote string
+
+// TakeUpgradeNote 取出并清空「配置文件已升级」的说明（空串 = 本次没有升级）。
+func TakeUpgradeNote() string {
+	note := upgradedNote
+	upgradedNote = ""
+	return note
+}
+
 // Load reads configuration from disk, writing defaults on first run.
 func Load(configPath string) (*AppConfig, error) {
 	v := viper.New()
@@ -128,12 +151,21 @@ func Load(configPath string) (*AppConfig, error) {
 	v.AutomaticEnv()
 
 	if err := v.ReadInConfig(); err != nil {
-		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok {
+		// 文件不存在（搜索路径没找到，或 -config 显式指向的路径还没有文件）
+		// 都按首次运行处理：在目标路径生成一份带全部默认值的文件。损坏、
+		// 不可读之类的其它错误仍然硬报错——那不是「第一次」，是出了问题。
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 		// First run – persist defaults so users can see the config file.
 		if e2 := writeDefaults(v, configPath); e2 != nil {
 			return nil, e2
+		}
+	} else if fileVer := v.GetInt("version"); fileVer < ConfigVersion {
+		// 旧版本文件：把「文件现有值 + 新默认值」合并写回，让运维在文件里
+		// 就能看到全部配置项。失败不致命——缺失键本来就有运行时默认值。
+		if err := upgradeConfigFile(v, fileVer); err != nil {
+			upgradedNote = ""
 		}
 	}
 
@@ -154,6 +186,9 @@ func Get() *AppConfig { return global }
 
 func setDefaults(v *viper.Viper) {
 	dir := appDataDir()
+	// 注意 version 不在这里 SetDefault：缺失的 version 必须读到 0 才能判定
+	// 「这是一份升级前的旧文件」。写入由 writeDefaults / upgradeConfigFile
+	// 显式完成。
 	v.SetDefault("web.host", "127.0.0.1")
 	v.SetDefault("web.port", 8989)
 	v.SetDefault("web.secure_cookie", false)
@@ -208,7 +243,37 @@ func writeDefaults(v *viper.Viper, configPath string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return err
 	}
+	v.Set("version", ConfigVersion)
 	return v.WriteConfigAs(configPath)
+}
+
+// upgradeConfigFile 把旧版本的配置文件升级到当前版本：viper 里已是「文件值
+// 覆盖默认值」的合并结果，写回即可带上全部新增键；自定义值原样保留。
+//
+// 写回前把原文件备份为 <名字>.v<旧版本>.bak——重写会丢掉用户手写的注释，
+// 备份是唯一的找回途径（生成器写不出注释）。备份已存在时不覆盖（保留最早
+// 那份）。fileVer 为 0（无 version 键的存量文件）按 v1 命名。
+func upgradeConfigFile(v *viper.Viper, fileVer int) error {
+	path := v.ConfigFileUsed()
+	if path == "" {
+		return nil
+	}
+	if fileVer < 1 {
+		fileVer = 1
+	}
+	bak := fmt.Sprintf("%s.v%d.bak", path, fileVer)
+	if _, err := os.Stat(bak); os.IsNotExist(err) {
+		if raw, rerr := os.ReadFile(path); rerr == nil {
+			_ = os.WriteFile(bak, raw, 0o600)
+		}
+	}
+	// 版本号提到当前值再写回：用户文件里可能是旧数字。
+	v.Set("version", ConfigVersion)
+	if err := v.WriteConfigAs(path); err != nil {
+		return err
+	}
+	upgradedNote = fmt.Sprintf("配置文件已从 v%d 升级到 v%d（新增配置项已按默认值补全，自定义值保留；原文件备份为 %s，重写会丢弃手写注释）", fileVer, ConfigVersion, bak)
+	return nil
 }
 
 // appDataDir returns the directory of the running executable.

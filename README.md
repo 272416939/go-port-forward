@@ -178,7 +178,7 @@ bash build.sh darwin       # 仅构建 macOS | macOS only
 
 ```bash
 ./go-port-forward                              # 前台运行 | Foreground
-./go-port-forward -config /path/to/config.yaml # 指定配置 | Custom config
+./go-port-forward -config /path/to/config.yaml # 指定配置（文件不存在时在该路径生成默认文件）| Custom config (generated with defaults if missing)
 ```
 
 启动后访问 `http://127.0.0.1:8989` 打开 Web 管理界面。首次启动会自动创建管理员 `admin` 并生成随机密码（写入启动日志与同目录 `admin-credentials.txt`，首次登录强制改密，改完请删除该文件）。
@@ -206,8 +206,9 @@ git push origin v1.0.0
 
 ## ⚙️ 配置文件讲解 | Configuration
 
-首次运行时会在可执行文件同目录自动生成 `config.yaml`；不指定 `-config` 时也从该目录查找。
-A default `config.yaml` is auto-generated next to the executable on first run (also the default search path without `-config`).
+首次运行时会在可执行文件同目录自动生成 `config.yaml`；不指定 `-config` 时也从该目录查找，
+指定了 `-config` 而该路径没有文件时则在该路径生成。
+A default `config.yaml` is auto-generated next to the executable on first run (also the default search path without `-config`); with an explicit `-config` pointing at a missing file, defaults are generated there instead.
 
 生成的文件是**无任何注释、按键名字母序排列、4 空格缩进**的扁平 YAML；其中 `storage.path`
 与 `log.path` 写的是以**可执行文件所在目录**为锚点的绝对路径。下面为了阅读方便写成相对
@@ -258,14 +259,26 @@ tunnel:
     tun_name: pftun0
     udp_gro: false
     udp_gso: false
+version: 2
 web:
     host: 127.0.0.1
     port: 8989
     secure_cookie: false
 ```
 
-两处与直觉预期不同：
+三处与直觉预期不同：
 
+- **`version` 是配置文件的模式版本**，由程序维护，不要手改。升级程序后首次启动时，
+  旧版本文件会被自动补全新增配置项（你已有的自定义值原样保留），原文件备份为
+  `config.yaml.v<旧版本>.bak`，日志里有一条升级说明。注意：**自动升级会重写整个
+  文件，你在里面手写的注释会丢**（生成器写不出注释）——想要注释就写在别处，
+  或升级后从 .bak 抄回来。运行时行为不依赖这个版本号：缺失的配置项一律按代码
+  默认值生效，即使写回失败也不影响启动。
+  `version` is the config schema version maintained by the program; after an
+  upgrade, an older file is automatically topped up with new keys (your custom
+  values are kept) and backed up as `config.yaml.v<N>.bak`. The rewrite drops
+  hand-written comments — keep notes elsewhere. Runtime never depends on it:
+  missing keys always fall back to code defaults.
 - **`web.username` / `web.password` 默认不写入文件**——需要应急后门时手动加上这两行
   （仅从本机回环访问时生效；不加或留空即关闭）。
   `web.username` / `web.password` are absent from the generated file; add them manually to
