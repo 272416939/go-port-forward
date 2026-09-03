@@ -35,6 +35,20 @@ type Config struct {
 	TunName string `mapstructure:"tun_name"` // 默认 "pftun0"
 	TunAddr string `mapstructure:"tun_addr"` // 如 "10.66.0.1/24"，同时是客户端地址池
 	NAT     bool   `mapstructure:"nat"`      // 自动配置回程路径（ip_forward + 策略路由本机投递 + 放行）
+
+	// IOMode 选择 UDP 收发方式："batch"（recvmmsg/sendmmsg，默认）或
+	// "simple"（逐包）。批量化把「每包 2 次 syscall」压到「每批 2 次」，
+	// 但它是数据面上最脆弱的一处改动——保留开关，回退不需要换二进制。
+	IOMode string `mapstructure:"io_mode"`
+	// FEC 启用前向纠错（每 8 个数据包附 1 个校验包，上行冗余 12.5%）。
+	// 默认关闭：丢包率低于 1% 的链路上这是纯浪费，还会掩盖真实的网络问题。
+	FEC bool `mapstructure:"fec"`
+	// TailDup 启用小包冗余副本（组尾小包发两份，接收端靠重放窗口去重）。
+	TailDup bool `mapstructure:"tail_dup"`
+	// UDPGRO / UDPGSO 是 Linux 的 UDP 聚合/分段卸载。默认关闭：收益要等
+	// 观测数据证明「批量化之后单核仍是瓶颈」才成立。
+	UDPGRO bool `mapstructure:"udp_gro"`
+	UDPGSO bool `mapstructure:"udp_gso"`
 }
 
 // Defaults 填充零值配置。
@@ -49,6 +63,27 @@ func (c *Config) Defaults() {
 		// /16：隧道地址按访问码分配，/24 的 253 个位置很快不够。
 		c.TunAddr = "10.66.0.1/16"
 	}
+	if c.IOMode == "" {
+		c.IOMode = "batch"
+	}
+}
+
+// wantBatchIO 报告配置是否要求批量收发。
+func (c *Config) wantBatchIO() bool { return !strings.EqualFold(c.IOMode, "simple") }
+
+// features 把配置翻成协议特性位（在 Accept 里对称下发给客户端）。
+//
+// 必须由服务端下发而不是客户端自选：一端发 FEC 另一端不认，那些校验包会被
+// 当未知类型静默丢弃，表现成「开了纠错反而更卡」。
+func (c *Config) features() uint8 {
+	var f uint8
+	if c.FEC {
+		f |= tunnel.FeatFEC
+	}
+	if c.TailDup {
+		f |= tunnel.FeatTailDup
+	}
+	return f
 }
 
 // Identity 是一个访问码的接入凭据与约束（由上层用户服务提供）。
@@ -105,16 +140,29 @@ type Server struct {
 
 	tunPool netip.Prefix
 	gateway netip.Addr
+	// tunMTU 是本机 TUN 的 MTU，也是握手时下发给客户端的值。
+	tunMTU int
+	// io 记录实际生效的收发配置（批量/GRO/GSO 与降级原因）。
+	io ioSetup
 
-	lastWriteErr atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
-	lastOldVer   atomic.Int64 // 旧版客户端告警限频锚点
-	lastAuthErr  atomic.Int64 // 认证失败告警限频锚点
-	lastNoRoute  atomic.Int64 // 出向找不到会话的告警限频锚点
-	lastSpoof    atomic.Int64 // 源地址伪造告警限频锚点
-	lastNonIPv4  atomic.Int64 // 非 IPv4 隧道包丢弃的限频锚点
-	lastInternal atomic.Int64 // 隧道内互访告警限频锚点
+	lastTunWrite  atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
+	lastUDPWrite  atomic.Int64 // 写 UDP 失败日志限频锚点
+	lastOldVer    atomic.Int64 // 旧版客户端告警限频锚点
+	lastAuthErr   atomic.Int64 // 认证失败告警限频锚点
+	lastNoRoute   atomic.Int64 // 出向找不到会话的告警限频锚点
+	lastSpoof     atomic.Int64 // 源地址伪造告警限频锚点
+	lastNonIPv4   atomic.Int64 // 非 IPv4 隧道包丢弃的限频锚点
+	lastInternal  atomic.Int64 // 隧道内互访告警限频锚点
 	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
 	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
+	lastOverMTU   atomic.Int64 // 出向包超出隧道 MTU 的限频锚点
+
+	// kernelDrops 是内核 UDP 收缓冲溢出的累计丢包数（/proc/net/udp）。
+	// 应用层对这类丢包完全无感——玩家进服的下行突发最容易打穿默认缓冲，
+	// 而日志里一个字都没有。
+	kernelDrops atomic.Uint64
+	// tunDrops 是 TUN 读侧因超出缓冲而丢弃的包数（tunnet.Dropped 的镜像）。
+	tunDrops atomic.Int64
 
 	// helloQ 是握手包队列：握手要做存储读写（设备绑定要写库），放在唯一
 	// 的入向泵里同步处理，重试风暴时每次 fsync 都会卡住全体玩家的包。
@@ -156,7 +204,12 @@ func Start(opt Options) (*Server, error) {
 		return nil, err
 	}
 
-	dev, err := tunnet.Open(cfg.TunName, 1400)
+	// 隧道 MTU 从物理出口反算：链路 MTU 减去封装开销（IP+UDP+AEAD），开启
+	// FEC 时再让出校验包的额外开销。固定 1400 在 PPPoE(1492)/4G 这类链路上
+	// 会贴上限，叠加企业 VPN 就超——而 IP 分片丢一片等于整个隧道包全损，
+	// FEC 也救不回来（它看不到分片）。
+	tunMTU := negotiateTunMTU(cfg)
+	dev, err := tunnet.Open(cfg.TunName, tunMTU)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +235,8 @@ func Start(opt Options) (*Server, error) {
 	_ = udpConn.SetReadBuffer(tunnelSocketBuffer)
 	_ = udpConn.SetWriteBuffer(tunnelSocketBuffer)
 
+	reader, writer, ioSet := newUDPIO(udpConn, cfg.wantBatchIO(), cfg.UDPGRO, cfg.UDPGSO)
+
 	s := &Server{
 		cfg:      cfg,
 		udp:      udpConn,
@@ -192,24 +247,101 @@ func Start(opt Options) (*Server, error) {
 		helloQ:   make(chan helloTask, helloQueueCap),
 		tunPool:  pool,
 		gateway:  gateway,
+		tunMTU:   tunMTU,
+		io:       ioSet,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 		pushPrev: make(map[string][]string),
 	}
+	s.reportSocketBuffers()
 
-	go s.loop(dev, udpConn)            // 客户端 → TUN（握手异步分发）
-	go s.helloWorker(udpConn)          // 握手专用 worker（存储 I/O 不进数据泵）
-	go s.pumpTunToClient(dev, udpConn) // TUN → 客户端（按目的地址分流）
-	go s.heartbeat(udpConn)            // 心跳
-	go s.janitor()                     // 空闲会话回收
+	go s.loop(dev, reader)            // 客户端 → TUN（握手异步分发）
+	go s.helloWorker(udpConn)         // 握手专用 worker（存储 I/O 不进数据泵）
+	go s.pumpTunToClient(dev, writer) // TUN → 客户端（按目的地址分流）
+	go s.heartbeat(udpConn)           // 心跳
+	go s.janitor()                    // 空闲会话回收 + 内核丢包采样
 	if cfg.NAT {
 		go s.returnPathWatchdog() // 回程内核规则守护：被防火墙工具整表清空后自愈
 	}
 	if opt.SessionIPs != nil {
 		go s.pushSessionIPs(opt.SessionIPs, udpConn) // 回程路由同步（按访问码过滤）
 	}
-	logger.S.Infow("隧道服务端已启动", "listen", cfg.Listen, "tun", cfg.TunName, "addr", cfg.TunAddr)
+	logger.S.Infow("隧道服务端已启动",
+		"listen", cfg.Listen, "tun", cfg.TunName, "addr", cfg.TunAddr,
+		"mtu", tunMTU, "io", ioSet.Mode, "fec", cfg.FEC, "tail_dup", cfg.TailDup)
+	for _, note := range ioSet.Notes {
+		logger.S.Warnw("隧道 UDP 收发能力受限", "detail", note)
+	}
 	return s, nil
+}
+
+// negotiateTunMTU 算出本机隧道 MTU。
+//
+// 取「物理出口 MTU - 封装开销」与协议上限的较小值；开启 FEC 时再让出校验包的
+// 额外开销，否则校验包自己会被 IP 分片——而分片丢失是整包全损，正是 FEC 想
+// 解决的问题。探测不到出口接口时按协议缺省值走（与客户端缺省一致）。
+func negotiateTunMTU(cfg Config) int {
+	mtu := tunnel.MaxTunMTU
+	if link, ok := outboundLinkMTU(); ok {
+		if v := link - tunnel.WireOverhead; v < mtu {
+			mtu = v
+		}
+	}
+	if cfg.FEC {
+		mtu -= tunnel.FECOverhead
+	}
+	return tunnel.ClampTunMTU(mtu)
+}
+
+// outboundLinkMTU 探测默认出口网卡的 MTU。
+//
+// 用「连一个公网地址的 UDP socket」找出本机出口 IP（不发包），再按 IP 匹配
+// 网卡。取不到就返回 false 让调用方用缺省值——MTU 探测失败不该阻止隧道启动。
+func outboundLinkMTU() (int, bool) {
+	c, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return 0, false
+	}
+	local, ok := c.LocalAddr().(*net.UDPAddr)
+	_ = c.Close()
+	if !ok || local.IP == nil {
+		return 0, false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return 0, false
+	}
+	for _, ifi := range ifaces {
+		addrs, aerr := ifi.Addrs()
+		if aerr != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, isNet := a.(*net.IPNet)
+			if isNet && ipnet.IP.Equal(local.IP) && ifi.MTU > 0 {
+				return ifi.MTU, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// reportSocketBuffers 核查内核实际生效的 socket 缓冲。
+//
+// SetReadBuffer(4MB) 受 net.core.rmem_max 钳制（多数发行版默认 212992），实际
+// 生效可能只有 ~208KB ≈ 149 个 MTU 包——玩家进服的下行突发轻松打穿，内核层
+// 丢包而应用层毫无感知。这里读回真实值并在被钳制时给出具体的 sysctl 做法。
+func (s *Server) reportSocketBuffers() {
+	rcv, snd, err := socketBufferSizes(s.udp)
+	if err != nil {
+		return // 非 Linux 或读取失败：不是错误，只是拿不到这项观测
+	}
+	logger.S.Debugw("隧道 socket 缓冲生效值", "rcvbuf", rcv, "sndbuf", snd, "want", tunnelSocketBuffer)
+	if rcv*2 < tunnelSocketBuffer || snd*2 < tunnelSocketBuffer {
+		logger.S.Warnw("隧道 socket 缓冲被内核上限钳制，突发流量会在内核层丢包（应用层无感知）",
+			"rcvbuf", rcv, "sndbuf", snd, "want", tunnelSocketBuffer,
+			"fix", sysctlHint(tunnelSocketBuffer))
+	}
 }
 
 // parseTunAddr 把 tun_addr 拆成客户端地址池与服务端隧道地址。
@@ -302,6 +434,11 @@ type PeerView struct {
 	Addr     string    `json:"addr"`
 	Since    time.Time `json:"since"`
 	IdleSec  int64     `json:"idle_sec"`
+	MTU      int       `json:"mtu"`
+	// Stats 是该会话的包级观测（丢包率/乱序率/抖动/RTT/纠错补回）。
+	// 没有这组数据之前，丢包的归因全靠猜——公网丢包、内核缓冲丢包、应用层
+	// 丢弃在日志里混成一团。
+	Stats tunnel.StatsView `json:"stats"`
 }
 
 // Peers 返回全部在线会话（按用户名+访问码名排序，供面板展示）。
@@ -316,9 +453,11 @@ func (s *Server) Peers() []PeerView {
 			UserID:   ps.userID,
 			UserName: ps.userName,
 			TunIP:    ps.tunIP.String(),
-			Addr:     ps.addr.String(),
+			Addr:     ps.addrPort.String(),
 			Since:    ps.since,
 			IdleSec:  int64(ps.idleFor(now).Seconds()),
+			MTU:      ps.mtu,
+			Stats:    ps.sess.Stats().View(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -365,13 +504,13 @@ const helloQueueCap = 128
 // helloTask 是一条待处理的握手包。pkt 必须是拷贝：读循环的 buf 逐包复用。
 type helloTask struct {
 	pkt  []byte
-	from *net.UDPAddr
+	from netip.AddrPort
 }
 
 // queueHello 把握手包投递给专用 worker，绝不在数据泵里同步处理握手——
 // 握手要做存储读写（设备绑定要写库），重试风暴时每次 fsync 都会把全体玩家
 // 的入向包卡住（「有人疯狂重连全服卡顿」的服务端病根）。
-func (s *Server) queueHello(pkt []byte, from *net.UDPAddr) {
+func (s *Server) queueHello(pkt []byte, from netip.AddrPort) {
 	task := helloTask{pkt: append([]byte(nil), pkt...), from: from}
 	select {
 	case s.helloQ <- task:
@@ -399,20 +538,29 @@ func (s *Server) helloWorker(udpConn *net.UDPConn) {
 }
 
 // loop 客户端 → TUN 泵。握手包只入队，状态机的实际执行在 helloWorker。
-func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
+//
+// 批量化（OPT-6/7）只改了「包从哪来、写到哪去」：读源由 udpReader 提供（批量
+// 时一次 recvmmsg 取多包再逐包交付），写出攒进 tunnet.Batch，读队列排空时一次
+// 写入。逐包的判定逻辑——握手入队、源/目的两条隔离校验、活跃刷新——与逐包
+// 时代逐条相同，一个字节都没动。
+//
+// 批的边界完全由「系统调用返回多少包」决定：reader.buffered()==0 就冲刷。
+// 不定时、不等待、不凑批——为了合并几个包去等几毫秒，对游戏流量是纯损失。
+func (s *Server) loop(dev *tunnet.Device, reader udpReader) {
 	defer close(s.done)
-	buf := make([]byte, tunnel.MaxPacket+64)
+	batch := dev.NewBatch(udpBatch)
 	for {
 		select {
 		case <-s.stop:
+			_ = batch.Flush()
 			return
 		default:
 		}
-		n, from, err := udpConn.ReadFromUDP(buf)
+		pkt, from, err := reader.read()
 		if err != nil {
+			_ = batch.Flush()
 			return
 		}
-		pkt := buf[:n]
 		if len(pkt) == 0 {
 			continue
 		}
@@ -427,51 +575,113 @@ func (s *Server) loop(dev *tunnet.Device, udpConn *net.UDPConn) {
 			// 未握手的来源。丢弃即可——不回任何东西，避免成为反射放大源。
 			continue
 		}
-		sess := ps.sess
+		s.handleSessionPacket(ps, pkt, batch)
 
-		switch {
-		case sess.IsPing(pkt):
-			s.markActive(ps)
-			pong := make([]byte, 0, 1+tunnel.NonceSize+16)
-			pong = append(pong, tunnel.TypePong)
-			pong = append(pong, sess.Seal(nil)...)
-			_, _ = udpConn.WriteToUDP(pong, ps.addr)
-		case pkt[0] == tunnel.TypePong:
-			s.markActive(ps)
-		case pkt[0] == tunnel.TypeData:
-			plain, oerr := sess.OpenData(pkt)
-			if oerr != nil {
-				continue
-			}
-			s.markActive(ps)
-			// 用户隔离的执行点：包的源地址必须是该会话分配到的隧道地址。
-			// 少了这一条，A 可以伪造 B 的源地址，让后端把回包发给 B 的玩家，
-			// 也能借 conntrack 劫持 B 的透明会话——前面所有隔离都成了纸面的。
-			src, ok := srcIP4(plain)
-			if !ok {
-				// 解不出 IPv4 头：几乎必然是客户端网卡上的 Windows 后台流量
-				// （IPv6 路由请求、组播等），不构成源地址伪造，降为 debug。
-				s.logNonIPv4(ps, len(plain))
-				continue
-			}
-			if src != ps.tunIP {
-				s.logSpoof(ps, src)
-				continue
-			}
-			// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（零例外，
-			// 网关也不行——通用模式目标填隧道地址已整体禁用，网关上没有任何
-			// 服务需要被隧道访问）。客户端掩码是 /16，整个网段在每台客户端
-			// 机器上都是直连网段，不拦的话 A 可以直接访问 B 后端机上所有绑
-			// 0.0.0.0 的服务。
-			dst, ok := dstIP4(plain)
-			if ok && s.isTunnelInternal(dst) {
-				s.logTunnelInternal(ps, dst, "目的")
-				continue
-			}
-			if werr := dev.WritePacket(plain); werr != nil {
-				s.logWriteErr(werr)
+		// 内核当前能给的包已全部消费完：把攒起来的写批冲刷出去。
+		if reader.buffered() == 0 && batch.Len() > 0 {
+			if werr := batch.Flush(); werr != nil {
+				s.logTunWriteErr(werr)
 			}
 		}
+	}
+}
+
+// handleSessionPacket 处理一个已知会话的入向包。
+func (s *Server) handleSessionPacket(ps *peerSession, pkt []byte, batch *tunnet.Batch) {
+	sess := ps.sess
+	switch pkt[0] {
+	case tunnel.TypePing:
+		// Ping 载荷同时用于路径 MTU 探测：Pong 回显实际收到的明文长度，
+		// 客户端据此判断某个尺寸能否穿过链路。
+		probeID, plainLen, perr := sess.OpenPing(pkt)
+		if perr != nil {
+			return
+		}
+		s.markActive(ps)
+		s.sendTo(ps, sess.SealPong(s.pongBuf(ps), probeID, plainLen))
+	case tunnel.TypePong:
+		// 必须解密验证：此前只看首字节就刷新活跃时间，任何人伪造一个 0x06
+		// 字节就能给别人的会话续命（也就能让空闲回收永不触发）。
+		if _, _, perr := sess.OpenPong(pkt); perr != nil {
+			return
+		}
+		s.markActive(ps)
+	case tunnel.TypeFEC:
+		// 校验包本身不是数据。登记后循环取出被补回的包，走与普通 Data
+		// 完全相同的路径——认证、重放窗口、源/目的校验一条不少。
+		if !sess.HandleFEC(pkt) {
+			return
+		}
+		s.markActive(ps)
+		for {
+			rec := sess.Recover()
+			if rec == nil {
+				return
+			}
+			s.deliverInbound(ps, rec, batch)
+		}
+	case tunnel.TypeData:
+		s.deliverInbound(ps, pkt, batch)
+	}
+}
+
+// deliverInbound 把一个 Data 包解密、校验并写进 TUN 批。
+//
+// 明文直接解进 TUN 写批的槽位（tunnet.Batch.Next），所以整条入向路径上既没有
+// 明文分配也没有二次拷贝。
+func (s *Server) deliverInbound(ps *peerSession, pkt []byte, batch *tunnet.Batch) {
+	dst := batch.Next()
+	if dst == nil {
+		// 批满：先冲刷再取槽位。
+		if werr := batch.Flush(); werr != nil {
+			s.logTunWriteErr(werr)
+		}
+		dst = batch.Next()
+		if dst == nil {
+			return
+		}
+	}
+	plain, oerr := ps.sess.OpenData(dst, pkt)
+	if oerr != nil {
+		return
+	}
+	s.markActive(ps)
+	// 用户隔离的执行点：包的源地址必须是该会话分配到的隧道地址。
+	// 少了这一条，A 可以伪造 B 的源地址，让后端把回包发给 B 的玩家，
+	// 也能借 conntrack 劫持 B 的透明会话——前面所有隔离都成了纸面的。
+	src, ok := srcIP4(plain)
+	if !ok {
+		// 解不出 IPv4 头：几乎必然是客户端网卡上的 Windows 后台流量
+		// （IPv6 路由请求、组播等），不构成源地址伪造，降为 debug。
+		s.logNonIPv4(ps, len(plain))
+		return
+	}
+	if src != ps.tunIP {
+		s.logSpoof(ps, src)
+		return
+	}
+	// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（零例外，
+	// 网关也不行——通用模式目标填隧道地址已整体禁用，网关上没有任何
+	// 服务需要被隧道访问）。客户端掩码是 /16，整个网段在每台客户端
+	// 机器上都是直连网段，不拦的话 A 可以直接访问 B 后端所有绑
+	// 0.0.0.0 的服务。
+	dstIP, ok := dstIP4(plain)
+	if ok && s.isTunnelInternal(dstIP) {
+		s.logTunnelInternal(ps, dstIP, "目的")
+		return
+	}
+	batch.Commit(len(plain))
+}
+
+// pongBuf 取出该会话的应答缓冲。Pong 由入向泵单 goroutine 发出，可以安全复用
+// 会话内的暂存。
+func (s *Server) pongBuf(ps *peerSession) []byte { return ps.ctrlOut[:0] }
+
+// sendTo 逐包发送一个已封装的包（低频路径：Pong、心跳、控制消息）。
+func (s *Server) sendTo(ps *peerSession, wire []byte) {
+	if _, err := s.udp.WriteToUDPAddrPort(wire, ps.addrPort); err != nil {
+		ps.sess.Stats().AddTxDropped(1)
+		s.logUDPWriteErr(err)
 	}
 }
 
@@ -485,7 +695,7 @@ func (s *Server) markActive(ps *peerSession) {
 	if !ps.shouldPersistTouch(60) {
 		return
 	}
-	codeID, addr := ps.codeID, ps.addr.String()
+	codeID, addr := ps.codeID, ps.addrPort.String()
 	go s.binder.TouchCode(codeID, addr)
 }
 
@@ -494,7 +704,7 @@ func (s *Server) markActive(ps *peerSession) {
 // 判定顺序是安全约束，不能重排：**必须先验 MAC 才允许回 Reject**。在认证之前
 // 回任何应答，服务端就成了一个可被伪造源地址驱动的反射放大源。访问码查不到时
 // 连 Reject 都不能回——那种情况下没有密钥可用来签名。
-func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr) {
+func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from netip.AddrPort) {
 	uid, err := tunnel.PeekHello(pkt)
 	if err != nil {
 		if errors.Is(err, tunnel.ErrOldVersion) {
@@ -517,7 +727,7 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr
 
 	reject := func(reason tunnel.RejectReason) {
 		wire := tunnel.NewServerReject(ident.Secret, hello.Eph, reason).Marshal()
-		_, _ = udpConn.WriteToUDP(wire, from)
+		_, _ = udpConn.WriteToUDPAddrPort(wire, from)
 		s.logReject(from, ident, reason)
 	}
 
@@ -556,28 +766,42 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr
 		}
 	}
 
-	accept, priv, aerr := tunnel.NewServerAccept(ident.Secret, hello.Eph, ident.TunIP, s.gateway, s.tunPool.Bits())
+	// MTU 与特性位由服务端下发（都进 MAC）。特性必须对称启用：一端发 FEC
+	// 另一端不认，那些校验包会被当未知类型静默丢弃，表现成「开了纠错反而更卡」。
+	feats := s.cfg.features()
+	accept, priv, aerr := tunnel.NewServerAccept(ident.Secret, hello.Eph,
+		ident.TunIP, s.gateway, s.tunPool.Bits(), s.tunMTU, feats)
 	if aerr != nil {
 		logger.S.Warnw("生成握手应答失败", "user", ident.UserName, "code", ident.CodeName, "err", aerr)
 		return
 	}
-	if _, werr := udpConn.WriteToUDP(accept.Marshal(), from); werr != nil {
+	if _, werr := udpConn.WriteToUDPAddrPort(accept.Marshal(), from); werr != nil {
 		return
 	}
 	shared := tunnel.ECDHShared(&hello.Eph, priv)
-	sess := tunnel.NewSession(tunnel.DeriveSessionKey(shared, ident.Secret))
-	ps := newPeerSession(ident, sess, from)
+	c2s, s2c, kerr := tunnel.DeriveSessionKeys(shared, ident.Secret, hello.Eph, accept.Eph)
+	if kerr != nil {
+		logger.S.Warnw("派生会话密钥失败", "user", ident.UserName, "code", ident.CodeName, "err", kerr)
+		return
+	}
+	sess, serr := tunnel.NewServerSession(c2s, s2c, uint32(feats), s.tunMTU)
+	if serr != nil {
+		logger.S.Warnw("建立会话失败", "user", ident.UserName, "code", ident.CodeName, "err", serr)
+		return
+	}
+	ps := newPeerSession(ident, sess, udpAddrOf(from), s.tunMTU)
 	prev := s.peers.upsert(ps)
 
-	// 空闲 30 秒会触发客户端自动重握手，同一来源的重连是常态，只在首次接入
+	// 空闲 10 秒会触发客户端自动重握手，同一来源的重连是常态，只在首次接入
 	// 或来源变化时记 info（换机器/换 NAT 端口才值得注意）。
 	switch {
 	case prev == nil:
 		logger.S.Infow("隧道客户端已接入",
-			"user", ident.UserName, "code", ident.CodeName, "tun_ip", ident.TunIP, "src", from)
-	case prev.addr.String() != from.String():
+			"user", ident.UserName, "code", ident.CodeName, "tun_ip", ident.TunIP,
+			"src", from, "mtu", s.tunMTU)
+	case prev.addrPort != from:
 		logger.S.Infow("隧道客户端来源变更",
-			"user", ident.UserName, "code", ident.CodeName, "from", prev.addr, "to", from)
+			"user", ident.UserName, "code", ident.CodeName, "from", prev.addrPort, "to", from)
 	default:
 		logger.S.Debugw("隧道客户端重新握手", "user", ident.UserName, "code", ident.CodeName, "src", from)
 	}
@@ -585,25 +809,48 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from *net.UDPAddr
 	s.forgetPushed(ident.CodeID)
 }
 
-// logWriteErr 限频记录写 TUN 失败（每 5 秒最多一条）。
+// logTunWriteErr 限频记录写 TUN 失败（每 5 秒最多一条）。
 // 数据面写失败若静默丢弃，故障表现为「隧道通、业务不通」且毫无线索。
-func (s *Server) logWriteErr(err error) {
-	if !throttle(&s.lastWriteErr, 5) {
+func (s *Server) logTunWriteErr(err error) {
+	if !throttle(&s.lastTunWrite, 5) {
 		return
 	}
 	logger.S.Warnw("写入 TUN 失败（玩家入站包被丢弃）", "err", err)
 }
 
+// logUDPWriteErr 限频记录写 UDP 失败（每 5 秒最多一条）。
+//
+// 与写 TUN 分开两个锚点两条文案：此前两者共用一条「写入 TUN 失败」，出向
+// socket 缓冲满时打出的是一条指向错误方向的日志。
+func (s *Server) logUDPWriteErr(err error) {
+	if !throttle(&s.lastUDPWrite, 5) {
+		return
+	}
+	logger.S.Warnw("发送隧道 UDP 包失败（该客户端的出向包被丢弃）", "err", err)
+}
+
+// logOverMTU 限频记录超出隧道 MTU 而无法转发的出向包。
+//
+// 此前这类包在 tunnet 读侧被静默丢弃（只加一个没人读的计数器），是「后端 MTU
+// 大于隧道 MTU 时偶发大包全损」这类故障的黑盒来源。
+func (s *Server) logOverMTU(ps *peerSession, size int) {
+	if !throttle(&s.lastOverMTU, 30) {
+		return
+	}
+	logger.S.Warnw("出向包超出隧道 MTU，已丢弃（请下调后端 MTU 或检查链路 MTU）",
+		"user", ps.userName, "code", ps.codeName, "size", size, "mtu", ps.mtu)
+}
+
 // logOldVersion 限频提示客户端版本过旧（每 30 秒最多一条）。
 // 旧客户端会以固定周期重试，不限频会把日志刷满。
-func (s *Server) logOldVersion(from *net.UDPAddr) {
+func (s *Server) logOldVersion(from netip.AddrPort) {
 	if !throttle(&s.lastOldVer, 30) {
 		return
 	}
-	logger.S.Warnw("隧道客户端协议版本过旧，请升级 pf-client（当前版本要求带设备指纹的 v3 握手）", "src", from)
+	logger.S.Warnw("隧道客户端协议版本过旧，请升级 pf-client（当前版本要求 v4 握手：方向密钥分离 + AEAD）", "src", from)
 }
 
-func (s *Server) logAuthFail(from *net.UDPAddr, reason, who string) {
+func (s *Server) logAuthFail(from netip.AddrPort, reason, who string) {
 	if !throttle(&s.lastAuthErr, 10) {
 		return
 	}
@@ -614,7 +861,7 @@ func (s *Server) logAuthFail(from *net.UDPAddr, reason, who string) {
 //
 // 这类拒绝多是运维需要知道的状态（有人换了机器、有人超了并发上限），但客户端
 // 会持续重试，不限频会刷屏。
-func (s *Server) logReject(from *net.UDPAddr, ident Identity, reason tunnel.RejectReason) {
+func (s *Server) logReject(from netip.AddrPort, ident Identity, reason tunnel.RejectReason) {
 	if !throttle(&s.lastReject, 10) {
 		return
 	}
@@ -685,67 +932,121 @@ func throttle(anchor *atomic.Int64, sec int64) bool {
 // pumpTunToClient TUN → 客户端 泵：按目的地址分流到对应会话。
 //
 // 单读 goroutine 是硬约束（tunnet.Device.ReadPacket 内部有批读队列，不可并发）。
-func (s *Server) pumpTunToClient(dev *tunnet.Device, udpConn *net.UDPConn) {
-	buf := make([]byte, 1500)
+//
+// 批量化（OPT-6）：封装好的包攒进发送批，读队列排空时一次 sendmmsg 发出。
+// 批边界仍是「一次系统调用返回多少包」——TUN 侧 Buffered()==0 就冲刷，
+// 不定时、不等待、不凑批。
+func (s *Server) pumpTunToClient(dev *tunnet.Device, writer udpWriter) {
+	buf := make([]byte, dev.ReadBufSize())
+	// 封装输出缓冲：一次 Seal 的结果在被 writer 拷走之前有效，所以单块即可。
+	// 尾部多留 NonceSize 是零分配封装路径的要求（nonce 借用容量区组装）。
+	out := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
 	for {
 		select {
 		case <-s.stop:
+			s.flushWriter(writer)
 			return
 		default:
 		}
 		n, err := dev.ReadPacket(buf)
 		if err != nil {
+			s.flushWriter(writer)
 			return
 		}
 		if n == 0 {
 			continue
 		}
-		dst, ok := dstIP4(buf[:n])
-		if !ok {
-			continue
-		}
-		ps := s.peers.byTunnelIP(dst)
-		if ps == nil {
-			s.logNoRoute(dst)
-			continue
-		}
-		// 用户隔离的对称执行语句：发往客户端的包，源地址不得是隧道网段内的
-		// 地址（零例外，含网关）。合法来源只有玩家公网 IP；出现隧道内地址
-		// 说明有人正在隧道里访问别人，不能替他递送。
-		if src, ok := srcIP4(buf[:n]); ok && s.isTunnelInternal(src) {
-			s.logTunnelInternal(ps, src, "源")
-			continue
-		}
-		// 直接用 buf 切片：SealData 在下一轮 ReadPacket 覆盖 buf 之前同步
-		// 消费完毕，逐包 make+copy 是纯浪费的分配。
-		if _, werr := udpConn.WriteToUDP(ps.sess.SealData(buf[:n]), ps.addr); werr != nil {
-			// 单个 peer 写失败不再终止整个泵——那会让一个客户端的网络问题
-			// 掐断所有其它用户的隧道。
-			s.logWriteErr(werr)
+		s.forwardOutbound(writer, out, buf[:n])
+		if dev.Buffered() == 0 {
+			s.flushWriter(writer)
 		}
 	}
 }
 
+// forwardOutbound 把一个 TUN 出向包分流、封装并加入发送批。
+func (s *Server) forwardOutbound(writer udpWriter, out, pkt []byte) {
+	dst, ok := dstIP4(pkt)
+	if !ok {
+		return
+	}
+	ps := s.peers.byTunnelIP(dst)
+	if ps == nil {
+		s.logNoRoute(dst)
+		return
+	}
+	// 用户隔离的对称执行语句：发往客户端的包，源地址不得是隧道网段内的
+	// 地址（零例外，含网关）。合法来源只有玩家公网 IP；出现隧道内地址
+	// 说明有人正在隧道里访问别人，不能替他递送。
+	if src, sok := srcIP4(pkt); sok && s.isTunnelInternal(src) {
+		s.logTunnelInternal(ps, src, "源")
+		return
+	}
+	// 超出协商 MTU 的包无法经隧道转发（封装后必然被 IP 分片，而分片丢一片
+	// 等于整包全损）。此前这类包在 tunnet 读侧被静默丢弃，是黑盒丢包的来源。
+	if len(pkt) > ps.mtu {
+		ps.sess.Stats().AddTunDropped(1)
+		s.logOverMTU(ps, len(pkt))
+		return
+	}
+	// 直接用 buf 切片：封装在下一轮 ReadPacket 覆盖 buf 之前同步完成，
+	// 逐包 make+copy 是纯浪费的分配。
+	wire, extra := ps.sess.SealDataFEC(out[:0], pkt)
+	s.enqueue(writer, ps, wire)
+	if extra != nil {
+		// FEC 校验包 / 冗余副本必须是**独立的数据报**：合并进同一个包等于
+		// 让校验与数据同生共死，一次丢包同时带走两者，纠错就白做了。
+		s.enqueue(writer, ps, extra)
+	}
+}
+
+// enqueue 把一个已封装的包加入发送批，批满时先冲刷。
+func (s *Server) enqueue(writer udpWriter, ps *peerSession, wire []byte) {
+	if writer.add(wire, ps.addrPort) {
+		return
+	}
+	s.flushWriter(writer)
+	if !writer.add(wire, ps.addrPort) {
+		ps.sess.Stats().AddTxDropped(1)
+	}
+}
+
+// flushWriter 冲刷发送批。
+//
+// 单个 peer 写失败不终止整个泵——那会让一个客户端的网络问题掐断所有其它
+// 用户的隧道。缓冲满（ENOBUFS/EWOULDBLOCK）时丢当前批并计数，绝不阻塞读 TUN。
+func (s *Server) flushWriter(writer udpWriter) {
+	if writer.pending() == 0 {
+		return
+	}
+	if _, err := writer.flush(); err != nil {
+		s.logUDPWriteErr(err)
+	}
+}
+
 // heartbeat 周期心跳（对每个在线会话各发一次）。
+//
+// 心跳同时承担两件事：维持 NAT 映射与会话活跃判定，以及被动测量 RTT
+// （Pong 回来时算差值）。逐包发送，低频路径不进批量化。
 func (s *Server) heartbeat(udpConn *net.UDPConn) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+	buf := make([]byte, 0, 64+tunnel.NonceSize)
 	for {
 		select {
 		case <-s.stop:
 			return
 		case <-tick.C:
 			for _, ps := range s.peers.snapshot() {
-				ping := make([]byte, 0, 1+tunnel.NonceSize+16)
-				ping = append(ping, tunnel.TypePing)
-				ping = append(ping, ps.sess.Seal(nil)...)
-				_, _ = udpConn.WriteToUDP(ping, ps.addr)
+				wire := ps.sess.SealPing(buf[:0], 0, 0)
+				if _, err := udpConn.WriteToUDPAddrPort(wire, ps.addrPort); err != nil {
+					ps.sess.Stats().AddTxDropped(1)
+				}
 			}
 		}
 	}
 }
 
-// janitor 回收空闲超时的会话。
+// janitor 回收空闲超时的会话，并采样内核层丢包。
 //
 // 会话的存活由「收到任何有效包」这个事件维持，回收由时间驱动。不做「按某个
 // 周期性列表判定存活」——那会把短交互的会话反复掐断。
@@ -762,9 +1063,44 @@ func (s *Server) janitor() {
 					"user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP)
 				s.forgetPushed(ps.codeID)
 			}
+			s.sampleKernelDrops()
+			s.tunDrops.Store(s.dev.Dropped())
 		}
 	}
 }
+
+// sampleKernelDrops 读一次内核 UDP 收缓冲溢出计数。
+//
+// 只在**增量非零**时打日志：这类丢包应用层完全无感（日志里一个字都没有），
+// 但它稳态下恒为 0，一旦增长就说明缓冲被打穿了——那是需要立刻知道的信号，
+// 而不是每 30 秒复述一遍的噪声。
+func (s *Server) sampleKernelDrops() {
+	port := 0
+	if la, ok := s.udp.LocalAddr().(*net.UDPAddr); ok {
+		port = la.Port
+	}
+	if port == 0 {
+		return
+	}
+	cur, ok := kernelUDPDrops(port)
+	if !ok {
+		return
+	}
+	prev := s.kernelDrops.Swap(cur)
+	if cur > prev {
+		logger.S.Warnw("内核 UDP 接收缓冲溢出丢包（突发流量打穿了 socket 缓冲）",
+			"delta", cur-prev, "total", cur, "fix", sysctlHint(tunnelSocketBuffer))
+	}
+}
+
+// KernelDrops 返回内核 UDP 收缓冲累计丢包数（0 = 无数据或非 Linux）。
+func (s *Server) KernelDrops() uint64 { return s.kernelDrops.Load() }
+
+// TunDrops 返回 TUN 读侧因超出缓冲而丢弃的包数。
+func (s *Server) TunDrops() int64 { return s.tunDrops.Load() }
+
+// IOMode 返回实际生效的 UDP 收发模式（诊断用）。
+func (s *Server) IOMode() string { return s.io.Mode }
 
 // pushSessionIPs 周期把活跃会话来源 IP 推给各自的客户端（回程路由同步），
 // 并把「上一轮在、这一轮不在」的来源作为结束事件单独下发。
@@ -778,6 +1114,7 @@ func (s *Server) janitor() {
 func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn) {
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
+	buf := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
 	for {
 		select {
 		case <-s.stop:
@@ -790,11 +1127,11 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 				// 是最需要下发结束事件的时刻，提前 continue 会让客户端的
 				// 残留路由等到本地宽限期才消失。
 				if len(ips) > 0 {
-					wire, err := ps.sess.SealCtrl(tunnel.CtrlMessage{Kind: tunnel.CtrlKindRoutes, IPs: ips})
+					wire, err := ps.sess.SealCtrl(buf[:0], tunnel.CtrlMessage{Kind: tunnel.CtrlKindRoutes, IPs: ips})
 					if err != nil {
 						continue
 					}
-					if _, err := udpConn.WriteToUDP(wire, ps.addr); err != nil {
+					if _, err := udpConn.WriteToUDPAddrPort(wire, ps.addrPort); err != nil {
 						continue
 					}
 				}
@@ -816,11 +1153,11 @@ func (s *Server) pushSessionIPs(sessionIPs SessionIPsFunc, udpConn *net.UDPConn)
 // sendEnded 下发「这些来源已无活跃会话」。失败不重试：客户端还有本地空闲
 // 宽限期兜底，只是回收得慢一些。
 func (s *Server) sendEnded(udpConn *net.UDPConn, ps *peerSession, gone []string) {
-	wire, err := ps.sess.SealCtrl(tunnel.CtrlMessage{Kind: tunnel.CtrlKindEnded, IPs: gone})
+	wire, err := ps.sess.SealCtrl(nil, tunnel.CtrlMessage{Kind: tunnel.CtrlKindEnded, IPs: gone})
 	if err != nil {
 		return
 	}
-	if _, err := udpConn.WriteToUDP(wire, ps.addr); err != nil {
+	if _, err := udpConn.WriteToUDPAddrPort(wire, ps.addrPort); err != nil {
 		return
 	}
 	logger.S.Infow("回程路由会话结束已通知",

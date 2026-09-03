@@ -116,7 +116,7 @@ func TestHandleHelloSkipsBindWhenFingerprintUnchanged(t *testing.T) {
 		t.Fatalf("监听失败: %v", err)
 	}
 	defer clientConn.Close()
-	from := clientConn.LocalAddr().(*net.UDPAddr)
+	from := addrPortOf(clientConn.LocalAddr().(*net.UDPAddr))
 
 	secret := []byte("test-secret-test-secret-test!")
 	uid, uerr := tunnel.ParseUID("3d2f5a1e-0000-0000-0000-000000000001")
@@ -141,6 +141,7 @@ func TestHandleHelloSkipsBindWhenFingerprintUnchanged(t *testing.T) {
 		tunPool:  pool,
 		gateway:  netip.MustParseAddr("10.66.0.1"),
 		helloQ:   make(chan helloTask, helloQueueCap),
+		tunMTU:   tunnel.MaxTunMTU,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -182,7 +183,7 @@ func TestHandleHelloSkipsBindWhenFingerprintUnchanged(t *testing.T) {
 func TestQueueHelloNeverBlocks(t *testing.T) {
 	nopLogging()
 	s := &Server{helloQ: make(chan helloTask, 1), stop: make(chan struct{})}
-	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
+	from := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 9999)
 	pkt := []byte{tunnel.TypeHello, 0x01}
 
 	s.queueHello(pkt, from) // 队列还有空位
