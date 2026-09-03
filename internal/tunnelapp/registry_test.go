@@ -10,11 +10,18 @@ import (
 	"go-port-forward/pkg/tunnel"
 )
 
-func testSession() *tunnel.Session {
-	return tunnel.NewSession(tunnel.DeriveSessionKey(tunnel.ECDHShared(&[32]byte{}, &[32]byte{}), []byte("k")))
+func testSession(t testing.TB) *tunnel.Session {
+	t.Helper()
+	var k [32]byte
+	k[0] = 0x5A
+	sess, err := tunnel.NewServerSession(&k, &k, 0, tunnel.MaxTunMTU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sess
 }
 
-func udpAddr(t *testing.T, s string) *net.UDPAddr {
+func udpAddr(t testing.TB, s string) *net.UDPAddr {
 	t.Helper()
 	a, err := net.ResolveUDPAddr("udp", s)
 	if err != nil {
@@ -23,15 +30,25 @@ func udpAddr(t *testing.T, s string) *net.UDPAddr {
 	return a
 }
 
+// ap 把 "ip:port" 转成会话表的查表键（数据面用的就是这个形态）。
+func ap(t testing.TB, s string) netip.AddrPort {
+	t.Helper()
+	a, err := netip.ParseAddrPort(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
 // mkPS 造一个测试会话：codeID 决定槽位，userID 决定并发隧道计数的归属。
-func mkPS(t *testing.T, codeID, codeName, userID, userName string, tunIP netip.Addr, addr string) *peerSession {
+func mkPS(t testing.TB, codeID, codeName, userID, userName string, tunIP netip.Addr, addr string) *peerSession {
 	t.Helper()
 	ident := Identity{
 		CodeID: codeID, CodeName: codeName,
 		UserID: userID, UserName: userName,
 		TunIP: tunIP,
 	}
-	return newPeerSession(ident, testSession(), udpAddr(t, addr))
+	return newPeerSession(ident, testSession(t), udpAddr(t, addr), tunnel.MaxTunMTU)
 }
 
 // 多访问码的核心保证：一个访问码握手不得影响另一个访问码的会话——即使它们
@@ -51,10 +68,10 @@ func TestRegistryIsolatesCodes(t *testing.T) {
 	if r.count() != 2 {
 		t.Fatalf("count = %d, want 2（同一用户的两个访问码必须并存）", r.count())
 	}
-	if got := r.byAddress(udpAddr(t, "203.0.113.5:1000")); got != a {
+	if got := r.byAddress(ap(t, "203.0.113.5:1000")); got != a {
 		t.Fatal("A 的地址索引被破坏")
 	}
-	if got := r.byAddress(udpAddr(t, "203.0.113.6:1001")); got != b {
+	if got := r.byAddress(ap(t, "203.0.113.6:1001")); got != b {
 		t.Fatal("B 的地址索引被破坏")
 	}
 	if got := r.byTunnelIP(netip.MustParseAddr("10.66.0.3")); got != b {
@@ -107,10 +124,10 @@ func TestRegistryReplacesSameCodeAndDropsStaleAddr(t *testing.T) {
 	if r.count() != 1 {
 		t.Fatalf("count = %d, want 1", r.count())
 	}
-	if got := r.byAddress(udpAddr(t, "203.0.113.5:1000")); got != nil {
+	if got := r.byAddress(ap(t, "203.0.113.5:1000")); got != nil {
 		t.Fatal("旧来源地址索引未清理，会留下僵尸会话")
 	}
-	if got := r.byAddress(udpAddr(t, "203.0.113.5:2000")); got != fresh {
+	if got := r.byAddress(ap(t, "203.0.113.5:2000")); got != fresh {
 		t.Fatal("新来源地址索引未建立")
 	}
 	if got := r.byTunnelIP(tunIP); got != fresh {
@@ -128,7 +145,7 @@ func TestRegistryRehandshakeDoesNotEvictOthers(t *testing.T) {
 
 	r.upsert(mkPS(t, "code-a", "a", "u1", "u", netip.MustParseAddr("10.66.0.2"), "203.0.113.5:3000"))
 
-	if got := r.byAddress(udpAddr(t, "203.0.113.6:1001")); got != b {
+	if got := r.byAddress(ap(t, "203.0.113.6:1001")); got != b {
 		t.Fatal("B 的会话被 A 的重握手挤掉了")
 	}
 	if got := r.byTunnelIP(netip.MustParseAddr("10.66.0.3")); got != b {
@@ -176,7 +193,7 @@ func TestRegistryReapIdle(t *testing.T) {
 	if len(dead) != 1 || dead[0] != ps {
 		t.Fatalf("空闲会话未被回收：%v", dead)
 	}
-	if r.count() != 0 || r.byAddress(udpAddr(t, "203.0.113.5:1000")) != nil || r.byTunnelIP(tunIP) != nil {
+	if r.count() != 0 || r.byAddress(ap(t, "203.0.113.5:1000")) != nil || r.byTunnelIP(tunIP) != nil {
 		t.Fatal("回收后索引未清空")
 	}
 }
