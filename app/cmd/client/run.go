@@ -65,6 +65,8 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	// 层丢包且应用层毫无感知。设置失败沿用系统默认，无害。
 	_ = udp.SetReadBuffer(4 << 20)
 	_ = udp.SetWriteBuffer(4 << 20)
+	e.udp.Store(udp)
+	defer e.udp.Store(nil)
 	defer udp.Close()
 
 	// 网卡按协议上限创建；服务端在握手应答里下发实际 MTU，若更小则在

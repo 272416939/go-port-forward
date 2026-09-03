@@ -22,6 +22,7 @@ type fakeTun struct {
 	// discard 让 Write 不记录内容：基准要测的是批量路径本身，替身的逐包拷贝
 	// 会把自己的分配算到被测代码头上。
 	discard bool
+	closes  int // Close 被调用的次数（幂等性验证锚点）
 }
 
 func (f *fakeTun) File() *os.File { return nil }
@@ -64,8 +65,11 @@ func (f *fakeTun) Write(bufs [][]byte, offset int) (int, error) {
 func (f *fakeTun) MTU() (int, error)        { return 1400, nil }
 func (f *fakeTun) Name() (string, error)    { return "fake", nil }
 func (f *fakeTun) Events() <-chan tun.Event { return nil }
-func (f *fakeTun) Close() error             { return nil }
-func (f *fakeTun) BatchSize() int           { return f.batch }
+func (f *fakeTun) Close() error {
+	f.closes++
+	return nil
+}
+func (f *fakeTun) BatchSize() int { return f.batch }
 
 // ipPacket 造一个长度为 n 的可辨识 IPv4 包（首字节 0x45，尾字节为标记）。
 func ipPacket(n int, tag byte) []byte {
@@ -416,5 +420,21 @@ func BenchmarkWritePacket64(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	}
+}
+
+// Device.Close 必须幂等：Engine.Stop 会提前关它以解除阻塞读（铁律 3），
+// run 的 defer 还会再关一次——底层被关两次轻则多余错误、重则驱动异常。
+func TestDeviceCloseIsIdempotent(t *testing.T) {
+	f := &fakeTun{batch: 1}
+	d := newDevice(f, 1400)
+	if err := d.Close(); err != nil {
+		t.Fatalf("第一次 Close: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("第二次 Close: %v", err)
+	}
+	if f.closes != 1 {
+		t.Fatalf("底层 Close 次数 = %d，期望恰好 1", f.closes)
 	}
 }

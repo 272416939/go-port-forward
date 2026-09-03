@@ -9,6 +9,7 @@ package tunnet
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -33,15 +34,16 @@ const (
 // 因此不可并发调用；WritePacket 可并发（底层自带写锁）。
 // 批量写用 Batch，每个写者各持一个，Batch 本身不可并发。
 type Device struct {
-	dev     tun.Device
-	mtu     atomic.Int64
-	batch   int
-	bufSize int
-	bufs    [][]byte
-	sizes   []int
-	nRead   int // 上次批读返回的包数
-	next    int // 下一个待取用的包索引
-	drop    atomic.Int64
+	dev       tun.Device
+	mtu       atomic.Int64
+	batch     int
+	bufSize   int
+	bufs      [][]byte
+	sizes     []int
+	nRead     int // 上次批读返回的包数
+	next      int // 下一个待取用的包索引
+	drop      atomic.Int64
+	closeOnce sync.Once
 }
 
 // Open 打开名为 name 的 TUN 设备（Windows 走 wintun，Linux 走 /dev/net/tun）。
@@ -153,8 +155,13 @@ func (d *Device) WritePacket(p []byte) error {
 	return err
 }
 
-// Close 关闭设备。
-func (d *Device) Close() error { return d.dev.Close() }
+// Close 关闭设备。幂等：Engine.Stop 会提前关它以解除阻塞读，run 的 defer
+// 还会再关一次——第二次必须是无操作，否则会把 wintun 的关闭错误翻出来。
+func (d *Device) Close() error {
+	var err error
+	d.closeOnce.Do(func() { err = d.dev.Close() })
+	return err
+}
 
 // Batch 是一批待写入 TUN 的包。
 //

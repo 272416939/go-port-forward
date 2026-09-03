@@ -107,14 +107,22 @@ func main() {
 		quitApp()
 	}()
 
+	// 托盘退出与界面退出共用同一条顺序：**先同步停完隧道（路由清理在此完成），
+	// 再关窗口**。窗口消失之后程序立即退出，exe 不再被锁定——用户「退出后复制
+	// 新版本」不会撞上正在清理的隐形进程（2026-09-03 实测事故）。
+	quitAfterStop := func() {
+		eng.Stop()
+		quitApp()
+	}
+
 	// 阻塞直到程序退出（关窗只是收进托盘）；随后清理路由与防火墙规则。
 	diag("正在创建主窗口…")
-	if err := runWindow(url, trayActions{Disconnect: eng.Stop, Quit: quitApp}); err != nil {
+	if err := runWindow(url, trayActions{Disconnect: eng.Stop, Quit: quitAfterStop}); err != nil {
 		diag("主窗口创建失败：%v", err)
 		fatalBox("界面异常", err.Error())
 	}
 	diag("窗口已关闭，正在清理…")
-	eng.Stop()
+	eng.Stop() // 兜底：非退出路径关窗（断开/异常）时确保资源释放；Stop 幂等
 	diag("已退出")
 }
 

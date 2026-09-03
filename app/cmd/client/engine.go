@@ -64,6 +64,7 @@ type Engine struct {
 	sess   atomic.Pointer[tunnel.Session]
 	addr   atomic.Pointer[tunnelAddressing] // 服务端下发的隧道地址
 	dev    atomic.Pointer[tunnet.Device]    // 当前虚拟网卡（MTU 调整与丢包统计用）
+	udp    atomic.Pointer[net.UDPConn]      // 当前隧道 socket（Stop 时关闭以解除阻塞读）
 
 	statTunToTunnel atomic.Int64 // TUN 读出 → 发往隧道（后端回包方向）
 	statTunnelToTun atomic.Int64 // 隧道收到 → 写入 TUN（玩家入站方向）
@@ -273,6 +274,16 @@ func (e *Engine) Start(conf clientConfig) error {
 }
 
 // Stop 断开隧道并等待资源释放（路由、防火墙规则都会被清理）。
+// Stop 断开隧道并等待资源释放（路由、防火墙规则都会被清理）。
+//
+// cancel() **不能**解除阻塞读：pump 阻塞在 udp.Read / dev.ReadPacket 上，ctx
+// 取消对它们毫无作用，只能等读超时（最长 10 秒）。所以这里在 cancel 之后
+// **立即关闭 socket 与虚拟网卡**——阻塞读毫秒级带错返回，run 的清理（删回程
+// 路由）随即同步执行。铁律 3：取消信号必须是关闭 fd 本身。
+//
+// 这个顺序对「退出程序」是关键：窗口消失后进程还要跑完路由清理，若停隧道
+// 要等 10 秒，用户以为已退出、复制新 exe 被占用，杀掉进程就会留下残留路由
+//（表现为：升级重启后老玩家全连不上）。
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	cancel, done := e.cancel, e.done
@@ -283,7 +294,14 @@ func (e *Engine) Stop() {
 		return
 	}
 	cancel()
-	<-done
+	// 关闭阻塞读的 fd：UDP 隧道读、TUN 读全部立即带错返回。
+	if c := e.udp.Swap(nil); c != nil {
+		_ = c.Close()
+	}
+	if d := e.dev.Swap(nil); d != nil {
+		_ = d.Close()
+	}
+	<-done // run 的清理（回程路由删除）同步完成后才返回
 	e.setState(StateIdle, "")
 	e.addr.Store(nil)
 	e.logf("已断开连接。")

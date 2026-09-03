@@ -153,11 +153,18 @@ func (s *uiServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 
 // handleQuit 退出整个程序。关掉浏览器标签页不会结束进程（隧道要在后台继续
 // 工作），所以界面上需要一个明确的出口来触发路由与防火墙规则的清理。
+//
+// **必须先同步停完隧道再发退出信号**：窗口（含本页面）随 WM_CLOSE 立即消失，
+// 而路由删除（每个玩家一次 route.exe）要在这之后才执行。若先关窗口，用户看到
+// 「已退出」就会去复制新版本 exe——进程仍在清理中被锁定，复制失败后用户去
+// 任务管理器杀进程，清理被拦腰截断，残留路由让老玩家全部连不上（2026-09-03
+// 实测事故）。停完再关窗：窗口消失 = 清理已完成。
 func (s *uiServer) handleQuit(w http.ResponseWriter, r *http.Request) {
 	if !s.authed(r) || r.Method != http.MethodPost {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid request"})
 		return
 	}
+	s.eng.Stop()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	close(s.quit)
 }
