@@ -120,6 +120,7 @@ var global *AppConfig
 // 注意：运行时行为不依赖版本号——缺失的键一律按代码默认值生效，即使升级
 // 写回失败也不影响启动。
 const ConfigVersion = 2
+
 // v2 = 新增 tunnel.io_mode / fec / tail_dup / udp_gro / udp_gso。
 
 // upgradedNote 记录最近一次配置文件升级的说明（Load 在 logger 初始化之前运行，
