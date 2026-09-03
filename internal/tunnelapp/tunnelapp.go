@@ -156,7 +156,6 @@ type Server struct {
 	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
 	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
 	lastOverMTU   atomic.Int64 // 出向包超出隧道 MTU 的限频锚点
-	lastVerReject atomic.Int64 // 跨版本拒绝应答的限频锚点
 
 	// kernelDrops 是内核 UDP 收缓冲溢出的累计丢包数（/proc/net/udp）。
 	// 应用层对这类丢包完全无感——玩家进服的下行突发最容易打穿默认缓冲，
@@ -711,12 +710,9 @@ func (s *Server) markActive(ps *peerSession) {
 //   - 只应答 **MAC 验证通过**的对端（InspectLegacyHello）——不引入「访问码
 //     是否存在」的探测口子；伪造/重放的 Hello 依旧静默；
 //   - 拒绝应答 35 字节 < Hello 122 字节，不构成反射放大；
-//   - 全局限频 1 秒：正常旧客户端 3 秒重试一次足够；垃圾洪泛最多每秒换一次
-//     存储查询，helloWorker 本就串行，数据泵不受影响。
+//   - 成本与既有认证失败路径同类（uid 解析 + 身份查询 + 一次 HMAC），helloQ
+//     深度 128 + 单 worker 串行已天然限流——垃圾包在队列就丢弃，数据泵不受影响。
 func (s *Server) replyVersionMismatch(pkt []byte, from netip.AddrPort) {
-	if !throttle(&s.lastVerReject, 1) {
-		return
-	}
 	uid, ok := tunnel.PeekLegacyHelloUID(pkt)
 	if !ok {
 		return // v1/v2 布局不同，无法安全应答，保持静默

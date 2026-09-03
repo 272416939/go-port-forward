@@ -225,14 +225,21 @@ func TestHandleHelloRepliesVersionMismatch(t *testing.T) {
 	}
 	device := [tunnel.FingerprintSize]byte{0xA1, 0xB2, 0xC3, 0xD4}
 
+	// 身份替身只认已知的 uid——「未知访问码」用例依赖它返回 false。
+	knownUID := uid.String()
 	s := &Server{
-		udp:      serverConn.(*net.UDPConn),
-		peers:    newRegistry(),
-		identity: func(codeID string) (Identity, bool) { return Identity{CodeID: "c1", Secret: secret}, true },
-		binder:   &fakeBinder{},
-		helloQ:   make(chan helloTask, helloQueueCap),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		udp:   serverConn.(*net.UDPConn),
+		peers: newRegistry(),
+		identity: func(codeID string) (Identity, bool) {
+			if codeID != knownUID {
+				return Identity{}, false
+			}
+			return Identity{CodeID: "c1", Secret: secret}, true
+		},
+		binder: &fakeBinder{},
+		helloQ: make(chan helloTask, helloQueueCap),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 
 	// 旧版（v3 格式）Hello：必须收到 35 字节的跨版本拒绝应答。
