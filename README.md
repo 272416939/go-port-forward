@@ -89,8 +89,9 @@ The core concept of this project is the rule's **mode** — the first choice whe
 
 - **内置隧道服务端**（Linux 主程序内，无独立进程）+ **Windows 客户端 pf-client**（WebView2 图形界面 + 系统托盘常驻）
   Built-in tunnel server (no separate process) + Windows client with WebView2 UI and tray
-- 每访问码独立密钥、独立隧道内地址；X25519 密钥协商 + NaCl 每包加密；设备指纹绑定
-  Per-code keys and addresses, X25519 + NaCl per-packet encryption, device fingerprint binding
+- 每访问码独立密钥、独立隧道内地址；X25519 密钥协商 + ChaCha20-Poly1305 每包加密
+  （收发两把方向密钥，HKDF 派生并绑定双方临时公钥）；设备指纹绑定
+  Per-code keys and addresses, X25519 + ChaCha20-Poly1305 with per-direction keys, device binding
 - **动态 /32 回程路由**：只有正在中转的玩家 IP 走隧道返回，后端机器的其它流量完全不受影响
   Dynamic /32 return routes: only actively relayed player IPs route through the tunnel
 
@@ -246,12 +247,17 @@ storage:
     path: data/rules.db
 tunnel:
     enabled: false
+    fec: false
+    io_mode: batch
     listen: :7947
     nat: true
     psk: ""
     public_addr: ""
+    tail_dup: false
     tun_addr: 10.66.0.1/16
     tun_name: pftun0
+    udp_gro: false
+    udp_gso: false
 web:
     host: 127.0.0.1
     port: 8989
@@ -322,6 +328,23 @@ tunnel:                      # ── 内置隧道服务端 | Built-in tunnel se
     tun_addr: 10.66.0.1/16   # 服务端隧道地址 + 访问码地址池（一个访问码占一个地址；/24 仅 253 个会耗尽）
                              # server address + access-code address pool
     tun_name: pftun0         # TUN 设备名 | TUN device name
+    io_mode: batch           # UDP 收发方式：batch 走 recvmmsg/sendmmsg（每批 2 次系统调用，默认），
+                             # simple 逐包（每包 2 次）。非 Linux 自动降级为 simple 并记一条日志。
+                             # 出问题时改成 simple 即可回退，不必换二进制
+                             # batch uses recvmmsg/sendmmsg; simple is the per-packet fallback
+    fec: false               # 前向纠错：每 8 个数据包附 1 个校验包，组内丢 1 个可无损补回（省掉应用层
+                             # 重传的一个 RTT）。代价是下行冗余 12.5% + 隧道 MTU 让出 83 字节。
+                             # **默认关闭**：丢包率 <1% 的链路上是纯浪费，还会掩盖真实网络问题——
+                             # 先看客户端面板的「链路质量」，确认丢包偏高再开
+                             # forward error correction; +12.5% downstream, enable only when loss is real
+    tail_dup: false          # 小包冗余副本：≤256 字节的包发两份（限频 20ms），接收端靠重放窗口去重。
+                             # 补的是纠错的盲区——组尾小包（组没满就没有校验包），而玩家操作指令与
+                             # RakNet 探测恰好落在那里 | duplicate small packets to cover FEC's blind spot
+    udp_gro: false           # Linux UDP 接收聚合（内核 ≥ 5.0）：一次系统调用取回多个背靠背的隧道包
+                             # UDP receive offload; needs Linux ≥ 5.0
+    udp_gso: false           # Linux UDP 发送分段卸载。**默认关闭且不建议开**：内核要求一条消息内各段
+                             # 等长，而游戏流量包长参差不齐，命中率天然很低
+                             # segmentation offload; equal-length segments required, rarely hit here
 web:                         # ── 管理面板 | Web panel ──
     host: 127.0.0.1          # 面板监听地址；多用户对外时改 0.0.0.0 并置于 TLS 反代之后
                              # listen address; use 0.0.0.0 behind a TLS proxy for multi-user serving
@@ -636,6 +659,16 @@ Reclaim follows "events establish, time reclaims": an explicit **session-ended**
 
 ⚠️ A /32 host route captures **all** traffic to that IP regardless of protocol, so during the reclaim window the same player IP connecting directly to the backend's public IP will fail ("worked via proxy, then direct broke, recovers after a minute"). Inherent to host routes — compress the window or make the backend listen only on the virtual NIC.
 
+### 隧道 MTU 与丢包对抗 | Tunnel MTU & Loss Mitigation
+
+隧道 MTU 由服务端在握手应答里下发，客户端据此设置虚拟网卡：取「出口网卡 MTU − 53 字节封装开销」与协议上限 1400 的较小值，开启前向纠错时再让出 83 字节给校验包。**为什么必须让出**：IP 分片丢任意一片等于整个隧道包全损，而纠错工作在 UDP 之上、看不到分片——校验包自己被分片的话，正是它要解决的问题反而被放大了。客户端另有一次被动探测（心跳载荷填充到满尺寸，服务端回显实际收到的长度），连续三轮收不到回显就下调一档。
+
+The server computes the tunnel MTU (outbound link MTU − 53 bytes of encapsulation, capped at 1400; minus 83 more when FEC is on) and hands it to the client in the handshake. The client also probes passively via padded heartbeats and steps down when three rounds go unanswered.
+
+丢包对抗是两个独立开关，默认都关：`tunnel.fec` 每 8 个数据包附 1 个 XOR 校验包，组内丢 1 个可无损补回（省掉应用层重传的一个 RTT，跨网玩家 80~150ms），代价是下行冗余 12.5%；`tunnel.tail_dup` 把 ≤256 字节的小包发两份，补的是纠错的盲区——组没满就没有校验包，而玩家操作指令和 RakNet 探测恰好落在组尾。两者正交，接收端对副本靠重放窗口免费去重。**先看客户端「链路质量」面板的丢包率再决定开不开**：丢包率 <1% 的链路上这些冗余是纯浪费，还会掩盖真实的网络问题。
+
+Two independent, default-off knobs: `tunnel.fec` (one XOR parity packet per 8, recovers a single loss without a retransmit round-trip, +12.5% downstream) and `tunnel.tail_dup` (duplicates ≤256-byte packets to cover FEC's blind spot at group tails). Check the client's link-quality panel first — below 1% loss both are waste.
+
 ### 注意事项 | Notes
 
 - 透明模式与 PROXY v2 透传互斥（二选一），按拓扑任选。
@@ -670,6 +703,11 @@ Reclaim follows "events establish, time reclaims": an explicit **session-ended**
 | 升级后透明模式全不通、抓包见回包被 INPUT 丢弃 | 回包放行依赖 conntrack ESTABLISHED。检查 `iptables -t raw -S` 是否被云镜像/其它软件加了 NOTRACK 把 UDP 排除在外 |
 | 「取接入码」报错说无法确定中转机地址 | 全局设置与 `tunnel.public_addr` 都没配且公网 IP 探测失败（NAT 云主机可能探不到）——在「全局设置」显式填写中转机地址 |
 | 中转机日志刷屏 | 例行推送已是 debug 级；仍刷屏说明 `log.level` 设成了 debug |
+| 客户端「链路质量」丢包率偏高 | 先确认是公网链路问题（同一时段多个客户端一起高＝中转机侧；只有一家高＝该玩家链路）。确认是链路丢包再让管理员开 `tunnel.fec`；丢包 <1% 时开它是纯浪费 |
+| 中转机日志「内核 UDP 接收缓冲溢出丢包」 | 突发流量打穿了 socket 缓冲。按日志给出的 `sysctl -w net.core.rmem_max=... wmem_max=...` 调大内核上限并写进 `/etc/sysctl.conf` |
+| 中转机日志「socket 缓冲被内核上限钳制」 | 同上：程序请求 4MB 但内核只给了默认的 ~208KB（约 149 个满包），突发时会在内核层静默丢包 |
+| 中转机日志「出向包超出隧道 MTU，已丢弃」 | 后端发出的包大于隧道能承载的尺寸。下调后端服务的 MTU/分片阈值；此前这类包在设备层被静默丢弃，现在会明确告警 |
+| 客户端「链路质量」里「本地丢弃」非零 | 有玩家在进服瞬间被本机丢过包（回程路由安装缓冲溢出）。偶发可忽略；持续出现要看客户端日志里「回程路由安装失败」 |
 
 ## 🔌 REST API
 
@@ -761,7 +799,7 @@ go-port-forward/
 │       └── static/               # 前端单页应用（Alpine.js + Bootstrap 5，双语/明暗主题，embed）
 ├── pkg/
 │   ├── accesscode/               # 接入码 pf1.<base64url(json)> 编解码（两模块共用）
-│   ├── tunnel/                   # 隧道协议 v3：握手 + X25519 + NaCl 每包加密
+│   ├── tunnel/                   # 隧道协议 v4：握手 + X25519 + ChaCha20-Poly1305（方向密钥分离）
 │   ├── tunnet/                   # TUN 设备抽象
 │   ├── machineid/                # 设备指纹（Windows MachineGuid 等）
 │   ├── pool/                     # ants 协程池 + 字节缓冲池
