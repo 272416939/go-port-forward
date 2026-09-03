@@ -204,8 +204,10 @@ func (h *tupleHandle) attach(sess *udpSession, clientAddr *net.UDPAddr) {
 	shared := total == 2 // 1→2 的状态变化才打 info（降噪纪律）
 	r.mu.Unlock()
 	if shared {
+		// player 记玩家元组字符串（udpAddrKey 结构体不可 JSON 序列化，直接
+		// 打会变成 {}）
 		logger.S.Infow("透明绑定已被第二条规则共享 | transparent binding now shared across rules",
-			"player", h.entry.key, "rule", h.fwd.rule.Name)
+			"player", clientAddr.String(), "rule", h.fwd.rule.Name)
 	}
 }
 
