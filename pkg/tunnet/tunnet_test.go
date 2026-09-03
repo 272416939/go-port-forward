@@ -19,6 +19,9 @@ type fakeTun struct {
 	writes   int // Write 被调用的次数（批量写的验证锚点）
 	wrErr    error
 	wrGroups []int // 每次 Write 收到的包数
+	// discard 让 Write 不记录内容：基准要测的是批量路径本身，替身的逐包拷贝
+	// 会把自己的分配算到被测代码头上。
+	discard bool
 }
 
 func (f *fakeTun) File() *os.File { return nil }
@@ -48,6 +51,9 @@ func (f *fakeTun) Write(bufs [][]byte, offset int) (int, error) {
 	f.wrGroups = append(f.wrGroups, len(bufs))
 	if f.wrErr != nil {
 		return 0, f.wrErr
+	}
+	if f.discard {
+		return len(bufs), nil
 	}
 	for _, b := range bufs {
 		f.written = append(f.written, append([]byte(nil), b[offset:]...))
@@ -357,8 +363,10 @@ func TestBatchReuseDoesNotLeakAcrossFlushes(t *testing.T) {
 	}
 }
 
+// 批量写 vs 逐包写：前者每批一次 syscall、零分配，后者每包一次 make + 一次
+// [][]byte 切片头分配 + 一次 syscall。两条都用 discard 替身，测的是本包代码。
 func BenchmarkBatchWrite64(b *testing.B) {
-	f := &fakeTun{batch: 64}
+	f := &fakeTun{batch: 64, discard: true}
 	d := newDevice(f, 1400)
 	batch := d.NewBatch(64)
 	pkt := ipPacket(1400, 7)
@@ -366,7 +374,6 @@ func BenchmarkBatchWrite64(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		f.written = f.written[:0]
 		for j := 0; j < 64; j++ {
 			batch.Add(pkt)
 		}
@@ -376,17 +383,38 @@ func BenchmarkBatchWrite64(b *testing.B) {
 	}
 }
 
-func BenchmarkWritePacket(b *testing.B) {
-	f := &fakeTun{batch: 1}
+// Next/Commit 是零拷贝入口：调用方直接把数据写进槽位，连一次 copy 都省掉。
+func BenchmarkBatchNextCommit64(b *testing.B) {
+	f := &fakeTun{batch: 64, discard: true}
 	d := newDevice(f, 1400)
+	batch := d.NewBatch(64)
 	pkt := ipPacket(1400, 7)
-	b.SetBytes(int64(len(pkt)))
+	b.SetBytes(int64(len(pkt)) * 64)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		f.written = f.written[:0]
-		if err := d.WritePacket(pkt); err != nil {
+		for j := 0; j < 64; j++ {
+			dst := batch.Next()
+			batch.Commit(copy(dst[:cap(dst)], pkt))
+		}
+		if err := batch.Flush(); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWritePacket64(b *testing.B) {
+	f := &fakeTun{batch: 1, discard: true}
+	d := newDevice(f, 1400)
+	pkt := ipPacket(1400, 7)
+	b.SetBytes(int64(len(pkt)) * 64)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 64; j++ {
+			if err := d.WritePacket(pkt); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }
