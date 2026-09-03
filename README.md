@@ -460,11 +460,12 @@ Click **Add Rule**. The first choice in the form is the **mode card**:
 - 协议锁定为 **UDP**（透明回程依赖 UDP conntrack，TCP 无法经隧道送达透明 socket）。
 - 「目标地址」变成**访问码下拉框**：选定某个访问码后，转发目标即固定为该访问码的隧道地址（如 `10.66.0.4:19132`），玩家流量以玩家真实 IP 经隧道送达后端。
 - 普通用户只能选**自己的**访问码；管理员先在「所属用户」选定用户，再从该用户的访问码中选择。
+- 同一条隧道下可以建**多条**透明规则（如后端多个游戏服 19132/19133 各一条）：同一玩家的绑定全机共享，多规则可同时服务同一批玩家，玩家频繁切服也不受影响。唯一限制：**目标端口不能重复**——两条规则指向同一后端 IP:端口会在保存时被拒绝（后端无法区分流量来自哪个入口）。
 - 保存时若服务端不是 Linux + root，该规则会启动失败并给出明确原因（fail-closed，不会静默降级）。
 
 **General proxy mode** (TCP/UDP/Both, any public target): fields are name, listen address (default `0.0.0.0`), listen port with 🎲 random and ⚡ check buttons (scoped to your quota range; results are indicative — saving is authoritative), protocol, target address (public IP/domain only — private, loopback and tunnel-network targets are rejected), target port, owner (admin: shared or a specific user), note, and toggles: enable now, auto firewall rules, and PROXY v2 passthrough.
 
-**Transparent proxy mode** (UDP only, target locked to a tunnel): the protocol is locked to UDP, and the target becomes an **access-code dropdown** — the rule forwards to that code's tunnel address with the player's real IP as the source. Regular users only see their own codes; admins pick the owner first. On a non-Linux/non-root server the rule fails to start with a clear reason (fail-closed).
+**Transparent proxy mode** (UDP only, target locked to a tunnel): the protocol is locked to UDP, and the target becomes an **access-code dropdown** — the rule forwards to that code's tunnel address with the player's real IP as the source. Regular users only see their own codes; admins pick the owner first. Multiple transparent rules can share one tunnel (e.g. one per backend game server on 19132/19133) — player bindings are shared machine-wide, so several rules can serve the same players, and the only restriction is that **target ports must be unique** (two rules pointing at the same backend IP:port are rejected on save). On a non-Linux/non-root server the rule fails to start with a clear reason (fail-closed).
 
 ### 连接日志 | Connection Logs
 
@@ -687,6 +688,7 @@ Two independent, default-off knobs: `tunnel.fec` (one XOR parity packet per 8, r
 | 服务端日志「丢弃源地址不匹配的隧道包」 | 有人手工改过虚拟网卡地址；正常情况下地址由握手下发不会错 |
 | 隧道已建立但业务不通 | 客户端界面「活跃玩家流量」是否出现玩家 IP、上下行是否**同时**增长；只有一个方向说明回程路由或策略路由有问题 |
 | 规则开启透明模式变红（启动失败） | 服务端非 Linux 或非 root（需 root 或 CAP_NET_ADMIN） |
+| 服务端日志「UDP upstream dial failed … bind: address already in use」 | 当前版本同一玩家的透明绑定已全机共享、多规则不再互抢，此错误只剩外部进程真的占用了该地址（极罕见）。若来自**旧版本**服务端：是另一条透明规则在服务同一玩家（抢绑定，输家永久断流），升级服务端即可消除 |
 | 能进游戏但服务器列表探测失败 | 客户端版本过旧：入站首包即时补路由是后来才加的，旧版只靠 10 秒周期推送，短交互赶不上 |
 | 用过代理后同一玩家直连后端公网 IP 进不去（约 1 分钟后自愈） | 回程 `/32` 路由尚未回收，吸走该 IP 全部回包，属固有语义。急用可在后端执行 `route delete <玩家IP>` 立即恢复 |
 | 客户端日志「回程路由删除失败…已放弃」 | 该地址路由留在系统里、无法直连。按提示手动 `route delete <IP>`；反复出现要查是否有另一个 pf-client 实例在抢路由表 |

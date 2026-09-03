@@ -3,7 +3,9 @@ package forward
 import (
 	"errors"
 	"fmt"
+	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,6 +117,7 @@ func (m *Manager) initServices() error {
 		guard:    guard,
 		sessions: newSessionRegistry(),
 		logs:     newConnLogger(m.store, maxLog),
+		tuples:   newTupleRegistry(transparentUDPFactory),
 	}
 	return nil
 }
@@ -313,6 +316,9 @@ func (m *Manager) ValidateCreateRequest(req *models.CreateRuleRequest) error {
 	if err := m.checkPortConflict(req.ListenAddr, req.ListenPort, req.Protocol, ""); err != nil {
 		return err
 	}
+	if err := m.checkTransparentTargetDuplicate(req.Transparent, req.TargetAddr, req.TargetPort, ""); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -387,6 +393,11 @@ func (m *Manager) UpdateRule(id string, req *models.UpdateRuleRequest) (*models.
 
 	// Port conflict detection (exclude self)
 	if err := m.checkPortConflict(next.ListenAddr, next.ListenPort, next.Protocol, id); err != nil {
+		return nil, err
+	}
+
+	// 透明规则同目标端口检测（exclude self）
+	if err := m.checkTransparentTargetDuplicate(next.Transparent, next.TargetAddr, next.TargetPort, id); err != nil {
 		return nil, err
 	}
 
@@ -784,6 +795,9 @@ func (m *Manager) Shutdown() {
 		m.stopForwardersLocked(id)
 	}
 	m.mu.Unlock()
+	// 共享绑定注册表兜底回收（正常路径会话已各自 release）。铁律 3：
+	// Close 内部先关 fd 再等分发器退出，不阻塞关停超过 3s。
+	m.svc.closeTuples()
 }
 
 // --- internal helpers ---
@@ -808,6 +822,44 @@ func (m *Manager) checkPortConflict(listenAddr string, listenPort int, proto mod
 				ErrPortConflict,
 				addrA, listenPort, r.Name, r.Protocol)
 		}
+	}
+	return nil
+}
+
+// checkTransparentTargetDuplicate 拒绝透明 UDP 规则之间 (target_addr,
+// target_port) 重复（排除自身）。源地址保真使同目标的两条规则发往后端的
+// 四元组完全相同，后端与 conntrack 无法区分流量来自哪个入口端口——「同目标
+// 多入口」不是有意义的配置（2026-09 跨规则共享绑定立项时的用户决定：创建/
+// 更新即拒）。普通用户的透明目标锁定为自己的隧道地址，本检查即「同隧道下
+// 目标端口不能重复」；不同隧道地址不同，天然不冲突。透明+TCP 本就被校验
+// 禁止，无需另判。存量重复规则启动不拦（运行时由共享注册表按源广播兜底，
+// 见 tuple_registry.go），编辑任一条时被本检查拦下即可自愈。
+func (m *Manager) checkTransparentTargetDuplicate(transparent bool, targetAddr string, targetPort int, excludeID string) error {
+	if !transparent {
+		return nil // 仅透明规则有独占绑定语义；非透明走 connected socket 无此约束
+	}
+	addr := strings.TrimSpace(targetAddr)
+	ip := net.ParseIP(addr)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, r := range m.rules {
+		if id == excludeID || !r.Transparent {
+			continue
+		}
+		if r.TargetPort != targetPort {
+			continue
+		}
+		other := strings.TrimSpace(r.TargetAddr)
+		oip := net.ParseIP(other)
+		if ip != nil && oip != nil {
+			if !ip.Equal(oip) {
+				continue
+			}
+		} else if other != addr {
+			continue
+		}
+		return fmt.Errorf("%w: 同一条隧道的透明规则转发目标端口不能重复：规则 %q 已使用 %s:%d，请改用不同的后端端口 | duplicate transparent target %s:%d already used by rule %q",
+			ErrInvalidRule, r.Name, r.TargetAddr, r.TargetPort, r.TargetAddr, targetPort, r.Name)
 	}
 	return nil
 }

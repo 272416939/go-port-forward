@@ -275,6 +275,7 @@ type forwardServices struct {
 	guard    *ACLGuard
 	sessions *sessionRegistry
 	logs     *connLogger
+	tuples   *tupleRegistry // 全机透明绑定注册表（跨规则共享玩家元组 socket）
 }
 
 func (s *forwardServices) allowed(ruleID string, ip net.IP) bool {
@@ -289,4 +290,22 @@ func (s *forwardServices) logEvent(e models.ConnLogEntry) {
 		return
 	}
 	s.logs.Log(e)
+}
+
+// tuplesOrNil 返回共享绑定注册表；未装配（旧测试直构转发器）时为 nil，
+// 透明路径以此 fail-closed（见 UDPForwarder.openUpstream）。
+func (s *forwardServices) tuplesOrNil() *tupleRegistry {
+	if s == nil {
+		return nil
+	}
+	return s.tuples
+}
+
+// closeTuples 关停共享绑定注册表（仅 Manager.Shutdown 收尾调用；
+// 单规则重启走 stopForwarders，不得拆其他规则在用的绑定）。
+func (s *forwardServices) closeTuples() {
+	if s == nil || s.tuples == nil {
+		return
+	}
+	s.tuples.Close()
 }

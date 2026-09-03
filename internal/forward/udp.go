@@ -32,18 +32,28 @@ type udpAddrKey struct {
 
 // makeUDPAddrKey 从 *net.UDPAddr 构造零分配的 map key。
 // makeUDPAddrKey constructs a zero-allocation map key from *net.UDPAddr.
+// IPv4 的 v4-mapped 16 字节表示必须归一化为 4 字节：ResolveUDPAddr 产出
+// 16 字节形式，ReadFromUDP 产出 4 字节形式——同一地址两处键不一致会让
+// 回程分发（后端源 → 订阅）永远 miss（透明共享注册表依赖此一致性）。
 func makeUDPAddrKey(addr *net.UDPAddr) udpAddrKey {
 	var k udpAddrKey
 	k.port = uint16(addr.Port)
-	k.len = uint8(len(addr.IP))
+	ip := addr.IP
+	if v4 := ip.To4(); v4 != nil {
+		k.len = 4
+		ip = v4
+	} else {
+		k.len = uint8(len(ip))
+	}
+	copy(k.ip[:], ip)
 	k.zone = addr.Zone
-	copy(k.ip[:], addr.IP)
 	return k
 }
 
 // udpSession tracks an upstream UDP connection for a specific client address.
 type udpSession struct {
-	upstream  *net.UDPConn
+	upstream  *net.UDPConn // 透明模式下为注册表共享的 socket（写按各自 target 走 WriteToUDP）
+	tup       *tupleHandle // 透明模式非 nil：共享绑定持有凭证（引用归零才关 fd）
 	lastSeen  time.Time
 	key       string       // 全局会话键 "<proto>|<ruleID>|<src>" | global session key
 	sinfo     *sessionInfo // 活跃会话注册表条目（字节数/日志都在其上）| live session entry
@@ -138,7 +148,7 @@ func (f *UDPForwarder) Stop() {
 		}
 		f.mu.Lock()
 		for key, s := range f.sessions {
-			_ = s.upstream.Close()
+			s.releaseUpstream()
 			f.finalizeSession(s, models.ConnEventLeave)
 			delete(f.sessions, key)
 		}
@@ -231,9 +241,9 @@ func (f *UDPForwarder) forward(srcAddr *net.UDPAddr, data []byte) {
 		}
 	}
 
-	// 非透明路径为已连接 socket（用 Write）；透明路径为按源绑定的未连接
-	// socket（用 WriteToUDP 指定目标）。Windows 上 connected socket 调
-	// WriteToUDP 会静默失败，必须按模式分流。
+	// 非透明路径为已连接 socket（用 Write）；透明路径为共享注册表的未连接
+	// socket（用 WriteToUDP 指定各自 target，*net.UDPConn 并发写安全）。
+	// Windows 上 connected socket 调 WriteToUDP 会静默失败，必须按模式分流。
 	var n int
 	if f.rule.Transparent {
 		n, _ = sess.upstream.WriteToUDP(payload, f.targetAddr)
@@ -259,16 +269,9 @@ func (f *UDPForwarder) finalizeSession(sess *udpSession, ev models.ConnEvent) {
 	})
 }
 
-// relayBack 是透明模式回程的最后一跳，绝不可省。
-//
-// 透明转发链路：玩家包 → 本转发器 → 透明 socket（以玩家 IP:端口 为源）写入
-// 隧道 → 后端。后端回包沿隧道回到中转机后被写进 pftun0，fwmark 策略路由把
-// 它「本机投递」（setup_linux.go 的 local 表 + INPUT 只放行 ESTABLISHED），
-// conntrack 按反向元组把它送进这个透明 socket 的接收队列——就是这里读出来
-// 的那个包。再经转发口（src=监听端口 19132 这类）发回玩家，源端口正好是
-// 玩家当初请求的端口。删掉这个 goroutine，所有透明回包会静默烂在接收队列
-// 里：入向照常、回程全灭、日志零痕迹（2026-09-02 全服进不去事故的根因，
-// 当时的注释误称「回包不经过此 socket」，未实测即删码，教训见 LESSONS#15）。
+// relayBack 是非透明模式回程：connected socket 读后端回包，经转发口发回
+// 玩家。透明模式的回程由共享绑定的分发器接管（tuple_registry.go 的
+// dispatch——那是透明回程的最后一跳，绝不可省，完整链路注释在那里）。
 func (f *UDPForwarder) relayBack(clientAddr *net.UDPAddr, sess *udpSession) {
 	defer f.wg.Done()
 	// Use pooled buffer for relay
@@ -300,7 +303,7 @@ func (f *UDPForwarder) cleanupLoop() {
 			now := time.Now()
 			for k, s := range f.sessions {
 				if now.Sub(s.lastSeen) > f.timeout {
-					_ = s.upstream.Close()
+					s.releaseUpstream()
 					f.finalizeSession(s, models.ConnEventLeave)
 					delete(f.sessions, k)
 					f.active.Add(-1)
@@ -333,7 +336,7 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 		return nil, false
 	}
 
-	up, err := f.dialUpstream(srcAddr)
+	up, tup, err := f.openUpstream(srcAddr)
 	if err != nil {
 		// 透明模式绑定失败多为权限问题：限频记录，丢弃该包（fail-closed）
 		nowUnix := time.Now().Unix()
@@ -349,16 +352,17 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 	if sess, ok := f.sessions[key]; ok {
 		sess.lastSeen = now
 		f.mu.Unlock()
-		_ = up.Close()
+		discardUpstream(tup, up)
 		return sess, false
 	}
 	if f.isStopping() {
 		f.mu.Unlock()
-		_ = up.Close()
+		discardUpstream(tup, up)
 		return nil, false
 	}
 	sess = &udpSession{
 		upstream: up,
+		tup:      tup,
 		lastSeen: now,
 		key:      sessionKey(models.ProtocolUDP, f.rule.ID, srcAddr),
 	}
@@ -383,33 +387,61 @@ func (f *UDPForwarder) getOrCreateSession(srcAddr *net.UDPAddr) (sess *udpSessio
 			Event:    models.ConnEventJoin,
 		})
 	}
+	if tup != nil {
+		// 透明会话：回程由共享绑定的分发器接管（tuple_registry.go 的
+		// dispatch——那是回程最后一跳），不再起每会话 relayBack
+		tup.attach(sess, srcAddr)
+	} else {
+		f.wg.Add(1)
+		go f.relayBack(cloneUDPAddr(srcAddr), sess)
+	}
 	f.sessions[key] = sess
 	f.active.Add(1)
 	f.totalConns.Add(1)
-	f.wg.Add(1)
-	go f.relayBack(cloneUDPAddr(srcAddr), sess)
 	f.mu.Unlock()
 	return sess, true
 }
 
-// dialUpstream 建立到目标的上游 socket；透明模式以玩家 IP:端口 为源绑定
-// （IP_TRANSPARENT，需 root）。回包沿 fwmark 策略路由本机投递回到这个
-// socket 的接收队列，由 relayBack 读出并经转发口发回玩家（见 relayBack 注释）。
-func (f *UDPForwarder) dialUpstream(srcAddr *net.UDPAddr) (*net.UDPConn, error) {
+// openUpstream 建立到目标的上游 socket。非透明：connected socket（用 Write，
+// 会话回包由 relayBack 读）。透明：经全机共享注册表取得（或共享）以玩家
+// IP:端口 为源的绑定（IP_TRANSPARENT，需 root）——跨规则共享是 2026-09
+// 两条透明规则互抢同一玩家绑定（EADDRINUSE 永久断流）的正解，回程由注册表
+// 分发器接管，见 tuple_registry.go。
+func (f *UDPForwarder) openUpstream(srcAddr *net.UDPAddr) (up *net.UDPConn, tup *tupleHandle, err error) {
 	if !f.rule.Transparent {
-		return net.DialUDP("udp", nil, f.targetAddr)
+		up, err = net.DialUDP("udp", nil, f.targetAddr)
+		return up, nil, err
 	}
-	pc, err := transparentListenPacket(srcAddr.String())
+	reg := f.svc.tuplesOrNil()
+	if reg == nil {
+		return nil, nil, errors.New("透明模式未装配共享绑定注册表 | transparent tuple registry unavailable")
+	}
+	tup, err = reg.acquire(f, srcAddr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	udp, ok := pc.(*net.UDPConn)
-	if !ok {
-		pc.Close()
-		return nil, fmt.Errorf("透明模式：上游 socket 类型异常 | unexpected packet conn type")
+	return tup.conn(), tup, nil
+}
+
+// discardUpstream 双检输家的回退（建好的上游没成为会话）：透明走注册表
+// 引用计数，非透明直接关。
+func discardUpstream(tup *tupleHandle, up *net.UDPConn) {
+	if tup != nil {
+		tup.release()
+		return
 	}
-	// 不调用 Connect（部分平台不可用）；发送统一走 WriteToUDP 指定目标
-	return udp, nil
+	_ = up.Close()
+}
+
+// releaseUpstream 释放会话的上游：透明走注册表引用计数（归零才真正关 fd，
+// 规则 A 的回收不得拆掉规则 B 还在用的绑定），非透明直接关。调用方必须
+// 持有 f.mu——沿用 635bf3b「先关 fd、后摘会话条目」的临界区纪律。
+func (s *udpSession) releaseUpstream() {
+	if s.tup != nil {
+		s.tup.release()
+		return
+	}
+	_ = s.upstream.Close()
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
