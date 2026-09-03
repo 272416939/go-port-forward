@@ -30,6 +30,29 @@ type TunnelConfig struct {
 	TunAddr    string `mapstructure:"tun_addr"`    // e.g. "10.66.0.1/16" — also the access-code address pool
 	PublicAddr string `mapstructure:"public_addr"` // relay address embedded in access codes, e.g. "1.2.3.4:7947"
 	NAT        bool   `mapstructure:"nat"`         // ip_forward + MASQUERADE + FORWARD accept
+
+	// IOMode 选择 UDP 收发方式："batch"（recvmmsg/sendmmsg，默认）或 "simple"
+	// （逐包）。批量化把「每包 2 次 syscall」压到「每批 2 次」，是高 pps 下
+	// 吞吐的最大杠杆；留开关是因为它也是数据面上最脆弱的一处改动——回退不必
+	// 换二进制。非 Linux 自动降级为 simple。
+	IOMode string `mapstructure:"io_mode"`
+	// FEC 启用前向纠错：每 8 个数据包附 1 个 XOR 校验包，组内丢 1 个可无损
+	// 补回（省掉应用层重传的一个 RTT，跨网玩家 80~150ms）。代价是下行冗余
+	// 12.5%，且隧道 MTU 要让出 83 字节给校验包（不让它就会被 IP 分片，而
+	// 分片丢一片等于整包全损，正是 FEC 想解决的问题）。
+	//
+	// 默认关闭是有意的：丢包率低于 1% 的链路上这是纯浪费，还会掩盖真实的
+	// 网络问题。先看面板里的丢包率，再决定要不要开。
+	FEC bool `mapstructure:"fec"`
+	// TailDup 启用小包冗余副本：≤256 字节的数据包发两份（限频 20ms），接收端
+	// 靠重放窗口免费去重。补的是 FEC 的盲区——组尾小包（组没满就没有校验包），
+	// 而玩家操作指令、RakNet 探测恰好落在那里。
+	TailDup bool `mapstructure:"tail_dup"`
+	// UDPGRO / UDPGSO 是 Linux 的 UDP 聚合/分段卸载（需内核 ≥ 5.0）。
+	// 默认关闭：收益要等观测数据证明「批量化之后单核仍是瓶颈」才成立，而 GSO
+	// 要求一条消息内各段等长，游戏流量的包长参差不齐，命中率天然很低。
+	UDPGRO bool `mapstructure:"udp_gro"`
+	UDPGSO bool `mapstructure:"udp_gso"`
 }
 
 // WebConfig holds web server configuration.
@@ -156,6 +179,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tunnel.tun_addr", "10.66.0.1/16")
 	v.SetDefault("tunnel.public_addr", "")
 	v.SetDefault("tunnel.nat", true)
+	// 批量收发默认开启（非 Linux 自动降级）；纠错与卸载默认关闭，理由见
+	// TunnelConfig 上的注释。
+	v.SetDefault("tunnel.io_mode", "batch")
+	v.SetDefault("tunnel.fec", false)
+	v.SetDefault("tunnel.tail_dup", false)
+	v.SetDefault("tunnel.udp_gro", false)
+	v.SetDefault("tunnel.udp_gso", false)
 
 	// GC defaults
 	v.SetDefault("gc.enabled", true)

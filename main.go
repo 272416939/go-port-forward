@@ -223,6 +223,11 @@ func (a *application) Start() error {
 				TunName: cfg.Tunnel.TunName,
 				TunAddr: cfg.Tunnel.TunAddr,
 				NAT:     cfg.Tunnel.NAT,
+				IOMode:  cfg.Tunnel.IOMode,
+				FEC:     cfg.Tunnel.FEC,
+				TailDup: cfg.Tunnel.TailDup,
+				UDPGRO:  cfg.Tunnel.UDPGRO,
+				UDPGSO:  cfg.Tunnel.UDPGSO,
 			},
 			Identity: func(codeID string) (tunnelapp.Identity, bool) {
 				// 服务端拿到的是握手包里声称的访问码 ID；查到密钥后由协议层验 MAC。
