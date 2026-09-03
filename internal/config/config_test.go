@@ -40,6 +40,7 @@ web:
 `
 
 func TestLoadFreshWritesVersionAndAllKeys(t *testing.T) {
+	TakeUpgradeNote() // 清掉其他用例留下的包级状态（-count>1 时共享）
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if _, err := Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -59,6 +60,16 @@ func TestLoadFreshWritesVersionAndAllKeys(t *testing.T) {
 	if strings.Contains(text, "username") || strings.Contains(text, "password") {
 		t.Fatalf("默认文件不应包含应急后门账号：\n%s", text)
 	}
+	// 每个配置项都带说明：文件本身就是文档，运维不用来回翻手册。
+	for _, marker := range []string{"# 前向纠错", "# UDP 收发方式", "# 隧道 UDP 监听", "# 已废弃", "# 面板端口"} {
+		if !strings.Contains(text, marker) {
+			t.Fatalf("生成的文件缺少注释 %q（文件应自带说明）：\n%s", marker, text)
+		}
+	}
+	// 渲染瑕疵回归：段头续行不得出现双重 "# #"。
+	if strings.Contains(text, "# #") {
+		t.Fatalf("段头续行出现双重注释符：\n%s", text)
+	}
 	// 首次生成不算升级。
 	if note := TakeUpgradeNote(); note != "" {
 		t.Fatalf("首次生成不应记为升级：%s", note)
@@ -66,6 +77,7 @@ func TestLoadFreshWritesVersionAndAllKeys(t *testing.T) {
 }
 
 func TestLoadUpgradesV1FileInPlace(t *testing.T) {
+	TakeUpgradeNote()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(v1StyleConfig), 0o600); err != nil {
@@ -115,6 +127,15 @@ func TestLoadUpgradesV1FileInPlace(t *testing.T) {
 		t.Fatalf("备份内容与原文件不一致（丢了找回注释的途径）")
 	}
 
+	// 升级后的文件自带程序注释：用户值与标准注释共存——运维改完值就能看懂每个键。
+	if !strings.Contains(text, "# 前向纠错") || !strings.Contains(text, "# 面板端口") {
+		t.Fatalf("升级后的文件应自带注释（否则运维还是要翻文档）：\n%s", text)
+	}
+	// 用户的手写后门账号带上了配套注释。
+	if !strings.Contains(text, "# 应急后门账号") {
+		t.Fatalf("后门账号应有注释说明：\n%s", text)
+	}
+
 	// 升级说明被记录（main 在日志可用后打印）。
 	if note := TakeUpgradeNote(); !strings.Contains(note, "v1 升级到 v2") {
 		t.Fatalf("升级说明不符: %q", note)
@@ -126,6 +147,7 @@ func TestLoadUpgradesV1FileInPlace(t *testing.T) {
 }
 
 func TestLoadDoesNotRewriteCurrentVersion(t *testing.T) {
+	TakeUpgradeNote()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if _, err := Load(path); err != nil { // 先生成一份当前版本的文件
@@ -160,6 +182,7 @@ func TestLoadDoesNotRewriteCurrentVersion(t *testing.T) {
 // 备份只保留最早那份：跨多个版本升级（v1→v2→v3…）时，.v1.bak 记录的始终是
 // 最初的原文，不会被后续升级覆盖成中间态。
 func TestUpgradeBackupKeepsEarliestCopy(t *testing.T) {
+	TakeUpgradeNote()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(v1StyleConfig), 0o600); err != nil {

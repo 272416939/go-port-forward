@@ -210,59 +210,119 @@ git push origin v1.0.0
 指定了 `-config` 而该路径没有文件时则在该路径生成。
 A default `config.yaml` is auto-generated next to the executable on first run (also the default search path without `-config`); with an explicit `-config` pointing at a missing file, defaults are generated there instead.
 
-生成的文件是**无任何注释、按键名字母序排列、4 空格缩进**的扁平 YAML；其中 `storage.path`
-与 `log.path` 写的是以**可执行文件所在目录**为锚点的绝对路径。下面为了阅读方便写成相对
-形式——例如可执行文件位于 `/www/wwwroot/FP` 时，实际生成的是
-`/www/wwwroot/FP/data/rules.db` 与 `/www/wwwroot/FP/logs/app.log`。
+生成的文件**自带每个配置项的中文注释**（键按字母序、4 空格缩进）——文件本身就是速查
+文档，不用来回翻手册；其中 `storage.path` 与 `log.path` 写的是以**可执行文件所在目录**
+为锚点的绝对路径。下面为了阅读方便写成相对形式——例如可执行文件位于
+`/www/wwwroot/FP` 时，实际生成的是 `/www/wwwroot/FP/data/rules.db` 与
+`/www/wwwroot/FP/logs/app.log`。
 
-The generated file is a flat YAML with **no comments, keys sorted alphabetically, 4-space
-indent**; `storage.path` and `log.path` are written as absolute paths anchored at the
-executable's directory (shown relative below for readability).
+The generated file **carries a Chinese comment for every key** (alphabetical, 4-space
+indent) — the file itself is the quick reference; `storage.path` and `log.path` are
+absolute paths anchored at the executable's directory (shown relative below).
 
-**① 原样生成 | As generated**（无注释，可与文件逐行对照 uncommented, line-by-line comparable）
+**① 原样生成 | As generated**（自带注释，与文件逐行对照；两处 path 在生成时是exe 目录锚定的绝对路径，此处写成相对形式 same as the file, comments included; the two path keys are absolute at generation time）
 
 ```yaml
+# go-port-forward 配置文件（程序生成并维护）
+#
+# 删除或缺失的配置项一律按程序默认值生效。
+# 升级程序后首次启动会自动补全新增配置项：自定义值原样保留、原文件备份为
+# config.yaml.v<N>.bak；注释会刷新为程序的标准注释，自行追加的注释不会保留。
+# ── 通用转发引擎 ──
 forward:
+# 转发读写缓冲（字节）
     buffer_size: 32768
+# 连接日志保留上限的兜底值；正式生效值在
+# 面板「全局设置 → 每用户日志保留上限」（默认 10000 条，环形裁剪最旧）
     connlog_max_entries: 2000
+# 出站连接超时（秒）
     dial_timeout: 10
+# 转发协程池容量；0 = 自动（CPU 数 × 64）
     pool_size: 0
+# UDP 会话空闲超时（秒）：超时会话回收，下个包新建
     udp_timeout: 30
+# ── 垃圾回收 ──
 gc:
+# 性能监控
     enable_monitoring: true
+# 周期性 GC 开关
     enabled: true
+# GC 扫描间隔（秒）
     interval_seconds: 300
+# 内存阈值触发 GC（MB）；0 = 关闭
     memory_threshold_mb: 100
+# standard 标准 / aggressive 激进（GC 后归还内存）/
+# gentle 温和（仅内存压力大时） / adaptive 自适应
     strategy: standard
+# ── 日志（path 是绝对路径，锚定可执行文件所在目录）──
 log:
+# 归档压缩
     compress: true
+# debug / info / warn / error
     level: info
+# 归档保留天数
     max_age_days: 30
+# 归档保留份数
     max_backups: 5
+# 单文件大小上限（MB），超出滚动
     max_size_mb: 50
+# 日志文件路径
     path: logs/app.log
+# ── 全局协程池 ──
 pool:
+# 启动时预分配
     pre_alloc: true
+# 容量
     size: 10000
+# ── bbolt 存储（path 是绝对路径，锚定可执行文件所在目录；
+# 规则/用户/访问码/连接日志/SMTP 配置全部在此文件）──
 storage:
+# 数据库路径
     path: data/rules.db
+# ── 内置隧道服务端（配合 Windows 端 pf-client；完整回程配置仅 Linux）──
 tunnel:
+# 开启后隧道服务端随主程序常驻
     enabled: false
+# 前向纠错：每 8 个数据包附 1 个校验包，组内丢 1 个可无损补回
+# （省掉应用层重传的一个 RTT）。代价：下行冗余 12.5%、隧道 MTU 让出 83 字节。
+# 默认关：丢包率 <1% 的链路上是纯浪费——先看客户端面板「链路质量」再开
     fec: false
+# UDP 收发方式：batch 走 recvmmsg（每批 2 次系统调用，默认）/
+# simple 逐包。数据面出问题改成 simple 即回退，无需换二进制；非 Linux 自动降级
     io_mode: batch
+# 隧道 UDP 监听，防火墙记得放行
     listen: :7947
+# 自动配置回程路径（ip_forward + fwmark 策略路由；不用 MASQUERADE）
     nat: true
+# 已废弃：多用户协议为每个访问码分配独立密钥，此项被忽略并告警一次
     psk: ""
+# 兜底写进接入码的中转机地址（如 1.2.3.4:7947）；
+# 优先用面板「全局设置 → 中转机地址」
     public_addr: ""
+# 小包冗余副本：≤256 字节的包发两份（限频 20ms），接收端靠重放窗口
+# 去重。补的是纠错的盲区——组尾小包（玩家操作指令、RakNet 探测）
     tail_dup: false
+# 服务端隧道地址 + 访问码地址池（一个访问码占一个地址；
+# /16 约 6.5 万个位置，/24 的 253 个很快耗尽）
     tun_addr: 10.66.0.1/16
+# TUN 设备名
     tun_name: pftun0
+# Linux UDP 接收聚合（内核 ≥ 5.0）；默认关，等链路质量数据证明需要再开
     udp_gro: false
+# Linux UDP 发送分段卸载；**不建议开**：内核要求一条消息内各段等长，
+# 游戏流量包长参差不齐，命中率天然很低
     udp_gso: false
+# 配置文件模式版本（程序维护，勿手改）：
+# 升级程序后自动补全新增配置项，原文件备份为 config.yaml.v<N>.bak
 version: 2
+# ── 管理面板 ──
 web:
+# 监听地址；对外服务改 0.0.0.0 并置于 TLS 反代之后
     host: 127.0.0.1
+# 面板端口
     port: 8989
+# 会话 cookie 加 Secure 标记；仅在 HTTPS 访问时开启，
+# 否则浏览器拒存 cookie、登录直接失败
     secure_cookie: false
 ```
 
@@ -270,15 +330,15 @@ web:
 
 - **`version` 是配置文件的模式版本**，由程序维护，不要手改。升级程序后首次启动时，
   旧版本文件会被自动补全新增配置项（你已有的自定义值原样保留），原文件备份为
-  `config.yaml.v<旧版本>.bak`，日志里有一条升级说明。注意：**自动升级会重写整个
-  文件，你在里面手写的注释会丢**（生成器写不出注释）——想要注释就写在别处，
-  或升级后从 .bak 抄回来。运行时行为不依赖这个版本号：缺失的配置项一律按代码
-  默认值生效，即使写回失败也不影响启动。
+  `config.yaml.v<旧版本>.bak`，日志里有一条升级说明。重写时注释会**刷新为程序的
+  标准注释**（程序写的那部分始终随文件存在），你自己追加的注释不会保留——原文件
+  在 .bak 里可抄回。运行时行为不依赖这个版本号：缺失的配置项一律按代码默认值
+  生效，即使写回失败也不影响启动。
   `version` is the config schema version maintained by the program; after an
   upgrade, an older file is automatically topped up with new keys (your custom
-  values are kept) and backed up as `config.yaml.v<N>.bak`. The rewrite drops
-  hand-written comments — keep notes elsewhere. Runtime never depends on it:
-  missing keys always fall back to code defaults.
+  values are kept) and backed up as `config.yaml.v<N>.bak`; comments are refreshed
+  to the program's standard set (your own annotations are not kept — recover from
+  the .bak). Runtime never depends on it: missing keys fall back to code defaults.
 - **`web.username` / `web.password` 默认不写入文件**——需要应急后门时手动加上这两行
   （仅从本机回环访问时生效；不加或留空即关闭）。
   `web.username` / `web.password` are absent from the generated file; add them manually to
@@ -287,88 +347,6 @@ web:
   旧配置带上它也能加载，但该项被忽略并在启动时告警一次。
   `tunnel.psk` is deprecated — every access code now carries its own key; the field is
   written empty and ignored with a one-time startup warning when present in old configs.
-
-**② 逐项注释 | Annotated, key by key**（键顺序与生成文件一致，可直接对照；`storage.path` /
-`log.path` 生成时为 exe 目录锚定的绝对路径，此处以相对形式示意。same key order as the
-generated file; the two path keys are absolute at generation time）
-
-```yaml
-forward:                     # ── 转发核心 | Forwarding core ──
-    buffer_size: 32768       # I/O 缓冲区大小（字节）| I/O buffer size (bytes)
-    connlog_max_entries: 2000
-                             # 连接日志保留上限的兜底值；正式生效值在面板「全局设置 → 每用户日志保留上限」
-                             # （默认 10000 条，超出裁掉最旧）| Fallback cap only; the effective
-                             # per-user cap lives in Global Settings (default 10000 rows)
-    dial_timeout: 10         # 出站连接超时（秒）| Outbound dial timeout (seconds)
-    pool_size: 0             # 转发协程池容量，0 = 自动（CPU 数 × 64）| Forwarding pool, 0 = auto (NumCPU × 64)
-    udp_timeout: 30          # UDP 会话空闲超时（秒），超时会话回收、下个包新建 | UDP session idle timeout (s)
-gc:                          # ── 内存回收 | Garbage collection ──
-    enable_monitoring: true  # 性能监控 | Performance monitoring
-    enabled: true            # 周期性 GC 开关 | Periodic GC switch
-    interval_seconds: 300    # GC 间隔（秒）| GC interval (seconds)
-    memory_threshold_mb: 100 # 内存超过该值（MB）触发 GC，0 = 关闭 | Threshold-triggered GC (MB), 0 = off
-    strategy: standard       # standard 标准 / aggressive 激进（GC 后向系统归还内存）/
-                             # gentle 温和（仅内存压力大时执行）/ adaptive 自适应（按内存增长速度调整）
-log:                         # ── 日志 | Logging ──
-    compress: true           # 滚动归档是否压缩 | Compress rotated logs
-    level: info              # debug / info / warn / error。例行日志已降为 debug，info 级很安静
-                             # routine logs are debug-level; info stays quiet
-    max_age_days: 30         # 日志保留天数 | Days to keep
-    max_backups: 5           # 保留的历史文件份数 | Rotated files to keep
-    max_size_mb: 50          # 单文件上限（MB），超出滚动 | Max size per file (MB)
-    path: logs/app.log       # 日志文件（生成时为 exe 目录绝对路径）| written as an absolute path
-                             # anchored at the exe directory
-pool:                        # ── 全局协程池 | Global goroutine pool ──
-    pre_alloc: true          # 启动时预分配池槽位 | Pre-allocate pool slots at startup
-    size: 10000              # 池容量 | Pool capacity
-storage:                     # ── 存储 | Storage ──
-    path: data/rules.db      # bbolt 数据库（规则/用户/访问码/连接日志/SMTP 全在此）；
-                             # 生成时为 exe 目录绝对路径 | bbolt database, absolute path at the
-                             # exe directory in the generated file
-tunnel:                      # ── 内置隧道服务端 | Built-in tunnel server ──
-    enabled: false           # 开启后隧道服务端随主程序常驻；完整回程配置仅 Linux 生效（见透明模式章节）
-                             # embeds the tunnel server; the full return-path setup is Linux-only
-    listen: :7947            # 隧道 UDP 监听，防火墙记得放行 | Tunnel UDP listen — allow it in the firewall
-    nat: true                # 自动配置回程路径：ip_forward + fwmark 策略路由 + FORWARD/INPUT 规则；
-                             # 刻意不使用 MASQUERADE（见透明模式章节）| auto-configure the return
-                             # path; deliberately no MASQUERADE
-    psk: ""                  # 已废弃：多用户协议为每个访问码独立密钥，此项被忽略并告警一次
-                             # deprecated & ignored; kept empty so old configs still load
-    public_addr: ""          # 兜底：写进接入码的中转机地址（host 或 host:port，如 1.2.3.4:7947）。
-                             # 优先用面板「全局设置 → 中转机地址」；两处都空时自动探测公网 IP，
-                             # 面板经 CDN/反代时务必显式配置 | fallback relay address embedded
-                             # in access codes; prefer Global Settings, set explicitly behind CDN
-    tun_addr: 10.66.0.1/16   # 服务端隧道地址 + 访问码地址池（一个访问码占一个地址；/24 仅 253 个会耗尽）
-                             # server address + access-code address pool
-    tun_name: pftun0         # TUN 设备名 | TUN device name
-    io_mode: batch           # UDP 收发方式：batch 走 recvmmsg/sendmmsg（每批 2 次系统调用，默认），
-                             # simple 逐包（每包 2 次）。非 Linux 自动降级为 simple 并记一条日志。
-                             # 出问题时改成 simple 即可回退，不必换二进制
-                             # batch uses recvmmsg/sendmmsg; simple is the per-packet fallback
-    fec: false               # 前向纠错：每 8 个数据包附 1 个校验包，组内丢 1 个可无损补回（省掉应用层
-                             # 重传的一个 RTT）。代价是下行冗余 12.5% + 隧道 MTU 让出 83 字节。
-                             # **默认关闭**：丢包率 <1% 的链路上是纯浪费，还会掩盖真实网络问题——
-                             # 先看客户端面板的「链路质量」，确认丢包偏高再开
-                             # forward error correction; +12.5% downstream, enable only when loss is real
-    tail_dup: false          # 小包冗余副本：≤256 字节的包发两份（限频 20ms），接收端靠重放窗口去重。
-                             # 补的是纠错的盲区——组尾小包（组没满就没有校验包），而玩家操作指令与
-                             # RakNet 探测恰好落在那里 | duplicate small packets to cover FEC's blind spot
-    udp_gro: false           # Linux UDP 接收聚合（内核 ≥ 5.0）：一次系统调用取回多个背靠背的隧道包
-                             # UDP receive offload; needs Linux ≥ 5.0
-    udp_gso: false           # Linux UDP 发送分段卸载。**默认关闭且不建议开**：内核要求一条消息内各段
-                             # 等长，而游戏流量包长参差不齐，命中率天然很低
-                             # segmentation offload; equal-length segments required, rarely hit here
-web:                         # ── 管理面板 | Web panel ──
-    host: 127.0.0.1          # 面板监听地址；多用户对外时改 0.0.0.0 并置于 TLS 反代之后
-                             # listen address; use 0.0.0.0 behind a TLS proxy for multi-user serving
-    port: 8989               # 面板端口 | Panel port
-    secure_cookie: false     # 会话 cookie 加 Secure 标记；仅 HTTPS 访问时开启，否则浏览器拒存
-                             # cookie、登录直接失败 | enable ONLY behind HTTPS
-    # username: admin        # ── 以下两行默认不写入文件；需要应急后门时手动添加 ──
-    # password: secret       # 仅从本机回环访问时生效（忘记管理员密码时 SSH 到机器上救急）；
-                             # 对公网生效不可配置 | loopback-only rescue account, add manually;
-                             # not configurable beyond loopback
-```
 
 ### 字段逐项讲解 | Field Reference
 

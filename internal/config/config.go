@@ -244,7 +244,11 @@ func writeDefaults(v *viper.Viper, configPath string) error {
 		return err
 	}
 	v.Set("version", ConfigVersion)
-	return v.WriteConfigAs(configPath)
+	raw, err := renderConfigYAML(v)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, raw, 0o600)
 }
 
 // upgradeConfigFile 把旧版本的配置文件升级到当前版本：viper 里已是「文件值
@@ -269,7 +273,11 @@ func upgradeConfigFile(v *viper.Viper, fileVer int) error {
 	}
 	// 版本号提到当前值再写回：用户文件里可能是旧数字。
 	v.Set("version", ConfigVersion)
-	if err := v.WriteConfigAs(path); err != nil {
+	raw, err := renderConfigYAML(v)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return err
 	}
 	upgradedNote = fmt.Sprintf("配置文件已从 v%d 升级到 v%d（新增配置项已按默认值补全，自定义值保留；原文件备份为 %s，重写会丢弃手写注释）", fileVer, ConfigVersion, bak)
