@@ -216,9 +216,50 @@ type Server struct {
 // TunnelStatus 暴露隧道服务端的在线状态（避免 web 直接依赖 tunnelapp）。
 //
 // 在线判定已下移到 users.Service（它需要把访问码与在线状态拼在一起），这里
-// 只留一个总数给诊断页。
+// 只留一个总数给诊断页。链路质量（丢包/抖动/RTT）另经 TunnelLinkReport 取——
+// 视图结构体定义在本包，main.go 负责把 tunnelapp 的数据适配过来。
 type TunnelStatus interface {
 	PeerCount() int
+	// TunnelLink 返回在线隧道的链路质量报告。隧道未开启时为 nil，
+	// 端点据此外返回明确的「未开启」而不是空表格。
+	TunnelLink() *TunnelLinkReport
+}
+
+// TunnelLinkReport 是在线隧道链路质量的快照（/api/tunnel/status 响应体）。
+//
+// 字段含义与 pf-client 的「链路质量」面板一致：丢包率与乱序率分开看
+// （高乱序而低丢包是正常的多路径链路），抖动量的是入站包到达节奏。
+type TunnelLinkReport struct {
+	Peers []TunnelLinkPeer `json:"peers"`
+	// KernelDrops 是内核 UDP 收缓冲累计丢包。应用层对它完全无感，而玩家进服
+	// 的下行突发恰好最容易打穿默认缓冲——它是「服务端自伤型丢包」的唯一出口。
+	KernelDrops uint64 `json:"kernel_drops"`
+	TunDrops    int64  `json:"tun_drops"`
+	IOMode      string `json:"io_mode"`
+	MTU         int    `json:"mtu"`
+	FEC         bool   `json:"fec"`
+}
+
+// TunnelLinkPeer 是一条在线隧道的链路质量。
+type TunnelLinkPeer struct {
+	UserName string    `json:"user_name"`
+	CodeName string    `json:"code_name"`
+	TunIP    string    `json:"tun_ip"`
+	Addr     string    `json:"addr"`
+	Since    time.Time `json:"since"`
+	IdleSec  int64     `json:"idle_sec"`
+	MTU      int       `json:"mtu"`
+
+	LossPPM    int64   `json:"loss_ppm"`
+	ReorderPPM int64   `json:"reorder_ppm"`
+	JitterMS   float64 `json:"jitter_ms"`
+	RTTMS      float64 `json:"rtt_ms"`
+
+	FECEnabled   bool   `json:"fec_enabled"`
+	FECRecovered uint64 `json:"fec_recovered"`
+	DupEnabled   bool   `json:"dup_enabled"`
+	TxDropped    uint64 `json:"tx_dropped"`
+	TunDropped   uint64 `json:"tun_dropped"`
 }
 
 // New creates a configured Server.
@@ -311,6 +352,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/logs/delete", s.authed(h.deleteConnLogs))
 	mux.HandleFunc("POST /api/logs/clear", s.authed(h.clearConnLogs))
 	mux.HandleFunc("GET /api/sessions", s.authed(h.listSessions))
+
+	// 隧道链路质量（管理员）：每条在线隧道的丢包/乱序/抖动/RTT 与内核层丢包。
+	// 数据按访问码聚合，属运维信息；普通用户看自己的走 pf-client 面板。
+	mux.HandleFunc("GET /api/tunnel/status", s.adminOnly(h.tunnelStatus))
 
 	// 端口检测与随机（登录即可；检测范围受配额区间约束）
 	mux.HandleFunc("GET /api/ports/check", s.authed(h.checkPort))

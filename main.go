@@ -302,7 +302,9 @@ func (a *application) Start() error {
 	fw := firewall.New()
 	var tunStatus web.TunnelStatus
 	if a.tunnelSrv != nil {
-		tunStatus = a.tunnelSrv
+		// 适配器：web 不直接依赖 tunnelapp，视图结构体在 web 包里定义，
+		// 这里把 tunnelapp 的数据翻过去（与 Identity/Binder 同一套解耦手法）。
+		tunStatus = tunnelStatusAdapter{srv: a.tunnelSrv}
 	}
 	srv := web.New(cfg.Web, mgr, fw, a.users, a.sessions, tunStatus)
 	if err := srv.Start(); err != nil {
@@ -345,4 +347,47 @@ func (a *application) Stop() error {
 	logger.Sync()
 	pkglogger.Sync()
 	return nil
+}
+
+// tunnelStatusAdapter 把隧道服务端的链路观测适配成 web 包的 TunnelStatus。
+//
+// 数据来源都是 peerSession 上每包累积的原子计数（OPT-12），这里只做一次
+// 字段搬运，无锁、无分配压力——面板 5 秒拉一次。
+type tunnelStatusAdapter struct {
+	srv *tunnelapp.Server
+}
+
+func (a tunnelStatusAdapter) PeerCount() int { return a.srv.PeerCount() }
+
+func (a tunnelStatusAdapter) TunnelLink() *web.TunnelLinkReport {
+	r := a.srv.LinkReport()
+	out := &web.TunnelLinkReport{
+		KernelDrops: r.KernelDrops,
+		TunDrops:    r.TunDrops,
+		IOMode:      r.IOMode,
+		MTU:         r.MTU,
+		FEC:         r.FEC,
+		Peers:       make([]web.TunnelLinkPeer, 0, len(r.Peers)),
+	}
+	for _, p := range r.Peers {
+		out.Peers = append(out.Peers, web.TunnelLinkPeer{
+			UserName:     p.UserName,
+			CodeName:     p.CodeName,
+			TunIP:        p.TunIP,
+			Addr:         p.Addr,
+			Since:        p.Since,
+			IdleSec:      p.IdleSec,
+			MTU:          p.MTU,
+			LossPPM:      p.LossPPM,
+			ReorderPPM:   p.ReorderPPM,
+			JitterMS:     p.JitterMS,
+			RTTMS:        p.RTTMS,
+			FECEnabled:   p.FECEnabled,
+			FECRecovered: p.FECRecovered,
+			DupEnabled:   p.DupEnabled,
+			TxDropped:    p.TxDropped,
+			TunDropped:   p.TunDropped,
+		})
+	}
+	return out
 }

@@ -1648,6 +1648,70 @@
             </tbody>
           </table>
         </div>
+
+        <!-- 隧道链路质量（仅管理员）：每条在线隧道的丢包/乱序/抖动/RTT -->
+        <template x-if="isAdmin">
+          <div class="mt-3" x-show="tunnelLinkReport" x-cloak>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <h6 class="mb-0"><i class="bi bi-activity me-1"></i><span x-text="t('隧道链路质量','Tunnel Link Quality')"></span></h6>
+              <span class="badge rounded-pill" :class="tunnelLinkReport && tunnelLinkReport.fec ? 'text-bg-info' : 'text-bg-light text-muted'"
+                    x-text="tunnelLinkReport && tunnelLinkReport.fec ? t('纠错已开启','FEC on') : t('纠错未开启','FEC off')"></span>
+              <span class="badge rounded-pill text-bg-light text-muted font-monospace" x-show="tunnelLinkReport"
+                    x-text="(tunnelLinkReport ? 'io=' + tunnelLinkReport.io_mode : '') + (tunnelLinkReport ? ' mtu=' + tunnelLinkReport.mtu : '')"></span>
+            </div>
+            <div class="form-text mb-2" x-text="t('丢包率与乱序率分开看：高乱序而低丢包是正常的多路径链路。丢包 ≥1% 才是体感分界，此时可考虑开启服务端的前向纠错。内核丢包非零说明突发打穿了服务端 socket 缓冲。','Loss and reorder are separate: high reorder with low loss is normal multipath. Loss ≥1% is where gameplay suffers; consider server-side FEC then. Kernel drops mean burst overflowed the socket buffer.')"></div>
+            <div class="table-responsive">
+              <table class="table table-sm table-hover align-middle">
+                <thead><tr>
+                  <th x-text="t('用户 / 访问码','User / Code')"></th>
+                  <th x-text="t('隧道地址 / 来源','Tunnel / Source')"></th>
+                  <th class="text-nowrap" x-text="t('丢包率','Loss')"></th>
+                  <th class="text-nowrap" x-text="t('乱序率','Reorder')"></th>
+                  <th class="text-nowrap" x-text="t('抖动','Jitter')"></th>
+                  <th class="text-nowrap" x-text="t('往返延迟','RTT')"></th>
+                  <th class="text-nowrap" x-text="t('纠错补回','FEC fixed')"></th>
+                  <th class="text-nowrap" x-text="t('发送丢弃','Tx drops')"></th>
+                </tr></thead>
+                <tbody>
+                  <template x-for="p in (tunnelLinkReport ? tunnelLinkReport.peers : [])" :key="p.tun_ip">
+                    <tr>
+                      <td class="small">
+                        <div x-text="p.user_name"></div>
+                        <div class="text-muted" x-text="p.code_name"></div>
+                      </td>
+                      <td class="small">
+                        <div class="font-monospace" x-text="p.tun_ip"></div>
+                        <div class="text-muted font-monospace" x-text="p.addr + (p.mtu ? ' · MTU ' + p.mtu : '')"></div>
+                      </td>
+                      <td><span class="badge rounded-pill" :class="lossBadge(p.loss_ppm)"
+                            x-text="fmtPPM(p.loss_ppm)"></span></td>
+                      <td class="small" x-text="fmtPPM(p.reorder_ppm)"></td>
+                      <td class="small" x-text="fmtMS(p.jitter_ms)"></td>
+                      <td class="small" x-text="fmtMS(p.rtt_ms)"></td>
+                      <td class="small">
+                        <span x-show="p.fec_enabled" x-text="(p.fec_recovered || 0).toLocaleString()"></span>
+                        <span class="text-muted" x-show="!p.fec_enabled" x-text="t('未启用','off')"></span>
+                      </td>
+                      <td class="small" :class="p.tx_dropped ? 'text-danger fw-bold' : 'text-muted'"
+                          x-text="p.tx_dropped ? p.tx_dropped.toLocaleString() : '0'"></td>
+                    </tr>
+                  </template>
+                  <tr x-show="!tunnelLinkReport || tunnelLinkReport.peers.length===0">
+                    <td colspan="8" class="text-center text-muted small py-3" x-text="t('当前没有在线隧道','No tunnels online')"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="small" :class="tunnelLinkReport && tunnelLinkReport.kernel_drops > 0 ? 'text-danger' : 'text-muted'"
+                 x-show="tunnelLinkReport">
+              <i class="bi bi-hdd me-1"></i>
+              <span x-text="t('内核收缓冲丢包','Kernel UDP drops')"></span>:
+              <span class="font-monospace" x-text="tunnelLinkReport ? tunnelLinkReport.kernel_drops.toLocaleString() : '0'"></span>
+              <span class="text-muted" x-show="tunnelLinkReport && tunnelLinkReport.kernel_drops > 0"
+                    x-text="t('——突发流量打穿了 socket 缓冲，按日志提示调大 net.core.rmem_max','— burst overflowed the socket buffer; raise net.core.rmem_max per the server log')"></span>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -1740,6 +1804,9 @@ function portForwardApp() {
 	    _refreshTimer: null,
 	    _refreshInFlight: false,
 	    _focusedRuleTimer: null,
+	    // 隧道链路质量（管理员，随活跃会话弹窗刷新）
+	    tunnelLinkReport: null,
+
 	    // 访问控制 / 活跃会话
 	    aclTab: 'ip',
 	    aclEntries: [],
@@ -2976,6 +3043,34 @@ function portForwardApp() {
         if (d.success) this.activeSessions = (d.data && d.data.sessions) || []
       } catch (e) { /* 静默 */ }
       finally { this.sessionsLoading = false }
+      if (this.isAdmin) this.loadTunnelLink()
+    },
+
+    async loadTunnelLink() {
+      try {
+        const res = await fetch('/api/tunnel/status')
+        if (res.status === 403) return // 非管理员：接口不给数据，界面也不显示
+        const d = await res.json()
+        this.tunnelLinkReport = (d.success && d.data && d.data.enabled) ? d.data.report : null
+      } catch (e) { /* 静默：弹窗里的诊断数据不值得报错打断 */ }
+    },
+
+    // fmtPPM / fmtMS / lossBadge 与 pf-client 的口径一致：丢包率用百万分之
+    // 整数传输（避免浮点在 JSON 里抖动），1% 是游戏体感的分界。
+    fmtPPM(ppm) {
+      if (!ppm) return '0%'
+      const pct = ppm / 10000
+      return (pct < 0.01 ? '<0.01' : pct.toFixed(2)) + '%'
+    },
+    fmtMS(ms) {
+      if (!ms) return '—'
+      return (ms < 1 ? ms.toFixed(2) : ms.toFixed(1)) + ' ms'
+    },
+    lossBadge(ppm) {
+      if (ppm >= 30000) return 'text-bg-danger'
+      if (ppm >= 10000) return 'text-bg-warning'
+      if (ppm > 0) return 'text-bg-success'
+      return 'text-bg-secondary'
     },
 
     async loadConnLogs(page = 0) {
