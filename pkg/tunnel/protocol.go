@@ -88,6 +88,10 @@ const (
 	// 硬切换、不保留旧通道——而是让「客户端过旧」能被识别成一条可读的
 	// 升级提示，而不是一个查不出原因的认证失败。
 	Version = 0x04
+	// VersionV3 是上一代协议版本，仅用于两处兼容逻辑：向可能仍是 v3 的
+	// 服务端发探测包（客户端），以及给旧客户端回一个它能验证的拒绝应答
+	// （服务端）。会话绝不按 v3 建立——那会回到 nonce 跨方向重用的老路。
+	VersionV3 = 0x03
 )
 
 // 会话特性开关。服务端在 Accept 的 flags 字节里下发，两端据此对称启用——
@@ -128,6 +132,10 @@ const (
 	RejectUserDisabled   RejectReason = 3 // 账号已停用
 	RejectTunnelLimit    RejectReason = 4 // 并发隧道数已达上限
 	RejectAddrInvalid    RejectReason = 5 // 访问码的隧道地址无效（需管理员处理）
+	// RejectVersionMismatch 表示对端协议版本与本端不一致。v3 的词表里没有
+	// 这个值（旧客户端只能落到「原因代码 6」的默认文案），它从 v4 起生效：
+	// 未来版本的服务端用它告知 v4 客户端「你太旧了」。
+	RejectVersionMismatch RejectReason = 6
 )
 
 // String 返回原因的可读描述（服务端日志用；客户端有自己的中文文案）。
@@ -143,6 +151,8 @@ func (r RejectReason) String() string {
 		return "tunnel_limit"
 	case RejectAddrInvalid:
 		return "addr_invalid"
+	case RejectVersionMismatch:
+		return "version_mismatch"
 	default:
 		return "unknown"
 	}
@@ -154,7 +164,7 @@ func (r RejectReason) String() string {
 // 埋在一堆「握手失败」里。
 func (r RejectReason) Terminal() bool {
 	switch r {
-	case RejectDeviceMismatch, RejectCodeDisabled, RejectUserDisabled, RejectAddrInvalid:
+	case RejectDeviceMismatch, RejectCodeDisabled, RejectUserDisabled, RejectAddrInvalid, RejectVersionMismatch:
 		return true
 	default:
 		// tunnel_limit 是暂时的（对端可能马上下线），继续重试。

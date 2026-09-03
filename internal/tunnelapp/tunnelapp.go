@@ -156,6 +156,7 @@ type Server struct {
 	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
 	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
 	lastOverMTU   atomic.Int64 // 出向包超出隧道 MTU 的限频锚点
+	lastVerReject atomic.Int64 // 跨版本拒绝应答的限频锚点
 
 	// kernelDrops 是内核 UDP 收缓冲溢出的累计丢包数（/proc/net/udp）。
 	// 应用层对这类丢包完全无感——玩家进服的下行突发最容易打穿默认缓冲，
@@ -699,6 +700,41 @@ func (s *Server) markActive(ps *peerSession) {
 	go s.binder.TouchCode(codeID, addr)
 }
 
+// replyVersionMismatch 对版本过旧的客户端回一个它能验证的拒绝应答。
+//
+// 此前这个分支完全静默：旧客户端只能等超时，最后显示「服务端无应答（请检查
+// 地址、端口与中转机防火墙）」——一个纯粹的版本问题被误报成网络问题，运维去
+// 白查防火墙。现在用**旧客户端自己的协议版本域标签**签名拒绝应答（reason 0），
+// 旧客户端验证通过后会显示「服务端拒绝了连接」并指向管理员/服务端日志。
+//
+// 安全约束一条不放松：
+//   - 只应答 **MAC 验证通过**的对端（InspectLegacyHello）——不引入「访问码
+//     是否存在」的探测口子；伪造/重放的 Hello 依旧静默；
+//   - 拒绝应答 35 字节 < Hello 122 字节，不构成反射放大；
+//   - 全局限频 1 秒：正常旧客户端 3 秒重试一次足够；垃圾洪泛最多每秒换一次
+//     存储查询，helloWorker 本就串行，数据泵不受影响。
+func (s *Server) replyVersionMismatch(pkt []byte, from netip.AddrPort) {
+	if !throttle(&s.lastVerReject, 1) {
+		return
+	}
+	uid, ok := tunnel.PeekLegacyHelloUID(pkt)
+	if !ok {
+		return // v1/v2 布局不同，无法安全应答，保持静默
+	}
+	ident, found := s.identity(uid.String())
+	if !found {
+		return // 与正常握手一致：查无此码时连 Reject 都不回
+	}
+	wire := tunnel.LegacyVersionReject(ident.Secret, pkt)
+	if wire == nil {
+		return // MAC 复验失败：伪造或重放，静默
+	}
+	if _, err := s.udp.WriteToUDPAddrPort(wire, from); err != nil {
+		return
+	}
+	logger.S.Debugw("已向旧协议客户端回复跨版本拒绝", "src", from, "code", ident.CodeName)
+}
+
 // handleHello 处理握手包（首次接入与重连走同一条路径）。
 //
 // 判定顺序是安全约束，不能重排：**必须先验 MAC 才允许回 Reject**。在认证之前
@@ -708,6 +744,7 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from netip.AddrPo
 	uid, err := tunnel.PeekHello(pkt)
 	if err != nil {
 		if errors.Is(err, tunnel.ErrOldVersion) {
+			s.replyVersionMismatch(pkt, from)
 			s.logOldVersion(from)
 		}
 		return

@@ -414,7 +414,40 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 		e.probeTries.Store(0)
 		return sess, addressing, nil
 	}
+
+	// 8 次 v4 握手全部无应答：用一条 v3 格式的探测包再试一次。服务端对版本
+	// 不匹配此前是**静默**的，客户端只能靠超时——把「服务端还是旧版本」误报成
+	// 「请检查防火墙」。探测包能让对端按老规矩应答（v3 服务端会正常处理它），
+	// 据此把两种原因分开。探测绝不建立会话：按 v3 建会话等于回到 nonce 跨方向
+	// 重用的老路。
+	if verdict := e.probeLegacyVersion(udp, uid, device, secret); verdict != tunnel.ProbeNoReply {
+		if verdict == tunnel.ProbeServerLegacy {
+			return nil, none, fmt.Errorf("中转机服务端隧道协议版本过旧（v3）：请让管理员先升级服务端，升级完成后本机会自动恢复连接")
+		}
+		return nil, none, fmt.Errorf("隧道协议版本不匹配：中转机服务端与本客户端的协议版本不一致，请确认两端都已升级到配套版本（会自动重试）")
+	}
 	return nil, none, fmt.Errorf("服务端无应答（请检查地址、端口与中转机防火墙）")
+}
+
+// probeLegacyVersion 发一条 v3 格式的握手包并按应答判定对端版本。
+// 返回 ProbeNoReply 表示对端不可达（或拒绝应答），其余见 ProbeVerdict。
+func (e *Engine) probeLegacyVersion(udp *net.UDPConn, uid tunnel.UID,
+	device [tunnel.FingerprintSize]byte, secret []byte) tunnel.ProbeVerdict {
+	wire, err := tunnel.NewLegacyProbeHello(secret, uid, device)
+	if err != nil {
+		return tunnel.ProbeNoReply
+	}
+	if _, err := udp.Write(wire); err != nil {
+		return tunnel.ProbeNoReply
+	}
+	buf := make([]byte, tunnel.MaxPacket+64)
+	_ = udp.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	n, err := udp.Read(buf)
+	_ = udp.SetReadDeadline(time.Time{})
+	if err != nil || n <= 0 {
+		return tunnel.ProbeNoReply
+	}
+	return tunnel.ClassifyLegacyProbeReply(buf[:n])
 }
 
 // prefixToMask 把前缀长度转成点分十进制掩码（netsh 只接受这种写法）。

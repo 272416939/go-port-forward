@@ -198,3 +198,84 @@ func TestQueueHelloNeverBlocks(t *testing.T) {
 		t.Fatal("队列满时 queueHello 阻塞了——这会卡死数据泵")
 	}
 }
+
+// 版本不匹配的跨版本应答（legacy.go 的服务端接线）：
+//   - 旧版（MAC 可验证）的 Hello 必须收到拒绝应答——否则旧客户端只能显示
+//     「服务端无应答（请检查防火墙）」，把版本问题误报成网络问题；
+//   - 伪造/重放（MAC 无效）与未知访问码必须保持静默——不引入访问码存在性
+//     探测口子，这是「Reject 只在认证后发」的同一条约束。
+func TestHandleHelloRepliesVersionMismatch(t *testing.T) {
+	nopLogging()
+	serverConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer serverConn.Close()
+	clientConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer clientConn.Close()
+	from := addrPortOf(clientConn.LocalAddr().(*net.UDPAddr))
+
+	secret := []byte("test-secret-test-secret-test!")
+	uid, uerr := tunnel.ParseUID("3d2f5a1e-0000-0000-0000-000000000001")
+	if uerr != nil {
+		t.Fatalf("构造 uid 失败: %v", uerr)
+	}
+	device := [tunnel.FingerprintSize]byte{0xA1, 0xB2, 0xC3, 0xD4}
+
+	s := &Server{
+		udp:      serverConn.(*net.UDPConn),
+		peers:    newRegistry(),
+		identity: func(codeID string) (Identity, bool) { return Identity{CodeID: "c1", Secret: secret}, true },
+		binder:   &fakeBinder{},
+		helloQ:   make(chan helloTask, helloQueueCap),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+
+	// 旧版（v3 格式）Hello：必须收到 35 字节的跨版本拒绝应答。
+	legacy, lerr := tunnel.NewLegacyProbeHello(secret, uid, device)
+	if lerr != nil {
+		t.Fatalf("构造 v3 探测包失败: %v", lerr)
+	}
+	s.handleHello(s.udp, legacy, from)
+	client := clientConn.(*net.UDPConn)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, tunnel.MaxPacket+64)
+	n, _, err := client.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("旧客户端未收到任何应答（会显示「服务端无应答」）: %v", err)
+	}
+	const legacyRejectLen = 35 // [type][ver][reason][mac32]
+	if n != legacyRejectLen {
+		t.Fatalf("应答长度 = %d，期望 %d", n, legacyRejectLen)
+	}
+	if verdict := tunnel.ClassifyLegacyProbeReply(buf[:n]); verdict != tunnel.ProbeVersionSkew {
+		t.Fatalf("旧客户端视角的应答判定 = %v，期望 ProbeVersionSkew（reason 0 的 v3 形拒绝）", verdict)
+	}
+
+	// MAC 无效（伪造/篡改）：必须静默，不回任何东西。
+	tampered := append([]byte(nil), legacy...)
+	tampered[25] ^= 0xFF
+	s.handleHello(s.udp, tampered, from)
+	if got := readDrop(client, buf); got {
+		t.Fatal("MAC 无效的 Hello 被应答了：这会变成访问码存在性的探测口子")
+	}
+
+	// 未知访问码：同样静默（与正常握手「查无此码连 Reject 都不回」一致）。
+	unknownUID, _ := tunnel.ParseUID("3d2f5a1e-0000-0000-0000-00000000dead")
+	unknown, _ := tunnel.NewLegacyProbeHello(secret, unknownUID, device)
+	s.handleHello(s.udp, unknown, from)
+	if got := readDrop(client, buf); got {
+		t.Fatal("未知访问码被应答了：这会变成访问码存在性的探测口子")
+	}
+}
+
+// readDrop 短超时读一次，返回是否真的读到了包。
+func readDrop(conn *net.UDPConn, buf []byte) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, _, err := conn.ReadFromUDP(buf)
+	return err == nil
+}

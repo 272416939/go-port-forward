@@ -38,6 +38,8 @@ func rejectMessage(r tunnel.RejectReason) string {
 		return "同时在线的隧道数已达上限。请先在别的机器上断开一条隧道，或联系管理员提高上限。"
 	case tunnel.RejectAddrInvalid:
 		return "这个访问码的隧道地址已失效（可能是管理员改小了隧道网段），请联系管理员重新分配。"
+	case tunnel.RejectVersionMismatch:
+		return "隧道协议版本不匹配：本客户端与服务端的协议版本不一致，请升级 pf-client 到与服务端配套的版本。"
 	default:
 		return fmt.Sprintf("服务端拒绝了连接（原因代码 %d），请联系管理员。", uint8(r))
 	}
