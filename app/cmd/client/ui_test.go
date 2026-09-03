@@ -137,13 +137,13 @@ func TestRouteEligibility(t *testing.T) {
 		"不是地址",
 	}
 	for _, ip := range rejected {
-		if m.eligible(ip) {
+		if m.eligibleStr(ip) {
 			t.Errorf("eligible(%q) = true, 期望被拒绝", ip)
 		}
 	}
 
 	for _, ip := range []string{"111.29.236.135", "8.8.8.8", "203.0.113.10"} {
-		if !m.eligible(ip) {
+		if !m.eligibleStr(ip) {
 			t.Errorf("eligible(%q) = false, 期望允许（公网单播）", ip)
 		}
 	}
@@ -164,9 +164,13 @@ func TestPerIPByteAttribution(t *testing.T) {
 	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
 
 	// 预置两条状态，避免 ensure() 真的去跑 route.exe 改动系统路由表。
+	// installing 默认为 false，所以 deliverInbound 走快路径、不进缓冲。
 	alice, bob := "111.29.236.135", "8.8.8.8"
-	m.states[alice] = &routeState{lastSeen: time.Now()}
-	m.states[bob] = &routeState{lastSeen: time.Now()}
+	m.mu.Lock()
+	m.states[ra(alice)] = newRouteState(time.Now())
+	m.states[ra(bob)] = newRouteState(time.Now())
+	m.publish()
+	m.mu.Unlock()
 
 	aliceIP := [4]byte{111, 29, 236, 135}
 	bobIP := [4]byte{8, 8, 8, 8}
@@ -203,8 +207,8 @@ func TestPerIPByteAttribution(t *testing.T) {
 func TestCountOutboundNeverInstallsRoute(t *testing.T) {
 	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
 	m.countOutbound(ipv4([4]byte{10, 66, 0, 2}, [4]byte{8, 8, 8, 8}, 100))
-	if len(m.states) != 0 {
-		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", len(m.states))
+	if n := stateCount(m); n != 0 {
+		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", n)
 	}
 }
 
@@ -221,8 +225,8 @@ func TestCountIgnoresMalformedPackets(t *testing.T) {
 		m.deliverInbound(pkt)
 		m.countOutbound(pkt)
 	}
-	if len(m.states) != 0 {
-		t.Errorf("畸形包产生了 %d 条状态，期望 0", len(m.states))
+	if n := stateCount(m); n != 0 {
+		t.Errorf("畸形包产生了 %d 条状态，期望 0", n)
 	}
 }
 

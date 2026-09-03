@@ -4,7 +4,7 @@ package main
 
 // /32 回程路由的生命周期管理。
 //
-// 两条硬约束决定了这里的形态：
+// 三条硬约束决定了这里的形态：
 //
 //  1. 安装必须发生在「该 IP 的入站包写入 TUN」之前。后端的回包可能在微秒级
 //     产生，路由晚一步，回包就按默认路由从物理网卡发出去了（源地址变成后端
@@ -25,9 +25,16 @@ package main
 //     会让他之后直连源站 IP 也收不到回包。原先删除只在收到推送时才被触发，
 //     而服务端在「该访问码没有任何活跃会话」时根本不推送，残留路由能活到
 //     进程退出。现在由 pruneLoop 按本地空闲时间独立回收。
+//
+// 并发形态（OPT-9）：两条数据泵每包都要过这里，所以热路径必须无锁无分配。
+//   - 键是 netip.Addr（可比较、构造零分配）。此前用点分十进制字符串，
+//     每个包要 net.IPv4(...).String() 分配一次、eligible 里再 ParseIP 一次；
+//   - 条目索引发布成 atomic.Pointer 快照，只在**增删条目**时重建（频率是
+//     「新玩家进服」级，不是「每包」级）；
+//   - 条目上的可变字段全部原子化，慢路径（pending 缓冲、退避）仍在 mu 下。
 
 import (
-	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -61,8 +68,17 @@ const (
 	// 直连源站，且能活到进程退出。
 	routeDeleteTries = 3
 	// installPendingCap 是单个 IP 在路由安装完成前最多缓冲的入站包数。
-	// 溢出丢弃新包（RakNet 会重传），不给伪造源地址洪泛撑爆内存的机会。
-	installPendingCap = 8
+	//
+	// 8 太小：玩家进服瞬间 RakNet 打包密集，而 route.exe 一次几十毫秒（最坏
+	// 上百毫秒 + 一次退避重试），8 个包很容易打穿——那就是「进服卡一下」。
+	// 32 覆盖最坏 100ms 的到包量。也不能更大：pending 里的包由安装器代写，
+	// 缓冲越深、安装失败时该 IP 的卡顿越长。够用而非无界。
+	installPendingCap = 32
+	// pendingBytesMax 是全部 IP 的缓冲字节总上限。
+	//
+	// 单 IP 上限挡不住「伪造源地址洪泛」：512 个条目 × 32 包 × 1400 字节可以
+	// 攒到 20MB+。这条全局闸门让内存占用有确定上界。
+	pendingBytesMax = 8 << 20
 	// installBackoffMax 是安装失败重试的最大退避间隔。失败不删除条目——
 	// 删了会让该 IP 的每个后续包都重新走一遍 route.exe（旧的逐包重演），
 	// 也给了伪造源地址反复触发子进程的口子。
@@ -75,30 +91,48 @@ const (
 // internal/forward 的 bytes_in/bytes_out 恰好相反——那边站在中转机视角，
 // bytes_in 是"客户端流向目标"。客户端在链路另一端，沿用 in/out 会读反，
 // 所以这里改用 up/down。
+//
+// lastSeen/endedAt/removing/delFails 全部原子化：热路径（deliverInbound）
+// 不持 m.mu，只有涉及 pending 缓冲与退避调度的慢路径才进锁。
 type routeState struct {
-	lastSeen time.Time // 最近一次收到该 IP 的入站包，或被服务端确认活跃
-	// endedAt 是服务端确认「该 IP 已无活跃会话」的时刻；零值表示未确认。
+	lastSeen atomic.Int64 // 最近一次收到该 IP 的入站包（UnixNano）
+	// endedAt 是服务端确认「该 IP 已无活跃会话」的时刻（UnixNano，0 = 未确认）。
 	// 有确认时走 routeEndedGrace（短），没有时只能靠 routeIdleGrace（长）。
-	endedAt   time.Time
-	removing  bool         // 已入删除队列
-	delFails  int          // 连续删除失败次数
+	endedAt  atomic.Int64
+	removing atomic.Bool  // 已入删除队列
+	delFails atomic.Int32 // 连续删除失败次数
 	// installing 为 true 表示回程路由尚未就位（安装中或退避重试中），
 	// 该 IP 的入站包缓冲在 pending 里，由安装器装好后按序代写。
-	// pump 的读路径（deliverInbound）不持 m.mu，因此用 atomic。
 	installing atomic.Bool
 	addFails   int       // 连续安装失败次数（退避用），仅 m.mu 下访问
 	nextTry    time.Time // 下次尝试安装的时刻（零值=立即可试），仅 m.mu 下访问
 	pending    [][]byte  // 等待路由就绪的入站包，仅 m.mu 下访问
-	bytesUp    atomic.Int64 // 玩家 → 后端
-	bytesDown  atomic.Int64 // 后端 → 玩家
+	// pendingDrops 是该 IP 因缓冲溢出被丢弃的入站包数（观测用）。
+	pendingDrops atomic.Int64
+	bytesUp      atomic.Int64 // 玩家 → 后端
+	bytesDown    atomic.Int64 // 后端 → 玩家
 }
 
-// expired 报告该路由是否已过保留期。调用方需持锁。
+func newRouteState(now time.Time) *routeState {
+	st := &routeState{}
+	st.lastSeen.Store(now.UnixNano())
+	return st
+}
+
+// touch 刷新活跃时间并撤销「已结束」结论（包还在来，说明服务端的判断过时了）。
+func (st *routeState) touch(now time.Time) {
+	st.lastSeen.Store(now.UnixNano())
+	st.removing.Store(false) // 又活跃了，取消可能已入队的删除
+	st.endedAt.Store(0)
+	st.delFails.Store(0)
+}
+
+// expired 报告该路由是否已过保留期。无锁读。
 func (st *routeState) expired(now time.Time) bool {
-	if !st.endedAt.IsZero() && now.Sub(st.endedAt) > routeEndedGrace {
+	if ended := st.endedAt.Load(); ended != 0 && now.UnixNano()-ended > int64(routeEndedGrace) {
 		return true
 	}
-	return now.Sub(st.lastSeen) > routeIdleGrace
+	return now.UnixNano()-st.lastSeen.Load() > int64(routeIdleGrace)
 }
 
 // RouteEntry 是单个来源 IP 的流量视图（供 UI 展示）。
@@ -106,28 +140,43 @@ type RouteEntry struct {
 	IP        string `json:"ip"`
 	BytesUp   int64  `json:"bytes_up"`
 	BytesDown int64  `json:"bytes_down"`
+	// Drops 是该 IP 因路由安装缓冲溢出被丢弃的入站包数。非零就意味着这个
+	// 玩家进服时确实卡过——此前它完全不可观测。
+	Drops int64 `json:"drops"`
 }
 
 // routeManager 维护全部 /32 回程路由。
 type routeManager struct {
-	mu       sync.Mutex
-	states   map[string]*routeState
-	removals chan string
+	mu     sync.Mutex
+	states map[netip.Addr]*routeState
+	// index 是 states 的只读快照，供两条数据泵无锁查表。
+	// 仅在增删条目时重建（新玩家进服 / 回收），不是每包级别的操作。
+	index    atomic.Pointer[map[netip.Addr]*routeState]
+	removals chan netip.Addr
 	// installWake 是安装器的唤醒信号（容量 1，非阻塞投递）：新 IP 注册或
 	// 退避到期后即时触发安装，不必轮询。
 	installWake chan struct{}
 	// writeTun 是安装器把缓冲包写进 TUN 的出口（= dev.WritePacket）。
 	// 「先装路由再进 TUN」对缓冲包的顺序由安装器代写保证。
 	writeTun func([]byte) error
-	// lastDropLog 用于限频记录缓冲溢出丢弃，避免安装卡住时日志刷屏。
-	lastDropLog atomic.Int64
+	// pendingBytes 是全部 IP 当前缓冲的字节数（全局闸门，防洪泛撑内存）。
+	pendingBytes atomic.Int64
+	// dropped 是缓冲溢出丢弃的总包数（面板展示）。
+	dropped atomic.Int64
+	// lastDropLog / lastWriteLog 分别限频「缓冲溢出」与「代写失败」两类日志。
+	// 共用一个锚点会让其中一类被另一类的时间戳吞掉。
+	lastDropLog  atomic.Int64
+	lastWriteLog atomic.Int64
 	// relayIP 是中转机地址。绝不能为它安装回程路由——那会把隧道自己的
 	// UDP 流量导进 TUN 形成环路，整条隧道立刻断掉。
-	relayIP string
-	// addressing 是服务端下发的隧道内地址。网关是 /32 路由的下一跳；本机与
-	// 网关地址都必须排除在可安装地址之外（同上，会形成环路）。
+	relayIP netip.Addr
+	// clientIP / gateway 是服务端下发的隧道内地址。网关是 /32 路由的下一跳；
+	// 本机与网关地址都必须排除在可安装地址之外（同上，会形成环路）。
 	// 多用户之前这两个地址是编译期常量，现在每个用户各不相同。
-	addressing tunnelAddressing
+	clientIP netip.Addr
+	gateway  netip.Addr
+	// gatewayStr 是网关的字符串形态，route.exe 需要它（只在安装路径用到）。
+	gatewayStr string
 	logf       func(string, ...any)
 
 	// addRoute/delRoute 默认打到 syssetup（route.exe）。抽成字段是为了让
@@ -142,22 +191,45 @@ type routeManager struct {
 
 func newRouteManager(relayIP string, addressing tunnelAddressing,
 	writeTun func([]byte) error, logf func(string, ...any)) *routeManager {
+	relay, _ := netip.ParseAddr(relayIP)
+	client, _ := netip.ParseAddr(addressing.ClientIP)
+	gw, _ := netip.ParseAddr(addressing.Gateway)
 	m := &routeManager{
-		states:      make(map[string]*routeState),
-		removals:    make(chan string, removeQueue),
+		states:      make(map[netip.Addr]*routeState),
+		removals:    make(chan netip.Addr, removeQueue),
 		installWake: make(chan struct{}, 1),
-		relayIP:     relayIP,
-		addressing:  addressing,
+		relayIP:     relay.Unmap(),
+		clientIP:    client.Unmap(),
+		gateway:     gw.Unmap(),
+		gatewayStr:  addressing.Gateway,
 		writeTun:    writeTun,
 		logf:        logf,
 		addRoute:    syssetup.AddRoute,
 		delRoute:    syssetup.RemoveRoute,
 		stop:        make(chan struct{}),
 	}
+	m.publish()
 	go m.removeWorker()
 	go m.pruneLoop()
 	go m.installLoop()
 	return m
+}
+
+// publish 重建只读索引快照。调用方须持 m.mu。
+func (m *routeManager) publish() {
+	snap := make(map[netip.Addr]*routeState, len(m.states))
+	for ip, st := range m.states {
+		snap[ip] = st
+	}
+	m.index.Store(&snap)
+}
+
+// lookup 无锁查表（两条数据泵的热路径）。
+func (m *routeManager) lookup(ip netip.Addr) *routeState {
+	if snap := m.index.Load(); snap != nil {
+		return (*snap)[ip]
+	}
+	return nil
 }
 
 // wakeInstaller 非阻塞唤醒安装器（容量 1 的信号通道，已挂起时合并唤醒）。
@@ -169,97 +241,153 @@ func (m *routeManager) wakeInstaller() {
 }
 
 // view 返回当前所有回程路由及其流量，按 IP 排序保证 1Hz 刷新时行不跳动。
+// 字符串只在这里生成（1Hz），数据面全程用 netip.Addr。
 func (m *routeManager) view() []RouteEntry {
-	m.mu.Lock()
-	out := make([]RouteEntry, 0, len(m.states))
-	for ip, st := range m.states {
+	snap := m.index.Load()
+	if snap == nil {
+		return nil
+	}
+	out := make([]RouteEntry, 0, len(*snap))
+	for ip, st := range *snap {
 		out = append(out, RouteEntry{
-			IP:        ip,
+			IP:        ip.String(),
 			BytesUp:   st.bytesUp.Load(),
 			BytesDown: st.bytesDown.Load(),
+			Drops:     st.pendingDrops.Load(),
 		})
 	}
-	m.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
 }
 
+// PendingDrops 返回全部 IP 因安装缓冲溢出丢弃的入站包总数。
+func (m *routeManager) PendingDrops() int64 { return m.dropped.Load() }
+
 // eligible 判断该地址是否可以安装 /32 回程路由。只接受公网单播 IPv4：
 // 中转机自身、隧道网段、私网/回环/组播一律排除——任何一条误装都可能把
 // 隧道流量或本机正常流量导进 TUN。
-func (m *routeManager) eligible(ip string) bool {
-	if ip == "" || ip == m.relayIP ||
-		ip == m.addressing.Gateway || ip == m.addressing.ClientIP {
+func (m *routeManager) eligible(ip netip.Addr) bool {
+	if !ip.IsValid() || !ip.Is4() {
 		return false
 	}
-	v4 := net.ParseIP(ip).To4()
-	if v4 == nil {
+	if ip == m.relayIP || ip == m.gateway || ip == m.clientIP {
 		return false
 	}
-	return !v4.IsLoopback() && !v4.IsPrivate() && !v4.IsMulticast() &&
-		!v4.IsLinkLocalUnicast() && !v4.IsUnspecified() && v4[0] != 255
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return false
+	}
+	return ip.As4()[0] != 255
+}
+
+// eligibleStr 是 eligible 的字符串入口（控制面推送的 IP 是字符串）。
+func (m *routeManager) eligibleStr(s string) bool {
+	ip, err := netip.ParseAddr(s)
+	if err != nil {
+		return false
+	}
+	return m.eligible(ip.Unmap())
+}
+
+// srcAddr4 / dstAddr4 从 IPv4 包头零分配取地址。
+func srcAddr4(pkt []byte) (netip.Addr, bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]}), true
+}
+
+func dstAddr4(pkt []byte) (netip.Addr, bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]}), true
 }
 
 // deliverInbound 记录一个玩家入站包（后端 → 玩家方向的回程路由由源 IP 决定），
 // 并保证该 IP 的回程路由就位。返回 true 表示调用方应立即把包写入 TUN；
 // 返回 false 表示包已被缓冲，路由装好后由安装器代写——绝不因单个新 IP 的
 // route.exe 阻塞其他玩家的包。
+//
+// 快路径（路由已就位，也就是绝大多数包）全程无锁无分配：查一次原子快照、
+// 写两个原子字段即可。
 func (m *routeManager) deliverInbound(pkt []byte) bool {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+	src, ok := srcAddr4(pkt)
+	if !ok {
 		return true
 	}
-	ip := net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15]).String()
-	st := m.ensure(ip)
+	now := time.Now()
+	st := m.lookup(src)
 	if st == nil {
-		// 地址不合格或超出条目上限：与旧实现一致，直接放行。
-		return true
+		// 未登记：慢路径（要建条目、重建索引、唤醒安装器）。
+		st = m.ensure(src, now)
+		if st == nil {
+			// 地址不合格或超出条目上限：与旧实现一致，直接放行。
+			return true
+		}
+	} else {
+		st.touch(now)
 	}
 	st.bytesDown.Add(int64(len(pkt)))
 	if !st.installing.Load() {
 		return true
 	}
 	// 慢路径要拿锁，必须双检：安装器可能正等着排空翻位。不双检的话，
-	// 「pump 判完 installing 又被安装器翻位」之间append 进去的包会被
+	// 「pump 判完 installing 又被安装器翻位」之间 append 进去的包会被
 	// 永远困在缓冲里（check-then-act 竞态）。
 	m.mu.Lock()
 	if !st.installing.Load() {
 		m.mu.Unlock()
 		return true
 	}
-	if len(st.pending) < installPendingCap {
-		st.pending = append(st.pending, pkt)
+	if len(st.pending) < installPendingCap && m.pendingBytes.Load()+int64(len(pkt)) <= pendingBytesMax {
+		// pkt 必须拷贝：调用方的解密缓冲会被下一个包覆盖，而这里要留到
+		// 安装完成之后才写出。
+		buf := append([]byte(nil), pkt...)
+		st.pending = append(st.pending, buf)
+		m.pendingBytes.Add(int64(len(buf)))
 		m.mu.Unlock()
 		return false
 	}
 	m.mu.Unlock()
-	m.logPendingFull(ip)
+	st.pendingDrops.Add(1)
+	m.dropped.Add(1)
+	m.logPendingFull(src)
 	return false
 }
 
 // logPendingFull 限频记录缓冲溢出丢弃（每 5 秒最多一条）。
-func (m *routeManager) logPendingFull(ip string) {
-	now := time.Now().Unix()
-	last := m.lastDropLog.Load()
-	if now-last < 5 && !m.lastDropLog.CompareAndSwap(last, now) {
+func (m *routeManager) logPendingFull(ip netip.Addr) {
+	if !throttleLog(&m.lastDropLog, 5) {
 		return
 	}
 	m.logf("[!] 回程路由安装缓冲已满，丢弃 %s 的入站包（安装失败重试中）", ip)
 }
 
+// throttleLog 是限频锚点：距上次记录不足 sec 秒则返回 false。
+//
+// 写成 `now-last < sec && !CAS(...)` 是错的：`now-last >= sec` 时短路会跳过
+// CAS，锚点永不更新，于是每次调用都打印——等于没有限频。
+func throttleLog(anchor *atomic.Int64, sec int64) bool {
+	now := time.Now().Unix()
+	last := anchor.Load()
+	if now-last < sec {
+		return false
+	}
+	return anchor.CompareAndSwap(last, now)
+}
+
 // countOutbound 记录一个后端发往玩家的回程包，按目的 IP 归属。
 //
-// 与 countInbound 不同，这里绝不安装路由：本函数在 TUN 读循环里对每个包调用，
+// 与 deliverInbound 不同，这里绝不安装路由：本函数在 TUN 读循环里对每个包调用，
 // 而安装要起 route.exe 子进程（几十毫秒），放在这条高频路径上会拖垮吞吐。
 // 回程包能走到 TUN，说明路由已经由入站方向装好了。
 func (m *routeManager) countOutbound(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+	dst, ok := dstAddr4(pkt)
+	if !ok {
 		return
 	}
-	ip := net.IPv4(pkt[16], pkt[17], pkt[18], pkt[19]).String()
-	m.mu.Lock()
-	st := m.states[ip]
-	m.mu.Unlock()
-	if st != nil {
+	if st := m.lookup(dst); st != nil {
 		st.bytesUp.Add(int64(len(pkt)))
 	}
 }
@@ -270,28 +398,24 @@ func (m *routeManager) countOutbound(pkt []byte) {
 // ⚠️ 登记不代表路由已就位——调用方必须以 installing 状态为准决定是直接写
 // TUN 还是缓冲等安装器代写（见 deliverInbound）。安装绝不在这里同步做：
 // route.exe 一次几十毫秒，同步执行会卡住隧道读循环上的所有玩家。
-func (m *routeManager) ensure(ip string) *routeState {
+func (m *routeManager) ensure(ip netip.Addr, now time.Time) *routeState {
 	if !m.eligible(ip) {
 		return nil
 	}
-	now := time.Now()
-
 	m.mu.Lock()
 	if st, ok := m.states[ip]; ok {
-		st.lastSeen = now
-		st.removing = false      // 又活跃了，取消可能已入队的删除
-		st.endedAt = time.Time{} // 服务端说会话结束了，但包还在来，撤销该结论
-		st.delFails = 0
 		m.mu.Unlock()
+		st.touch(now)
 		return st
 	}
 	if len(m.states) >= maxReturnRoutes {
 		m.mu.Unlock()
 		return nil
 	}
-	st := &routeState{lastSeen: now}
+	st := newRouteState(now)
 	st.installing.Store(true)
 	m.states[ip] = st
+	m.publish()
 	m.mu.Unlock()
 
 	m.wakeInstaller()
@@ -315,7 +439,7 @@ func (m *routeManager) installLoop() {
 // 测试也用它同步驱动安装器，不起真实 goroutine。
 func (m *routeManager) installDue() {
 	now := time.Now()
-	var due []string
+	var due []netip.Addr
 	m.mu.Lock()
 	for ip, st := range m.states {
 		// map 遍历顺序不稳定：先收集再排序，保证处理顺序确定。
@@ -327,7 +451,7 @@ func (m *routeManager) installDue() {
 	if len(due) == 0 {
 		return
 	}
-	sort.Strings(due)
+	sort.Slice(due, func(i, j int) bool { return due[i].Less(due[j]) })
 	for _, ip := range due {
 		select {
 		case <-m.stop:
@@ -352,22 +476,21 @@ func installBackoff(fails int) time.Duration {
 
 // installOne 尝试安装单个 IP 的回程路由，成功后按序代写缓冲的入站包。
 // 失败不删除条目（删了会让后续每包重演 route.exe），改走指数退避重试。
-func (m *routeManager) installOne(ip string) {
+func (m *routeManager) installOne(ip netip.Addr) {
 	m.mu.Lock()
 	st := m.states[ip]
+	m.mu.Unlock()
 	if st == nil || !st.installing.Load() {
-		m.mu.Unlock()
 		return
 	}
-	m.mu.Unlock()
 
-	if err := m.addRoute(ip, m.addressing.Gateway); err != nil {
+	if err := m.addRoute(ip.String(), m.gatewayStr); err != nil {
 		fails := 0
 		m.mu.Lock()
-		if st := m.states[ip]; st != nil {
-			st.addFails++
-			fails = st.addFails
-			st.nextTry = time.Now().Add(installBackoff(st.addFails))
+		if cur := m.states[ip]; cur != nil {
+			cur.addFails++
+			fails = cur.addFails
+			cur.nextTry = time.Now().Add(installBackoff(cur.addFails))
 		}
 		m.mu.Unlock()
 		// 安装失败至少让用户看到一次，持续失败按指数限频。
@@ -386,19 +509,20 @@ func (m *routeManager) installOne(ip string) {
 		// 安装执行期间条目被回收/清理：立刻撤销刚装上的路由。留着就是
 		// 一条没有状态条目的孤儿 /32——它会吸走该 IP 的全部回包且无人再管。
 		m.mu.Unlock()
-		if derr := m.delRoute(ip); derr != nil {
+		if derr := m.delRoute(ip.String()); derr != nil {
 			m.logf("[!] 孤儿回程路由撤销失败：%s（请手动执行 route delete %s）：%v", ip, ip, derr)
 		} else {
 			m.logf("[-] 已撤销孤儿回程路由：%s", ip)
 		}
 		return
 	}
-	// 安装成功。排空缓冲（含安装执行期间新缓冲的包）后才能翻 installed：
+	// 安装成功。排空缓冲（含安装执行期间新缓冲的包）后才能翻 installing：
 	// 翻位必须与「pending 取空」在锁内同批完成，与 deliverInbound 的锁内
 	// 双检配对，保证不丢不困。写 TUN 在锁外做，同 IP 的包序由逐批取出保持。
 	for {
 		pkts := st.pending
 		st.pending = nil
+		m.releasePending(pkts)
 		if len(pkts) == 0 {
 			st.installing.Store(false)
 			st.addFails = 0
@@ -420,6 +544,17 @@ func (m *routeManager) installOne(ip string) {
 	}
 }
 
+// releasePending 归还缓冲字节配额。调用方须持 m.mu。
+func (m *routeManager) releasePending(pkts [][]byte) {
+	var n int64
+	for _, p := range pkts {
+		n += int64(len(p))
+	}
+	if n > 0 {
+		m.pendingBytes.Add(-n)
+	}
+}
+
 // writeTunSafe 安装器代写缓冲包。写失败必须可见：静默丢包等于玩家收不到
 // 数据且无从排查，限频 5 秒避免刷屏。
 func (m *routeManager) writeTunSafe(p []byte) {
@@ -427,9 +562,7 @@ func (m *routeManager) writeTunSafe(p []byte) {
 		return
 	}
 	if err := m.writeTun(p); err != nil {
-		now := time.Now().Unix()
-		last := m.lastDropLog.Load()
-		if now-last < 5 && !m.lastDropLog.CompareAndSwap(last, now) {
+		if !throttleLog(&m.lastWriteLog, 5) {
 			return
 		}
 		m.logf("[!] 安装器代写入站包失败：%v", err)
@@ -444,8 +577,13 @@ func (m *routeManager) writeTunSafe(p []byte) {
 // IP 在列表里一闪而过，按列表删除会把正在进行的会话反复掐断。列表的作用只是
 // 「确认活跃」这一个正向语义。
 func (m *routeManager) sync(ips []string) {
-	for _, ip := range ips {
-		_ = m.ensure(ip)
+	now := time.Now()
+	for _, s := range ips {
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		_ = m.ensure(ip.Unmap(), now)
 	}
 	m.prune()
 }
@@ -460,14 +598,16 @@ func (m *routeManager) markEnded(ips []string) {
 	if len(ips) == 0 {
 		return
 	}
-	now := time.Now()
-	m.mu.Lock()
-	for _, ip := range ips {
-		if st := m.states[ip]; st != nil && st.endedAt.IsZero() {
-			st.endedAt = now
+	now := time.Now().UnixNano()
+	for _, s := range ips {
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		if st := m.lookup(ip.Unmap()); st != nil {
+			st.endedAt.CompareAndSwap(0, now)
 		}
 	}
-	m.mu.Unlock()
 	m.prune()
 }
 
@@ -491,26 +631,28 @@ func (m *routeManager) pruneLoop() {
 // prune 把已过保留期的路由排队删除。
 func (m *routeManager) prune() {
 	now := time.Now()
-	var stale []string
-	m.mu.Lock()
-	for ip, st := range m.states {
-		if st.removing || !st.expired(now) {
+	snap := m.index.Load()
+	if snap == nil {
+		return
+	}
+	var stale []netip.Addr
+	for ip, st := range *snap {
+		if st.removing.Load() || !st.expired(now) {
 			continue
 		}
-		st.removing = true
+		if !st.removing.CompareAndSwap(false, true) {
+			continue
+		}
 		stale = append(stale, ip)
 	}
-	m.mu.Unlock()
 
 	for _, ip := range stale {
 		select {
 		case m.removals <- ip:
 		default:
-			m.mu.Lock()
-			if st := m.states[ip]; st != nil {
-				st.removing = false // 队列满，下一轮再删
+			if st := m.lookup(ip); st != nil {
+				st.removing.Store(false) // 队列满，下一轮再删
 			}
-			m.mu.Unlock()
 		}
 	}
 }
@@ -536,24 +678,22 @@ func (m *routeManager) removeWorker() {
 // 的状态；而入站包（玩家 → 后端方向）不需要回程路由就能到，lastSeen 被持续刷新，
 // 条目永不过期，该玩家就永久收不到回包。表现正是「断开后有概率连不上，等几分钟
 // 才好」——几分钟就是玩家放弃重试后条目终于超时。
-func (m *routeManager) processRemoval(ip string) {
-	m.mu.Lock()
-	st := m.states[ip]
-	if st == nil || !st.removing {
-		m.mu.Unlock()
+func (m *routeManager) processRemoval(ip netip.Addr) {
+	st := m.lookup(ip)
+	if st == nil || !st.removing.Load() {
 		return // 入队后又活跃了，放弃删除
 	}
-	m.mu.Unlock()
 
-	err := m.delRoute(ip)
+	err := m.delRoute(ip.String())
 
 	m.mu.Lock()
 	st = m.states[ip]
-	fails := 0
-	// removing 被 ensure 复位，说明删除期间该 IP 又活跃了。
-	reactivated := st != nil && !st.removing
+	fails := int32(0)
+	// removing 被 touch 复位，说明删除期间该 IP 又活跃了。
+	reactivated := st != nil && !st.removing.Load()
 	var replay [][]byte // 需要立即补写的缓冲包（路由仍在系统里时）
 	rewake := false     // 需要交回安装器重装（路由已删、又活跃了）
+	removed := false
 	switch {
 	case reactivated:
 		// 保留条目。删除成功说明路由已不在系统里，交回异步安装器重装——
@@ -561,29 +701,36 @@ func (m *routeManager) processRemoval(ip string) {
 		// 一回的探测交互没有第二次机会）。删除失败说明路由本来就还在，
 		// 直接补写缓冲包即可，更不能记失败次数（记满会摘掉条目，而系统里
 		// 的路由仍在，成了没人管的残留）。
-		if st != nil {
-			if err == nil {
-				st.installing.Store(true)
-				st.nextTry = time.Time{}
-				rewake = true
-			} else {
-				st.installing.Store(false)
-				st.addFails = 0
-				replay = st.pending
-				st.pending = nil
-			}
+		if err == nil {
+			st.installing.Store(true)
+			st.nextTry = time.Time{}
+			rewake = true
+		} else {
+			st.installing.Store(false)
+			st.addFails = 0
+			replay = st.pending
+			st.pending = nil
+			m.releasePending(replay)
 		}
 	case err == nil:
+		if st != nil {
+			m.releasePending(st.pending)
+		}
 		delete(m.states, ip)
+		removed = true
 	case st == nil:
 	default:
-		st.delFails++
-		fails = st.delFails
+		fails = st.delFails.Add(1)
 		if fails >= routeDeleteTries {
+			m.releasePending(st.pending)
 			delete(m.states, ip)
+			removed = true
 		} else {
-			st.removing = false // 交回 prune，下一轮重试
+			st.removing.Store(false) // 交回 prune，下一轮重试
 		}
+	}
+	if removed {
+		m.publish()
 	}
 	m.mu.Unlock()
 
@@ -612,15 +759,17 @@ func (m *routeManager) processRemoval(ip string) {
 // cleanup 删除全部路由但保持管理器可用（重握手拿到同一地址时会继续复用）。
 func (m *routeManager) cleanup() {
 	m.mu.Lock()
-	ips := make([]string, 0, len(m.states))
-	for ip := range m.states {
+	ips := make([]netip.Addr, 0, len(m.states))
+	for ip, st := range m.states {
 		ips = append(ips, ip)
+		m.releasePending(st.pending)
 	}
-	m.states = make(map[string]*routeState)
+	m.states = make(map[netip.Addr]*routeState)
+	m.publish()
 	m.mu.Unlock()
 
 	for _, ip := range ips {
-		if err := m.delRoute(ip); err != nil {
+		if err := m.delRoute(ip.String()); err != nil {
 			m.logf("[!] 回程路由删除失败：%s（如该地址无法直连，请手动执行 route delete %s）：%v", ip, ip, err)
 		}
 	}
