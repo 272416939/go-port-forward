@@ -27,7 +27,8 @@ const ui = {
 };
 
 const STATE_TEXT = {
-  idle: '未连接', connecting: '正在连接…', connected: '已连接', error: '连接失败',
+  idle: '未连接', connecting: '正在连接…', connected: '已连接',
+  disconnecting: '正在断开…', error: '连接失败',
 };
 
 // dirty 为真时不要用服务端返回的值覆盖用户正在输入的内容。
@@ -208,12 +209,14 @@ function render(s) {
   // 已保存过凭据时，密钥框留空即表示「沿用已保存的」，不回显密钥本身。
   if (s.has_cred && !ui.secret.value) ui.secret.placeholder = '已保存（留空即沿用）';
 
-  const running = s.state === 'connected' || s.state === 'connecting';
+  // disconnecting 也要挡住「连接」：清理要逐条 route.exe 删回程路由，玩家 IP
+  // 多时好几秒，这期间发起新连接会跟清理收尾抢防火墙规则与路由表。
+  const running = s.state === 'connected' || s.state === 'connecting' || s.state === 'disconnecting';
   ui.connect.hidden = running;
   ui.disconnect.hidden = !running;
   for (const input of [ui.code, ui.addr, ui.codeId, ui.secret]) input.disabled = running;
   ui.connect.disabled = busy || !s.elevated;
-  ui.disconnect.disabled = busy;
+  ui.disconnect.disabled = busy || s.state === 'disconnecting';
 
   ui.identity.textContent = s.code_id ? s.code_id : '—';
   ui.device.textContent = s.device || '—';

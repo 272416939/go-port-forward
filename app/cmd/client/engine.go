@@ -25,10 +25,18 @@ import (
 type State string
 
 const (
-	StateIdle       State = "idle"       // 未连接
-	StateConnecting State = "connecting" // 正在握手
-	StateConnected  State = "connected"  // 隧道已建立
-	StateError      State = "error"      // 上一次尝试失败
+	StateIdle          State = "idle"          // 未连接
+	StateConnecting    State = "connecting"    // 正在握手
+	StateConnected     State = "connected"     // 隧道已建立
+	StateDisconnecting State = "disconnecting" // 正在断开（逐条删回程路由，可能要数秒）
+	StateError         State = "error"         // 上一次尝试失败
+)
+
+// Start/Stop 依赖的两个环境探测抽成变量，让状态机生命周期可以脱离管理员
+// 权限与本机指纹被测试覆盖（语义与 routeManager 的 addRoute/delRoute 注入相同）。
+var (
+	isElevatedFn        = syssetup.IsElevated
+	deviceFingerprintFn = deviceFingerprint
 )
 
 // tunnelAddressing 是服务端在握手应答里下发的隧道内地址。
@@ -227,12 +235,13 @@ func (e *Engine) setTerminal(errMsg string) {
 	e.mu.Unlock()
 }
 
-// Start 建立隧道。已在运行时返回错误而不是悄悄重连——UI 应先调 Stop。
+// Start 建立隧道。已在运行或正在断开时返回错误而不是悄悄重连——UI 应先等
+// 断开完成。
 func (e *Engine) Start(conf clientConfig) error {
-	if !syssetup.IsElevated() {
+	if !isElevatedFn() {
 		return fmt.Errorf("需要管理员权限：虚拟网卡与路由无法配置")
 	}
-	if _, err := deviceFingerprint(); err != nil {
+	if _, err := deviceFingerprintFn(); err != nil {
 		// 设备指纹是握手的必要输入（服务端要靠它绑定客户端）。取不到就直接
 		// 报错，而不是带一个零值指纹去握手——那会绑定出一个所有机器都相同的
 		// "空指纹"，把设备绑定变成一个假功能。
@@ -250,9 +259,17 @@ func (e *Engine) Start(conf clientConfig) error {
 	}
 
 	e.mu.Lock()
-	if e.cancel != nil {
+	switch {
+	case e.cancel != nil:
 		e.mu.Unlock()
 		return fmt.Errorf("隧道已在运行，请先断开")
+	case e.done != nil:
+		// 上一次连接正在清理（逐条 route.exe 删回程路由，可能要数秒）。
+		// 这期间放行 Start 会让新连接与旧收尾并发：旧收尾的 cleanupSystem
+		// 会删掉新连接刚装的防火墙规则与静态邻居，症状是「显示已连接但
+		// 玩家进不来」。必须拒绝到清理完成。
+		e.mu.Unlock()
+		return fmt.Errorf("正在断开连接，请稍候再试")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -269,11 +286,21 @@ func (e *Engine) Start(conf clientConfig) error {
 	go func() {
 		defer close(done)
 		e.run(ctx, conf)
+		// run 自行退出（终态拒绝、创建网卡失败等，不经 Stop）时也必须清掉
+		// 句柄，否则 Start 从此永远报「隧道已在运行」——而错误态下界面没有
+		// 断开按钮可清，客户端只能重启（2026-09-03 用户实测：断开后点连接
+		// 无反应）。走到这里时 e.run 内部的清理（路由、防火墙）已全部完成，
+		// 所以「句柄清空」即「系统已干净」。身份比对防止误清新一轮 Start
+		// 刚装上的句柄。
+		e.mu.Lock()
+		if e.done == done {
+			e.cancel, e.done = nil, nil
+		}
+		e.mu.Unlock()
 	}()
 	return nil
 }
 
-// Stop 断开隧道并等待资源释放（路由、防火墙规则都会被清理）。
 // Stop 断开隧道并等待资源释放（路由、防火墙规则都会被清理）。
 //
 // cancel() **不能**解除阻塞读：pump 阻塞在 udp.Read / dev.ReadPacket 上，ctx
@@ -284,25 +311,42 @@ func (e *Engine) Start(conf clientConfig) error {
 // 这个顺序对「退出程序」是关键：窗口消失后进程还要跑完路由清理，若停隧道
 // 要等 10 秒，用户以为已退出、复制新 exe 被占用，杀掉进程就会留下残留路由
 //（表现为：升级重启后老玩家全连不上）。
+//
+// done 在整个清理期间保持非 nil（由 run 的包装 goroutine 退出时清）：这样
+// 「断开进行中」再调一次 Stop（退出按钮、托盘退出）也会等待同一个 done，
+// 而不是看到 cancel 已被取走就当无事发生直接返回——那会把正在执行的
+// route.exe 删除拦腰截断，留下吸走玩家全部回包的残留 /32（2026-09-03 用户
+// 实测：断开后退出，路由没清干净，玩家进不来）。
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	cancel, done := e.cancel, e.done
-	e.cancel, e.done = nil, nil
+	e.cancel = nil
 	e.mu.Unlock()
 
-	if cancel == nil {
+	if done == nil {
 		return
 	}
-	cancel()
-	// 关闭阻塞读的 fd：UDP 隧道读、TUN 读全部立即带错返回。
-	if c := e.udp.Swap(nil); c != nil {
-		_ = c.Close()
-	}
-	if d := e.dev.Swap(nil); d != nil {
-		_ = d.Close()
+	if cancel != nil {
+		// 置 disconnecting 让界面立刻有反馈：清理要逐条 route.exe，玩家 IP
+		// 多时好几秒，此前这期间界面一直停在「已连接」，用户以为断开没生效。
+		e.setState(StateDisconnecting, "")
+		cancel()
+		// 关闭阻塞读的 fd：UDP 隧道读、TUN 读全部立即带错返回。
+		if c := e.udp.Swap(nil); c != nil {
+			_ = c.Close()
+		}
+		if d := e.dev.Swap(nil); d != nil {
+			_ = d.Close()
+		}
 	}
 	<-done // run 的清理（回程路由删除）同步完成后才返回
-	e.setState(StateIdle, "")
-	e.addr.Store(nil)
-	e.logf("已断开连接。")
+	// 只有没有新一轮 Start 插进来时才收尾状态；否则新连接的状态不能被覆盖。
+	e.mu.Lock()
+	fresh := e.cancel == nil
+	e.mu.Unlock()
+	if fresh {
+		e.setState(StateIdle, "")
+		e.addr.Store(nil)
+		e.logf("已断开连接。")
+	}
 }
