@@ -184,6 +184,9 @@ type routeManager struct {
 	// 情况下被测试覆盖。
 	addRoute func(dest, gateway string) error
 	delRoute func(dest string) error
+	// listStaleRoutes 列出仍以隧道网关为下一跳的 /32 路由（启动清扫用）。
+	// 抽成字段同上：测试注入替身，避免真的执行 route print。
+	listStaleRoutes func(gateway string) ([]string, error)
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -206,13 +209,50 @@ func newRouteManager(relayIP string, addressing tunnelAddressing,
 		logf:        logf,
 		addRoute:    syssetup.AddRoute,
 		delRoute:    syssetup.RemoveRoute,
+		listStaleRoutes: syssetup.ListRoutesViaGateway,
 		stop:        make(chan struct{}),
 	}
 	m.publish()
+	// 清扫上一轮残留的 /32 路由。必须**同步**且在任何 ensure 之前完成：
+	// 清扫与安装器并发时，可能删掉安装器刚装好的路由。
+	// 触发场景是客户端升级/崩溃时进程被强杀——cleanup 没机会跑，上一轮的
+	// /32 路由留在系统里吸走该 IP 的全部回包，而新的管理器对它一无所知：
+	// 活跃的玩家靠 route add 幂等收编还能救，再也不会回来的玩家就没人管了
+	//（他们不经代理直连源站也收不到回包）。
+	m.sweepStaleRoutes()
 	go m.removeWorker()
 	go m.pruneLoop()
 	go m.installLoop()
 	return m
+}
+
+// sweepStaleRoutes 删除系统里仍指向隧道网关的 /32 路由。
+//
+// 只在管理器创建时调用一次：此刻 states 为空、安装器未启动、pump 未开始
+// （会话在握手成功后才 set），不存在与安装器/回收器的竞争。
+// 列举失败不致命（非管理员/解析失败）——route add 的幂等收编是兜底防线。
+func (m *routeManager) sweepStaleRoutes() {
+	if m.listStaleRoutes == nil {
+		return
+	}
+	dests, err := m.listStaleRoutes(m.gatewayStr)
+	if err != nil {
+		m.logf("[!] 清扫残留回程路由失败（不影响连接，route add 幂等可收编）：%v", err)
+		return
+	}
+	if len(dests) == 0 {
+		return
+	}
+	removed := 0
+	for _, dest := range dests {
+		if err := m.delRoute(dest); err != nil {
+			m.logf("[!] 清扫残留回程路由失败：%s（请手动执行 route delete %s）：%v", dest, dest, err)
+			continue
+		}
+		removed++
+	}
+	// 状态变化才打 info：残留条数就是「上次退出是否干净」的证据。
+	m.logf("清扫了 %d 条上次运行残留的回程路由（%d 条失败，请看上方日志）。", removed, len(dests)-removed)
 }
 
 // publish 重建只读索引快照。调用方须持 m.mu。

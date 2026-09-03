@@ -108,6 +108,11 @@ func testRouteManager(t *testing.T, f *fakeRoutes) (*routeManager, *tunRecorder)
 	return m, w
 }
 
+// staleRouteLister 造一个残留路由列表替身（newRouteManager 之外手动装配）。
+func staleRouteLister(dests ...string) func(string) ([]string, error) {
+	return func(string) ([]string, error) { return dests, nil }
+}
+
 // ra 把点分十进制转成数据面用的键形态。
 func ra(s string) netip.Addr {
 	a, _ := netip.ParseAddr(s)
@@ -864,5 +869,97 @@ func BenchmarkCountOutbound(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		m.countOutbound(pkt)
+	}
+}
+
+// 启动清扫：上一轮被强杀留下的 /32 路由必须在任何 ensure 之前删掉。
+// 不清扫的话，这些路由吸走该 IP 的全部回包且无人再管——再也不会回来的玩家
+// 之后不经代理直连源站也收不到回包。
+func TestSweepRemovesStaleRoutesAtStartup(t *testing.T) {
+	f := newFakeRoutes()
+	m, _ := testRouteManager(t, f)
+	swept := []string{}
+	m.listStaleRoutes = func(gateway string) ([]string, error) {
+		if gateway != "10.66.0.1" {
+			t.Errorf("清扫用了错误的网关 %q", gateway)
+		}
+		return []string{"111.29.236.135", "8.8.8.8"}, nil
+	}
+	m.delRoute = func(dest string) error {
+		swept = append(swept, dest)
+		return f.del(dest)
+	}
+
+	m.sweepStaleRoutes()
+
+	if len(swept) != 2 || swept[0] != "111.29.236.135" || swept[1] != "8.8.8.8" {
+		t.Fatalf("清扫目标 = %v", swept)
+	}
+	if len(m.states) != 0 {
+		t.Fatal("清扫不得创建任何路由状态条目")
+	}
+	// 清扫后的 ensure 必须照常工作（路由已不在系统里，重新安装是正确行为）。
+	ensureIP(m, "111.29.236.135")
+	drainInstalls(m)
+	if !f.has("111.29.236.135") {
+		t.Fatal("清扫后同 IP 的路由应能重新安装")
+	}
+}
+
+// 清扫是防线的第一道，route add 的幂等收编是兜底：列举失败（权限/解析）时
+// 清扫放弃但不能 panic，后续安装照常。
+func TestSweepToleratesListingFailure(t *testing.T) {
+	f := newFakeRoutes()
+	m, _ := testRouteManager(t, f)
+	calls := 0
+	m.listStaleRoutes = func(string) ([]string, error) {
+		calls++
+		return nil, fmt.Errorf("模拟 route print 失败")
+	}
+	m.delRoute = func(dest string) error {
+		t.Fatal("列举失败时不得尝试删除")
+		return nil
+	}
+
+	m.sweepStaleRoutes()
+	if calls != 1 {
+		t.Fatalf("列举次数 = %d", calls)
+	}
+}
+
+// 删除失败的单条残留不得阻断其余清扫。
+func TestSweepContinuesOnSingleDeleteFailure(t *testing.T) {
+	f := newFakeRoutes()
+	// 先把两条残留「装进」替身系统：f.has 跟踪的就是这份状态。
+	f.add("111.29.236.135", "10.66.0.1")
+	f.add("8.8.8.8", "10.66.0.1")
+	f.failDel["8.8.8.8"] = 99
+	m, _ := testRouteManager(t, f)
+	m.listStaleRoutes = staleRouteLister("111.29.236.135", "8.8.8.8")
+
+	m.sweepStaleRoutes()
+
+	if !f.has("8.8.8.8") {
+		t.Fatal("删除失败的残留应仍在系统里（替身状态）")
+	}
+	if f.has("111.29.236.135") {
+		t.Fatal("单条失败不应阻断其余清扫")
+	}
+}
+
+// 清扫时机约束：newRouteManager 里是同步调用，此用例锁「清扫不创建状态、
+// 不唤醒安装器」——它只删系统里的东西，与 states 完全解耦。
+func TestSweepDoesNotTouchManagerState(t *testing.T) {
+	f := newFakeRoutes()
+	m, w := testRouteManager(t, f)
+	m.listStaleRoutes = staleRouteLister("1.2.3.4")
+
+	m.sweepStaleRoutes()
+
+	if w.count() != 0 {
+		t.Fatal("清扫不得经 writeTun 代写任何东西")
+	}
+	if m.pendingBytes.Load() != 0 || m.PendingDrops() != 0 {
+		t.Fatal("清扫不得影响缓冲状态")
 	}
 }

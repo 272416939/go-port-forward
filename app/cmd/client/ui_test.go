@@ -119,6 +119,7 @@ func TestUIServerServesAndGuards(t *testing.T) {
 func TestRouteEligibility(t *testing.T) {
 	relay := "203.0.113.9"
 	m := newRouteManager(relay, testAddressing, nil, func(string, ...any) {})
+	m.listStaleRoutes = func(string) ([]string, error) { return nil, nil } // 不碰真实路由表
 
 	rejected := []string{
 		relay,                    // 中转机自己：会形成隧道环路
@@ -162,6 +163,7 @@ func ipv4(src, dst [4]byte, total int) []byte {
 // 会让两列数字互换，而界面上看起来一切正常。
 func TestPerIPByteAttribution(t *testing.T) {
 	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
+	m.listStaleRoutes = func(string) ([]string, error) { return nil, nil } // 不碰真实路由表
 
 	// 预置两条状态，避免 ensure() 真的去跑 route.exe 改动系统路由表。
 	// installing 默认为 false，所以 deliverInbound 走快路径、不进缓冲。
@@ -206,6 +208,7 @@ func TestPerIPByteAttribution(t *testing.T) {
 // route.exe 子进程（几十毫秒），会拖垮吞吐。
 func TestCountOutboundNeverInstallsRoute(t *testing.T) {
 	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
+	m.listStaleRoutes = func(string) ([]string, error) { return nil, nil } // 不碰真实路由表
 	m.countOutbound(ipv4([4]byte{10, 66, 0, 2}, [4]byte{8, 8, 8, 8}, 100))
 	if n := stateCount(m); n != 0 {
 		t.Fatalf("countOutbound 新建了 %d 条状态，期望 0（不得触发 route.exe）", n)
@@ -215,6 +218,7 @@ func TestCountOutboundNeverInstallsRoute(t *testing.T) {
 // 非 IPv4 或过短的包不能让计数逻辑 panic（隧道里出现畸形包不该拖垮客户端）。
 func TestCountIgnoresMalformedPackets(t *testing.T) {
 	m := newRouteManager("203.0.113.9", testAddressing, nil, func(string, ...any) {})
+	m.listStaleRoutes = func(string) ([]string, error) { return nil, nil } // 不碰真实路由表
 	for _, pkt := range [][]byte{
 		nil,
 		{},
