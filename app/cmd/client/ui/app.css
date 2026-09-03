@@ -66,10 +66,12 @@ h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .2px; }
   border-radius: 999px; background: var(--panel-2); color: var(--text);
   font-size: 11.5px; text-align: center;
 }
-/* 链路质量徽章：档位由丢包率决定（1% 是游戏体感的分界）。 */
-.count[data-level="ok"] { color: var(--ok); }
-.count[data-level="warn"] { color: var(--warn); }
-.count[data-level="bad"] { color: var(--err); }
+/* 链路质量徽章：五档由丢包率决定（极好 0 / 高 <1% / 中 1~3% / 差 3~10% / 极差 ≥10%）。 */
+.count[data-level="best"] { color: var(--ok); }
+.count[data-level="good"] { color: #8fd460; }
+.count[data-level="mid"] { color: var(--warn); }
+.count[data-level="poor"] { color: #f0883e; }
+.count[data-level="worst"] { color: var(--err); }
 
 /* 表单 */
 .field { display: block; }

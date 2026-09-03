@@ -124,12 +124,16 @@ function fmtMS(ms) {
   return (ms < 1 ? ms.toFixed(2) : ms.toFixed(1)) + ' ms';
 }
 
-// 丢包率的档位：1% 是游戏体感的分界（60pps 下 1% ≈ 每秒卡 0.6 次）。
+// 丢包率的五档（与面板口径一致）：
+//   极好 0 | 高 <1% | 中 1~3% | 差 3~10% | 极差 ≥10%
+// 1% 是游戏体感的分界（60pps 下 1% ≈ 每秒卡 0.6 次），3% 起明显卡顿，
+// 10% 基本不可用。
 function lossLevel(ppm) {
-  if (ppm >= 30000) return { cls: 'bad', text: '严重' };
-  if (ppm >= 10000) return { cls: 'warn', text: '偏高' };
-  if (ppm > 0) return { cls: 'ok', text: '轻微' };
-  return { cls: 'ok', text: '无' };
+  if (!ppm) return { cls: 'best', text: '极好' };
+  if (ppm < 10000) return { cls: 'good', text: '高' };
+  if (ppm < 30000) return { cls: 'mid', text: '中' };
+  if (ppm < 100000) return { cls: 'poor', text: '差' };
+  return { cls: 'worst', text: '极差' };
 }
 
 function renderLink(s) {

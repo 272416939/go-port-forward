@@ -1683,8 +1683,9 @@
                         <div class="font-monospace" x-text="p.tun_ip"></div>
                         <div class="text-muted font-monospace" x-text="p.addr + (p.mtu ? ' · MTU ' + p.mtu : '')"></div>
                       </td>
-                      <td><span class="badge rounded-pill" :class="lossBadge(p.loss_ppm)"
-                            x-text="fmtPPM(p.loss_ppm)"></span></td>
+                      <td class="text-nowrap"><span class="badge rounded-pill" :class="lossTier(p.loss_ppm).cls"
+                            x-text="lossTier(p.loss_ppm).text"></span>
+                        <span class="small ms-1" x-text="fmtPPM(p.loss_ppm)"></span></td>
                       <td class="small" x-text="fmtPPM(p.reorder_ppm)"></td>
                       <td class="small" x-text="fmtMS(p.jitter_ms)"></td>
                       <td class="small" x-text="fmtMS(p.rtt_ms)"></td>
@@ -3066,11 +3067,14 @@ function portForwardApp() {
       if (!ms) return '—'
       return (ms < 1 ? ms.toFixed(2) : ms.toFixed(1)) + ' ms'
     },
-    lossBadge(ppm) {
-      if (ppm >= 30000) return 'text-bg-danger'
-      if (ppm >= 10000) return 'text-bg-warning'
-      if (ppm > 0) return 'text-bg-success'
-      return 'text-bg-secondary'
+    // lossTier 丢包率五档（与 pf-client 口径一致）：
+    // 极好 0 / 高 <1% / 中 1~3% / 差 3~10% / 极差 ≥10%。1% 是游戏体感的分界。
+    lossTier(ppm) {
+      if (!ppm) return { text: '极好', cls: 'text-bg-success' }
+      if (ppm < 10000) return { text: '高', cls: 'text-bg-info' }
+      if (ppm < 30000) return { text: '中', cls: 'text-bg-warning' }
+      if (ppm < 100000) return { text: '差', cls: 'loss-tier-poor' }
+      return { text: '极差', cls: 'text-bg-danger' }
     },
 
     async loadConnLogs(page = 0) {
