@@ -156,6 +156,7 @@ type Server struct {
 	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
 	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
 	lastOverMTU   atomic.Int64 // 出向包超出隧道 MTU 的限频锚点
+	lastPortReuse atomic.Int64 // 同源端口被另一访问码复用的告警限频锚点
 
 	// kernelDrops 是内核 UDP 收缓冲溢出的累计丢包数（/proc/net/udp）。
 	// 应用层对这类丢包完全无感——玩家进服的下行突发最容易打穿默认缓冲，
@@ -756,6 +757,17 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from netip.AddrPo
 	if herr != nil {
 		s.logAuthFail(from, "握手认证失败 | handshake authentication failed", ident.UserName)
 		return
+	}
+
+	// 同一来源端口已被另一访问码的在线会话占用：同网多台客户端 + NAT 端口
+	// 复用/重映射的强信号（该端口上旧会话的下行会串到新机器、被其客户端
+	// 排空；旧客户端收不到应答会自行重握手换端口，无需服务端干预）。只告警
+	// 不动作——这是排障时一锤定音的日志锚点（2026-09-04 多台同网实测）。
+	if other := s.peers.byAddress(addrPortOf(udpAddrOf(from))); other != nil && other.codeID != ident.CodeID {
+		if throttle(&s.lastPortReuse, 10) {
+			logger.S.Warnw("同一来源地址已被另一访问码的会话占用（同网多台客户端 + NAT 端口复用的典型信号）",
+				"addr", from, "占用会话", other.codeID, "新握手", ident.CodeName)
+		}
 	}
 
 	reject := func(reason tunnel.RejectReason) {

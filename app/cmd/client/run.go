@@ -364,6 +364,8 @@ func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
 	// 8 次尝试共用的「残留包已忽略」日志锚点：残留包在握手期间可能持续到达
 	// （服务端旧会话的心跳 5 秒一个），只提示一次，别刷屏。
 	staleLogged := false
+	// 「外来应答已忽略」日志锚点：同网另一台客户端同时握手时其 Accept 串入。
+	foreignLogged := false
 attemptLoop:
 	for attempt := 1; attempt <= handshakeTries; attempt++ {
 		if ctx.Err() != nil {
@@ -376,13 +378,13 @@ attemptLoop:
 		if _, err := udp.Write(hello.Marshal()); err != nil {
 			return nil, none, err
 		}
-		// 同一个 1.5 秒窗口内排空非应答包，只认 Accept 与 Reject：
-		// 断开后服务端的旧会话在 janitor 回收前（最长 3 分钟）仍会向本地址发
-		// 心跳与路由推送，而客户端快速重连时 NAT（EIM 映射）与 OS 都可能复用
-		// 刚释放的源端口——残留包就这样落进握手 socket 的接收队列。它们不是
-		// 应答，忽略后继续等；此前它们会掉进 Accept 解析失败，被误报成
-		// 「接入码可能已失效，请在面板重新获取」，把用户引去重置接入码
-		//（2026-09-03 用户实测：反复断开/连接后握手必报接入码失效）。
+			// 同一个 1.5 秒窗口内排空非应答包，只认 Accept 与 Reject。
+			// 两类必须排空的包：① 上一轮会话的残留（心跳/路由推送，2026-09-03
+			// 用户实测）；② 同网另一台客户端同时握手时串入的 Accept（NAT 端口
+			// 复用/重映射，2026-09-04 多台同网实测）。②此前掉进 Accept 验签
+			// 失败被误报成「接入码可能已失效」——但为本次握手签发的 Accept
+			// 数学上必然验签通过（同一密钥 + 同一临时公钥），验签失败只可能
+			// 是串线或损坏，忽略后继续等本次自己的应答即可。
 		deadline := time.Now().Add(1500 * time.Millisecond)
 		for {
 			_ = udp.SetReadDeadline(deadline)
@@ -405,9 +407,15 @@ attemptLoop:
 				accept, aerr := tunnel.ParseServerAccept(secret, buf[:n], hello.Eph)
 				if aerr != nil {
 					if errors.Is(aerr, tunnel.ErrOldVersion) {
+						// v3 形态的 Accept 只可能来自本机所连的中转机
+						//（connected socket 只收配置地址的包），版本问题立即定性
 						return nil, none, fmt.Errorf("中转机的服务端版本过旧（隧道协议已升级），请让管理员升级服务端后重试")
 					}
-					return nil, none, fmt.Errorf("%v（接入码可能已失效，请在面板重新获取）", aerr)
+					if !foreignLogged {
+						foreignLogged = true
+						e.logf("收到不属于本次握手的应答包（len=%d），已忽略——同一网络下若有多台客户端正在同时握手，这是它们的应答串入 (%d/%d)…", n, attempt, handshakeTries)
+					}
+					continue
 				}
 				_ = udp.SetReadDeadline(time.Time{})
 				shared := tunnel.ECDHShared(&accept.Eph, priv)
@@ -448,7 +456,7 @@ attemptLoop:
 		}
 		return nil, none, fmt.Errorf("隧道协议版本不匹配：中转机服务端与本客户端的协议版本不一致，请确认两端都已升级到配套版本（会自动重试）")
 	}
-	return nil, none, fmt.Errorf("服务端无应答（请检查地址、端口与中转机防火墙）")
+	return nil, none, fmt.Errorf("服务端无应答或应答始终无法通过校验（请检查接入码是否有效、地址/端口与中转机防火墙；若同一网络下有多台机器同时运行本客户端，可能是握手应答串线——重启路由器或错开重连时间后重试）")
 }
 
 // probeLegacyVersion 发一条 v3 格式的握手包并按应答判定对端版本。
