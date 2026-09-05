@@ -66,8 +66,14 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	_ = udp.SetReadBuffer(4 << 20)
 	_ = udp.SetWriteBuffer(4 << 20)
 	e.udp.Store(udp)
-	defer e.udp.Store(nil)
-	defer udp.Close()
+	defer func() {
+		// 关停可能来自 Stop（已 Swap 并关闭）或 run 自退，Swap 保证恰好关一次；
+		// 握手失败后的端口轮换会更换 e.udp 持有的 socket，这里关的是「当前」
+		// 那一个，不会漏。
+		if c := e.udp.Swap(nil); c != nil {
+			_ = c.Close()
+		}
+	}()
 
 	// 网卡按协议上限创建；服务端在握手应答里下发实际 MTU，若更小则在
 	// applyAddressing 之后下调（只能往下调，网卡缓冲不必重建）。
@@ -83,8 +89,8 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	// 网卡就绪前 TUN 上不会有流量，出向泵起得早一点无害；它自己会在
 	// sess 或路由管理器尚未就绪时丢包。
 	var rmHolder atomic.Pointer[routeManager]
-	go e.pumpTunToTunnel(ctx, udp, dev, &rmHolder)
-	go e.heartbeat(ctx, udp)
+	go e.pumpTunToTunnel(ctx, dev, &rmHolder)
+	go e.heartbeat(ctx)
 
 	// configured 记录已按下发地址配好系统。重握手时正常拿到同一个地址
 	//（隧道地址持久绑定用户），只有真的变了才重配。
@@ -129,6 +135,18 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 			}
 			e.setState(StateError, herr.Error())
 			e.logf("握手失败：%v（3 秒后重试）", herr)
+			// 整轮握手失败后更换本地端口：同网多台客户端 + NAT 端口复用/串线
+			// 时（2026-09-04 同网多机实测），换一个本地端口等于换一条 NAT 映射，
+			// 自动逃离串线状态——等价于把「重启路由器/客户端」变成每轮自动动作。
+			// 新 socket 先拨成功再关旧的；拨号失败沿用旧 socket 下轮再试。
+			if nu, derr := net.DialUDP("udp", nil, serverAddr); derr == nil {
+				_ = nu.SetReadBuffer(4 << 20)
+				_ = nu.SetWriteBuffer(4 << 20)
+				_ = udp.Close()
+				udp = nu
+				e.udp.Store(nu)
+				e.logf("已更换本地端口重试（自动规避同网 NAT 端口串线）。")
+			}
 			if sleepCtx(ctx, 3*time.Second) != nil {
 				break
 			}
@@ -214,7 +232,13 @@ func (e *Engine) applyMTU(dev *tunnet.Device, mtu int) {
 //
 // 零分配（OPT-3）：读缓冲与封装缓冲各一块，全生命周期复用；封装直接写进
 // 输出缓冲，不再每包 make。
-func (e *Engine) pumpTunToTunnel(ctx context.Context, udp *net.UDPConn,
+//
+// socket 从 e.udp 逐包读取（原子读）：握手整轮失败后的端口轮换会更换 socket，
+// 泵是常驻 goroutine（TUN 阻塞读无法安全重启），必须每包拿「当前」socket。
+// 写失败不再退出——轮换窗口的关闭竞态、NAT 重拨的瞬态 ICMP 都只是丢一个包，
+// 永久退出会把出向方向杀死到进程重启；持续失败由限频告警暴露，会话死亡由
+// 双向泵（e.pump）的读循环另行检测并回到重握手。
+func (e *Engine) pumpTunToTunnel(ctx context.Context,
 	dev *tunnet.Device, rmHolder *atomic.Pointer[routeManager]) {
 	buf := make([]byte, dev.ReadBufSize())
 	out := make([]byte, 0, tunnel.MaxPacket+tunnel.NonceSize)
@@ -240,15 +264,21 @@ func (e *Engine) pumpTunToTunnel(ctx context.Context, udp *net.UDPConn,
 		e.statTunToTunnel.Add(1)
 		e.bytesUp.Add(int64(n))
 		rm.countOutbound(pkt)
+		c := e.udp.Load()
+		if c == nil {
+			return // run 已退出（Stop 或自退），泵随之结束
+		}
 		wire, extra := sess.SealDataFEC(out[:0], pkt)
-		if _, werr := udp.Write(wire); werr != nil {
-			return
+		if _, werr := c.Write(wire); werr != nil {
+			e.logUDPWriteErr(werr)
+			continue
 		}
 		if extra != nil {
 			// 纠错校验包 / 冗余副本必须是独立的数据报：合并进同一个包等于
 			// 让校验与数据同生共死，一次丢包同时带走两者。
-			if _, werr := udp.Write(extra); werr != nil {
-				return
+			if _, werr := c.Write(extra); werr != nil {
+				e.logUDPWriteErr(werr)
+				continue
 			}
 		}
 	}
@@ -260,7 +290,7 @@ func (e *Engine) pumpTunToTunnel(ctx context.Context, udp *net.UDPConn,
 // 长度。收不到回显说明这个尺寸过不了链路（封装后被分片且丢了片），据此下调
 // 本机 MTU。固定 MTU 在 PPPoE(1492)/4G 这类链路上会贴上限，而分片丢失是整包
 // 全损——FEC 也救不回来（它看不到分片）。
-func (e *Engine) heartbeat(ctx context.Context, udp *net.UDPConn) {
+func (e *Engine) heartbeat(ctx context.Context) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	// 探测包的明文与密文同时占用这块缓冲（明文借尾部组装），按两倍 MTU 备量。
@@ -274,12 +304,26 @@ func (e *Engine) heartbeat(ctx context.Context, udp *net.UDPConn) {
 			if sess == nil {
 				continue
 			}
-			e.probeSentAt.Store(time.Now().UnixNano())
-			if _, err := udp.Write(sess.SealPing(buf[:0], 0, 0)); err != nil {
+			c := e.udp.Load() // 端口轮换后跟随当前 socket（见 pumpTunToTunnel 注释）
+			if c == nil {
 				continue
 			}
-			e.maybeProbeMTU(udp, sess, buf)
+			e.probeSentAt.Store(time.Now().UnixNano())
+			if _, err := c.Write(sess.SealPing(buf[:0], 0, 0)); err != nil {
+				continue
+			}
+			e.maybeProbeMTU(c, sess, buf)
 		}
+	}
+}
+
+// logUDPWriteErr 按铁律的「先判时间 → 时间够了才 CAS」三步限频记录写隧道
+// socket 失败（5 秒一条），绝不静默也绝不刷屏。
+func (e *Engine) logUDPWriteErr(werr error) {
+	nowUnix := time.Now().Unix()
+	last := e.lastUDPWriteErr.Load()
+	if nowUnix-last >= 5 && e.lastUDPWriteErr.CompareAndSwap(last, nowUnix) {
+		e.logf("[!] 发往隧道的数据包发送失败（丢包，链路可能正在切换）：%v", werr)
 	}
 }
 

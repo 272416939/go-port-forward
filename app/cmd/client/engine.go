@@ -79,6 +79,7 @@ type Engine struct {
 	bytesUp         atomic.Int64 // 玩家 → 后端 累计字节
 	bytesDown       atomic.Int64 // 后端 → 玩家 累计字节
 	lastWriteErr    atomic.Int64 // 写 TUN 失败日志限频锚点（Unix 秒）
+	lastUDPWriteErr atomic.Int64 // 写隧道 socket 失败日志限频锚点（Unix 秒）
 
 	// 路径 MTU 探测状态。probeWant 高 32 位是探测 ID、低 32 位是目标尺寸，
 	// 一个原子量携带两者，避免「ID 与尺寸各读一次」读到不同代的值。
