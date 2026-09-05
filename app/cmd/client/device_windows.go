@@ -13,14 +13,25 @@ package main
 // 指纹 v2（2026-09-04 克隆去重）：MachineGuid 掺入 **SMBIOS 系统UUID** 再派生。
 // UUID 由宿主机注入，Hyper-V/VMware 在克隆/复制虚拟机时会主动更换（这正是
 // 「虚拟机生成 ID」的设计用途），因此两台克隆机的指纹 v2 天然不同。取不到
-// UUID（部分物理机/老虚拟化平台）时指纹 v2 回落为主指纹，行为与旧版一致。
+// UUID（部分虚拟化平台）时指纹 v2 回落主指纹，行为与旧版一致。
+//
+// UUID 的读取有三路，逐级兜底，失败时把每一步的结局写进诊断字符串（握手日志
+// 可见，2026-09-06 QEMU 实机：CIM 能读到 UUID 而固件表路径读不到，靠诊断定位）：
+//  1. kernel32!GetSystemFirmwareTable('RSMB') —— x/sys 未封装，手工声明；
+//  2. 注册表 mssmbios\Data\SMBIOSData —— 同一份内容的另一视图；
+//  3. PowerShell CIM 查询 Win32_ComputerSystemProduct.UUID —— 最重但最稳。
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os/exec"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"go-port-forward/pkg/machineid"
@@ -28,6 +39,10 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 )
+
+// sysProcAttrHidden：GUI 进程派生控制台命令必须隐藏窗口，否则每次指纹回退
+// 都会闪一个 PowerShell 黑框。
+var sysProcAttrHidden = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 
 // fingerprintAppID 是派生指纹时的应用标识。
 //
@@ -47,6 +62,8 @@ var (
 	fp2Once    sync.Once
 	fp2Hex     string
 	fp2HasUUID bool
+	fp2Diag    string
+	fp2Source  string // "smbios" | "cim" | ""（回落主指纹）
 )
 
 // deviceFingerprint 返回本机主指纹（64 位小写 hex）。结果缓存，失败也缓存——
@@ -72,21 +89,28 @@ func deviceFingerprintV2() string {
 		src := fingerprintSource{}
 		if guid, err := machineid.ID(); err == nil {
 			src.machineGUID = guid
-			src.smbiosUUID, src.hasUUID = smbiosSystemUUID()
+			var uuid [16]byte
+			var ok bool
+			if uuid, ok, fp2Diag = smbiosSystemUUIDDiag(); ok {
+				src.smbiosUUID, src.hasUUID = uuid, true
+				fp2Source = "smbios"
+			} else if u, cerr := uuidViaCIM(); cerr {
+				if raw, derr := hex.DecodeString(u); derr == nil {
+					copy(src.smbiosUUID[:], raw)
+					src.hasUUID = true
+					fp2Source = "cim"
+					fp2Diag = "SMBIOS 两路不可用（" + fp2Diag + "），已用 CIM 回退"
+				} else {
+					fp2Diag = "SMBIOS 两路不可用（" + fp2Diag + "）；CIM 返回值无法解析"
+				}
+			}
+		} else {
+			fp2Diag = fmt.Sprintf("MachineGuid 读取失败(%v)", err)
 		}
 		fp2Hex = deviceFingerprintV2From(src)
-		// 来源可见性：克隆去重依赖 SMBIOS UUID，缺失时（部分虚拟化平台给
-		// 占位 UUID）必须让用户知道，否则「还是同设备码」会变成无解之谜。
 		fp2HasUUID = src.machineGUID != "" && src.hasUUID && !isSmbiosPlaceholderUUID(src.smbiosUUID)
 	})
 	return fp2Hex
-}
-
-// deviceFingerprintHasUUID 报告指纹 v2 是否真的掺入了 SMBIOS UUID（false =
-// 已回落主指纹，克隆机无法区分）。
-func deviceFingerprintHasUUID() bool {
-	deviceFingerprintV2()
-	return fp2HasUUID
 }
 
 // fingerprintSource 是指纹 v2 的两路输入，拆出来便于单测注入。
@@ -150,6 +174,25 @@ func deviceFingerprintV2Bytes() [tunnel.FingerprintSize]byte {
 	return out
 }
 
+// deviceFingerprintHasUUID 报告指纹 v2 是否真的掺入了 SMBIOS/CIM UUID（false =
+// 已回落主指纹，克隆机无法区分）。
+func deviceFingerprintHasUUID() bool {
+	deviceFingerprintV2()
+	return fp2HasUUID
+}
+
+// fingerprintV2Source 返回指纹 v2 的实际来源（"smbios"/"cim"/""=回落主指纹）。
+func fingerprintV2Source() string {
+	deviceFingerprintV2()
+	return fp2Source
+}
+
+// fingerprintV2Diag 返回来源获取过程的诊断串（成功时为空或含回退说明）。
+func fingerprintV2Diag() string {
+	deviceFingerprintV2()
+	return fp2Diag
+}
+
 // deviceLabel 返回指纹摘要（供界面展示与报障时和面板对照）。
 //
 // 展示**指纹 v2**：服务端迁移后绑定的是它，客户端与面板显示的必须一致；
@@ -175,58 +218,71 @@ var (
 	procGetSystemFirmwareTable = kernel32.NewProc("GetSystemFirmwareTable")
 )
 
-// smbiosSystemUUID 读取 SMBIOS Type 1（System Information）的 UUID。
-// 两路来源都失败或 UUID 是占位值时 ok=false。
-func smbiosSystemUUID() ([16]byte, bool) {
-	if raw, ok := rawSmbiosViaFirmwareTable(); ok {
-		if u, ok := parseSmbiosSystemUUID(raw); ok {
-			return u, true
+// smbiosSystemUUIDDiag 读取 SMBIOS Type 1（System Information）的 UUID，
+// 带逐级诊断。两路都失败时 ok=false 且 diag 说明每步结局。
+func smbiosSystemUUIDDiag() (uuid [16]byte, ok bool, diag string) {
+	raw, err := rawSmbiosViaFirmwareTable()
+	if err == nil {
+		uuid, ok, off, stype := parseSmbiosSystemUUID(raw)
+		if ok {
+			return uuid, true, ""
 		}
+		diag = fmt.Sprintf("固件表(%d 字节)解析止于 offset=%d type=%#x", len(raw), off, stype)
+	} else {
+		diag = fmt.Sprintf("固件表读取失败(%v)", err)
 	}
-	if raw, ok := rawSmbiosViaRegistry(); ok {
-		if u, ok := parseSmbiosSystemUUID(raw); ok {
-			return u, true
-		}
+	raw2, err2 := rawSmbiosViaRegistry()
+	if err2 != nil {
+		diag += fmt.Sprintf("；注册表读取失败(%v)", err2)
+		return uuid, false, diag
 	}
-	return [16]byte{}, false
+	uuid2, ok2, off2, stype2 := parseSmbiosSystemUUID(raw2)
+	if ok2 {
+		return uuid2, true, ""
+	}
+	diag += fmt.Sprintf("；注册表(%d 字节)解析止于 offset=%d type=%#x", len(raw2), off2, stype2)
+	return uuid, false, diag
 }
 
-func rawSmbiosViaFirmwareTable() ([]byte, bool) {
+func rawSmbiosViaFirmwareTable() ([]byte, error) {
 	const providerRSMB = 'R'<<24 | 'S'<<16 | 'M'<<8 | 'B'
-	n, _, _ := procGetSystemFirmwareTable.Call(uintptr(providerRSMB), 0, 0, 0)
+	n, _, callErr := procGetSystemFirmwareTable.Call(uintptr(providerRSMB), 0, 0, 0)
 	if n == 0 {
-		return nil, false
+		return nil, fmt.Errorf("GetSystemFirmwareTable 返回长度 0（%v）", callErr)
 	}
 	buf := make([]byte, n)
-	n, _, _ = procGetSystemFirmwareTable.Call(uintptr(providerRSMB), 0,
+	n, _, callErr = procGetSystemFirmwareTable.Call(uintptr(providerRSMB), 0,
 		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if n == 0 || int(n) < 8 || int(n) > len(buf) {
-		return nil, false
+		return nil, fmt.Errorf("GetSystemFirmwareTable 返回长度异常 %d（%v）", n, callErr)
 	}
-	return buf[:n], true
+	return buf[:n], nil
 }
 
-func rawSmbiosViaRegistry() ([]byte, bool) {
+func rawSmbiosViaRegistry() ([]byte, error) {
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
 		`SYSTEM\CurrentControlSet\Services\mssmbios\Data`, registry.QUERY_VALUE)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer k.Close()
 	v, _, err := k.GetBinaryValue("SMBIOSData")
-	if err != nil || len(v) < 8 {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
-	return v, true
+	if len(v) < 8 {
+		return nil, fmt.Errorf("SMBIOSData 过短（%d 字节）", len(v))
+	}
+	return v, nil
 }
 
 // parseSmbiosSystemUUID 从 raw SMBIOS 数据（含 4 字节 RawSMBIOSData 头）里取
 // Type 1（System Information）结构的 UUID（结构头后偏移 0x08，16 字节）。
 // 结构遍历与 SMBIOS 版本无关（按每结构的 length 与字符串区双 0 结尾步进）。
-func parseSmbiosSystemUUID(raw []byte) ([16]byte, bool) {
-	var out [16]byte
+// 失败时返回止步位置与结构类型（诊断用）。
+func parseSmbiosSystemUUID(raw []byte) (uuid [16]byte, ok bool, stopOff int, stopType byte) {
 	if len(raw) < 8 {
-		return out, false
+		return uuid, false, 0, 0
 	}
 	table := raw[4:] // 跳过 RawSMBIOSData 头（UsedCalling/major/minor/length 各 1 字节）
 	off := 0
@@ -234,16 +290,15 @@ func parseSmbiosSystemUUID(raw []byte) ([16]byte, bool) {
 		stype := table[off]
 		slen := int(table[off+1])
 		if slen < 4 || off+slen > len(table) {
-			return out, false // 结构表损坏，宁缺毋滥
+			return uuid, false, off, stype // 结构表损坏，宁缺毋滥
 		}
 		if stype == 1 && slen >= 0x19 {
-			uuid := [16]byte{}
-			copy(uuid[:], table[off+8:off+24])
-			if !isSmbiosPlaceholderUUID(uuid) {
-				return uuid, true
+			u := [16]byte{}
+			copy(u[:], table[off+8:off+24])
+			if isSmbiosPlaceholderUUID(u) {
+				return uuid, false, off, stype // 占位 UUID：Type 1 只出现一次
 			}
-			// 占位 UUID：Type 1 只出现一次，不必再走。
-			break
+			return u, true, off, stype
 		}
 		// 跳过格式化区 + 字符串区（字符串区以连续两个 0x00 结束）。
 		next := off + slen
@@ -252,5 +307,52 @@ func parseSmbiosSystemUUID(raw []byte) ([16]byte, bool) {
 		}
 		off = next + 2
 	}
-	return out, false
+	return uuid, false, off, 0 // 走完没找到 Type 1
+}
+
+// ---- CIM 兜底 ----
+//
+// SMBIOS 两路都不可用时的第三路：直接问 Windows（用户环境实测 QEMU VM 上
+// CIM 可读而固件表路径不可读）。每次进程只跑一次（指纹缓存），1~3 秒可接受。
+
+// uuidViaCIM 查询 Win32_ComputerSystemProduct.UUID，返回规范化后的 32 hex
+// （大写去连字符），供指纹 v2 掺入。
+func uuidViaCIM() (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive",
+		"-Command", "(Get-CimInstance Win32_ComputerSystemProduct).UUID")
+	cmd.SysProcAttr = sysProcAttrHidden
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return normalizeUUIDString(string(out))
+}
+
+// normalizeUUIDString 把「73A79996-D127-4BE3-90E2-A9E1C8CA5F05」形态的 GUID
+// 串规范化为 32 位大写 hex（去连字符/大括号/空白）。
+func normalizeUUIDString(s string) (string, bool) {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+			b.WriteRune(upperHex(r))
+		case r == '-' || r == '{' || r == '}' || r == ' ':
+			// 分隔符，跳过
+		default:
+			return "", false
+		}
+	}
+	if b.Len() != 32 {
+		return "", false
+	}
+	return b.String(), true
+}
+
+func upperHex(r rune) rune {
+	if r >= 'a' && r <= 'f' {
+		return r - ('a' - 'A')
+	}
+	return r
 }

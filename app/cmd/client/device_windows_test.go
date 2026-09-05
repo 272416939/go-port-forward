@@ -35,12 +35,28 @@ func TestParseSmbiosSystemUUID(t *testing.T) {
 	blob = append(blob, typ1...)
 	blob = append(blob, smbStruct(4, 0x0003, make([]byte, 0x2A), "CPU0")...)
 
-	got, ok := parseSmbiosSystemUUID(blob)
+	got, ok, stopOff, stopType := parseSmbiosSystemUUID(blob)
 	if !ok {
-		t.Fatal("应能从多结构 blob 中取到 Type 1 UUID")
+		t.Fatalf("应能从多结构 blob 中取到 Type 1 UUID（止于 off=%d type=%#x）", stopOff, stopType)
 	}
 	if got != uuid {
 		t.Fatalf("UUID = %v, want %v", got, uuid)
+	}
+}
+
+// TestNormalizeUUIDString 锁 CIM 回退的 GUID 串规范化（用户实测
+// 73A79996-D127-4BE3-90E2-A9E1C8CA5F05 形态）。
+func TestNormalizeUUIDString(t *testing.T) {
+	crlf := string(rune(13)) + string(rune(10))
+	got, ok := normalizeUUIDString("73A79996-D127-4BE3-90E2-A9E1C8CA5F05" + crlf)
+	if !ok || got != "73A79996D1274BE390E2A9E1C8CA5F05" {
+		t.Fatalf("normalize = %q ok=%v", got, ok)
+	}
+	if _, ok := normalizeUUIDString("not-a-guid"); ok {
+		t.Fatal("非 GUID 串必须拒绝")
+	}
+	if _, ok := normalizeUUIDString("73A79996"); ok {
+		t.Fatal("长度不足必须拒绝")
 	}
 
 	// 全 0x00 / 全 0xFF 占位（规范位置 0x08）：视为不存在（fail-closed）
@@ -51,13 +67,13 @@ func TestParseSmbiosSystemUUID(t *testing.T) {
 		}
 		blob2 := []byte{0x00, 0x06, 0x03, 0xFF}
 		blob2 = append(blob2, smbStruct(1, 0x0002, fmt1)...)
-		if _, ok := parseSmbiosSystemUUID(blob2); ok {
+		if _, ok, _, _ := parseSmbiosSystemUUID(blob2); ok {
 			t.Fatalf("占位 UUID（%#x…）不得作为指纹来源", fill)
 		}
 	}
 
 	// 损坏数据（length 字段越界）：宁缺毋滥。
-	if _, ok := parseSmbiosSystemUUID([]byte{0, 6, 3, 0xFF, 0x01, 0x7F, 0x00}); ok {
+	if _, ok, _, _ := parseSmbiosSystemUUID([]byte{0, 6, 3, 0xFF, 0x01, 0x7F, 0x00}); ok {
 		t.Fatal("损坏数据不得返回 UUID")
 	}
 }
