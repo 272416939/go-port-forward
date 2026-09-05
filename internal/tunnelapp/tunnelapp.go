@@ -119,6 +119,10 @@ type DeviceBinder interface {
 	// BindDevice 登记设备指纹。已绑定到别的设备时返回错误（调用方据此拒绝握手）。
 	// 同一设备重连时只刷新活跃信息。
 	BindDevice(codeID, fingerprint, label, addr string) error
+	// MigrateDevice 把绑定从旧指纹 CAS 迁移到指纹 v2（同一台设备的指纹升级，
+	// 服务端升级握手协议后首次重连发生一次）。返回是否真的迁移（旧指纹已被
+	// 并发改写时为 false，调用方下轮握手自然重估）。实现不得踢在线隧道。
+	MigrateDevice(codeID, fromFP, toFP, label, addr string) (bool, error)
 	// TouchCode 刷新最近活跃时间。调用方已限频，实现无需再限。
 	TouchCode(codeID, addr string)
 }
@@ -796,8 +800,31 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from netip.AddrPo
 	// 握手路径，重试风暴下就是持续卡顿。活跃地址已由 TouchCode 异步刷新，
 	// 无需借这里重写。
 	fp := hex.EncodeToString(hello.Device[:])
-	if ident.Fingerprint != fp {
-		if err := s.binder.BindDevice(ident.CodeID, fp, models.FingerprintLabel(fp), from.String()); err != nil {
+	fp2 := ""
+	if hello.HasDevice2() {
+		if d2 := hex.EncodeToString(hello.Device2[:]); d2 != fp {
+			// 与主指纹相同的 Device2（本机没有第二指纹来源）视为未携带
+			fp2 = d2
+		}
+	}
+	switch {
+	case ident.Fingerprint == fp && fp2 != "":
+		// 已绑主指纹、客户端带了指纹 v2：CAS 迁移到 v2——克隆去重的关键一步，
+		// 迁移后旧指纹（可能被克隆机共享）立即失效。同一台设备的指纹升级，
+		// 不踢隧道；迁移失败（旧值已被并发改写）不阻塞握手，下轮自然重估。
+		if migrated, merr := s.binder.MigrateDevice(ident.CodeID, fp, fp2,
+			models.FingerprintLabel(fp2), from.String()); merr == nil && migrated {
+			logger.S.Infow("设备指纹已升级到 v2（克隆去重）",
+				"user", ident.UserName, "code", ident.CodeName,
+				"old", models.FingerprintLabel(fp), "new", models.FingerprintLabel(fp2))
+		}
+	case ident.Fingerprint != fp && (fp2 == "" || ident.Fingerprint != fp2):
+		// 未绑定或绑定到了其他设备：登记绑定（新绑定直接用更强的指纹 v2）。
+		bindFP := fp
+		if fp2 != "" {
+			bindFP = fp2
+		}
+		if err := s.binder.BindDevice(ident.CodeID, bindFP, models.FingerprintLabel(bindFP), from.String()); err != nil {
 			reject(tunnel.RejectDeviceMismatch)
 			return
 		}

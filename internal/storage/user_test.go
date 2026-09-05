@@ -485,3 +485,43 @@ func TestSetUserEmail(t *testing.T) {
 		t.Fatalf("清空后邮箱与激活标志应复位：got %+v", got)
 	}
 }
+
+// 设备指纹 v2 的 CAS 迁移：旧指纹匹配才改写；迁移后旧指纹视为他机。
+func TestMigrateAccessCodeDevice(t *testing.T) {
+	s := newUserStore(t)
+	if err := s.CreateUser(makeUser("u1", "alice", models.RoleUser)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAccessCode(makeCode("c1", "u1", "a"), testPool, testGW, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindAccessCodeDevice("c1", "aaaa", "aa…aa", time.Now(), "1.1.1.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	// 旧指纹不匹配：返回 false 且不改写。
+	migrated, err := s.MigrateAccessCodeDevice("c1", "ffff", "bbbb", "bb…bb", time.Now(), "2.2.2.2:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated {
+		t.Fatal("旧指纹不匹配时不得迁移")
+	}
+	// 旧指纹匹配：迁移成功。
+	migrated, err = s.MigrateAccessCodeDevice("c1", "aaaa", "bbbb", "bb…bb", time.Now(), "2.2.2.2:2")
+	if err != nil || !migrated {
+		t.Fatalf("迁移应成功：migrated=%v err=%v", migrated, err)
+	}
+	got, _ := s.GetAccessCode("c1")
+	if got.DeviceFingerprint != "bbbb" || got.DeviceLabel != "bb…bb" {
+		t.Fatalf("迁移后指纹=%q label=%q", got.DeviceFingerprint, got.DeviceLabel)
+	}
+	// 迁移后旧指纹视为他机：旧客户端再握手被拒。
+	if err := s.BindAccessCodeDevice("c1", "aaaa", "aaaa", time.Now(), "1.1.1.1:1"); !errors.Is(err, ErrDeviceMismatch) {
+		t.Fatalf("迁移后旧指纹应被视为他机，得到 %v", err)
+	}
+	// 同旧指纹重复迁移：no-op（fromFP 已不匹配 → false）。
+	migrated, err = s.MigrateAccessCodeDevice("c1", "aaaa", "bbbb", "bb…bb", time.Now(), "2.2.2.2:3")
+	if err != nil || migrated {
+		t.Fatalf("重复迁移应返回 false：migrated=%v err=%v", migrated, err)
+	}
+}

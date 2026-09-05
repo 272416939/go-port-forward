@@ -14,8 +14,17 @@ import (
 // 握手域分隔标签，避免不同方向的 MAC 互挪。版本后缀让新旧端天然互不认证。
 var (
 	helloDomain  = []byte("pfapp-hello-v4")
+	helloDomain5 = []byte("pfapp-hello-v5")
 	acceptDomain = []byte("pfapp-accept-v4")
 	rejectDomain = []byte("pfapp-reject-v4")
+)
+
+// Hello 的版本字节单独管理：Accept/Reject/会话格式不变（全局 Version 保持
+// 0x04），只有 Hello 因新增「设备指纹 v2」字段升级为 v5 形态。这样跨版本
+// 降级链（legacy.go 的探测/应答白名单）一行都不用改。
+const (
+	helloVerV4 = 0x04
+	helloVerV5 = 0x05
 )
 
 // 握手时间戳容忍窗口（防重放 + 容忍时钟偏差）。
@@ -23,9 +32,10 @@ const helloMaxAge = 10 * time.Minute
 
 // 报文长度（含 1 字节类型前缀）。
 const (
-	helloLen  = 1 + 1 + UIDSize + FingerprintSize + 32 + 8 + 32 // 122
-	acceptLen = 1 + 1 + 32 + 4 + 1 + 4 + 2 + 1 + 32             // 78
-	rejectLen = 1 + 1 + 1 + 32                                  // 35
+	helloLen   = 1 + 1 + UIDSize + FingerprintSize + 32 + 8 + 32           // 122
+	helloLenV5 = helloLen + FingerprintSize                                // 154
+	acceptLen  = 1 + 1 + 32 + 4 + 1 + 4 + 2 + 1 + 32                       // 78
+	rejectLen  = 1 + 1 + 1 + 32                                            // 35
 	// 旧版本 Hello 的长度，仅用于识别旧客户端。v3 与 v4 的 Hello 长度相同
 	// （字段没变），v3 靠版本字节识别。
 	helloLenV1 = 1 + 32 + 8 + 32               // 73
@@ -50,15 +60,22 @@ func macPSK(secret []byte, domain []byte, parts ...[]byte) [32]byte {
 // Device 是客户端的设备指纹（machineid 派生）。它进 MAC，所以中间人改不了；
 // 但它由客户端自报，服务端只能保证「同一个访问码后续必须来自同一指纹」，
 // 不能保证指纹对应真实硬件。
+//
+// Device2 是指纹 v2（v5 起携带）：主指纹掺入 SMBIOS 系统UUID 派生——克隆
+// 虚拟机的宿主机会在克隆时更换该 UUID，两台克隆机由此可区分。本机没有可用
+// 的第二指纹来源时 Device2 == Device（服务端迁移为 no-op）。Device2 为全零
+// 表示 v4 形态（Marshal/Parse 据此分派）。
 type ClientHello struct {
-	UID    UID                   // 访问码 ID
-	Device [FingerprintSize]byte // 设备指纹
-	Eph    [32]byte              // 客户端临时 X25519 公钥
-	TS     uint64                // 发起时间（unix 秒）
-	MAC    [32]byte
+	UID     UID                   // 访问码 ID
+	Device  [FingerprintSize]byte // 设备指纹（v1，兼容锚点）
+	Device2 [FingerprintSize]byte // 设备指纹 v2（克隆去重；v4 包为零值）
+	Eph     [32]byte              // 客户端临时 X25519 公钥
+	TS      uint64                // 发起时间（unix 秒）
+	MAC     [32]byte
 }
 
-// NewClientHello 生成客户端握手包，返回客户端临时私钥（用于派生会话密钥）。
+// NewClientHello 生成客户端握手包（v4 形态，不携带指纹 v2），返回客户端
+// 临时私钥（用于派生会话密钥）。
 func NewClientHello(secret []byte, uid UID, device [FingerprintSize]byte) (*ClientHello, *[32]byte, error) {
 	h := &ClientHello{UID: uid, Device: device, TS: uint64(time.Now().Unix())}
 	pub, priv, err := box.GenerateKey(rand.Reader)
@@ -66,17 +83,63 @@ func NewClientHello(secret []byte, uid UID, device [FingerprintSize]byte) (*Clie
 		return nil, nil, err
 	}
 	h.Eph = *pub
-	h.MAC = h.mac(secret)
+	h.MAC = h.mac(secret, helloVerV4)
 	return h, priv, nil
 }
 
-func (h *ClientHello) mac(secret []byte) [32]byte {
-	return macPSK(secret, helloDomain,
-		[]byte{Version}, h.UID[:], h.Device[:], h.Eph[:], u64be(h.TS))
+// NewClientHelloV5 生成携带指纹 v2 的 v5 握手包。device2 与 device 相同表示
+// 本机没有可用的第二指纹来源（如 SMBIOS UUID 缺失），服务端迁移为 no-op；
+// device2 为零值时整体退化为 v4 形态（MAC 与线上布局由同一判定派生，杜绝
+// 「v4 布局配 v5 域 MAC」的自相矛盾包）。
+func NewClientHelloV5(secret []byte, uid UID, device, device2 [FingerprintSize]byte) (*ClientHello, *[32]byte, error) {
+	var zero [FingerprintSize]byte
+	if device2 == zero {
+		device2 = device
+	}
+	ver := byte(helloVerV4)
+	if device2 != zero {
+		ver = helloVerV5
+	}
+	h := &ClientHello{UID: uid, Device: device, Device2: device2, TS: uint64(time.Now().Unix())}
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	h.Eph = *pub
+	h.MAC = h.mac(secret, ver)
+	return h, priv, nil
 }
 
-// Marshal 序列化为 UDP 载荷：[0x01]ver||uid||device||eph||ts||mac。
+func (h *ClientHello) mac(secret []byte, ver byte) [32]byte {
+	if ver == helloVerV5 {
+		return macPSK(secret, helloDomain5,
+			[]byte{ver}, h.UID[:], h.Device[:], h.Device2[:], h.Eph[:], u64be(h.TS))
+	}
+	return macPSK(secret, helloDomain,
+		[]byte{ver}, h.UID[:], h.Device[:], h.Eph[:], u64be(h.TS))
+}
+
+// HasDevice2：Device2 非零即视为携带指纹 v2（v5 形态）。指纹是 HMAC 输出，
+// 全零概率可忽略；v4 形态的调用方 Device2 恒为零值。
+func (h *ClientHello) HasDevice2() bool {
+	var zero [FingerprintSize]byte
+	return h.Device2 != zero
+}
+
+// Marshal 序列化为 UDP 载荷。v5（Device2 非零）：
+// [0x01]0x05||uid||device||device2||eph||ts||mac；v4：[0x01]ver||uid||device||eph||ts||mac。
 func (h *ClientHello) Marshal() []byte {
+	if h.HasDevice2() {
+		out := make([]byte, 0, helloLenV5)
+		out = append(out, TypeHello, helloVerV5)
+		out = append(out, h.UID[:]...)
+		out = append(out, h.Device[:]...)
+		out = append(out, h.Device2[:]...)
+		out = append(out, h.Eph[:]...)
+		out = append(out, u64be(h.TS)...)
+		out = append(out, h.MAC[:]...)
+		return out
+	}
 	out := make([]byte, 0, helloLen)
 	out = append(out, TypeHello, Version)
 	out = append(out, h.UID[:]...)
@@ -90,28 +153,43 @@ func (h *ClientHello) Marshal() []byte {
 // PeekHello 只做长度与版本检查并取出声称的访问码 ID，不做任何认证。
 // 服务端用它决定去查哪个访问码的密钥，随后必须调用 ParseClientHello 验证。
 func PeekHello(b []byte) (UID, error) {
+	uid, _, err := peekHello(b)
+	return uid, err
+}
+
+// peekHello 校验长度与版本并取出 uid 与 Hello 的版本字节。
+func peekHello(b []byte) (UID, byte, error) {
 	var uid UID
 	if len(b) < 1 || b[0] != TypeHello {
-		return uid, ErrBadPacket
+		return uid, 0, ErrBadPacket
 	}
 	// 长度先行：旧版 Hello 的版本字节位置落在临时公钥（v1）或长度不足（v2），
 	// 直接读版本字节会把旧包误判成任意版本。
 	if len(b) == helloLenV1 || len(b) == helloLenV2 {
-		return uid, ErrOldVersion
+		return uid, 0, ErrOldVersion
 	}
-	if len(b) < helloLen {
-		return uid, ErrBadPacket
-	}
-	if b[1] != Version {
-		return uid, ErrOldVersion
+	switch {
+	case len(b) == helloLen: // v3/v4 同长：v3 靠版本字节识别后走跨版本应答，不进入解析
+		if b[1] != helloVerV4 {
+			return uid, 0, ErrOldVersion
+		}
+	case len(b) == helloLenV5:
+		if b[1] != helloVerV5 {
+			return uid, 0, ErrOldVersion
+		}
+	case len(b) > helloLen:
+		// 长度不匹配任何已知形态的更大包：视为来自更新版本的客户端
+		return uid, 0, ErrOldVersion
+	default:
+		return uid, 0, ErrBadPacket
 	}
 	copy(uid[:], b[2:2+UIDSize])
-	return uid, nil
+	return uid, b[1], nil
 }
 
-// ParseClientHello 解析并校验客户端握手包。
+// ParseClientHello 解析并校验客户端握手包（v4/v5 两种形态自动分派）。
 func ParseClientHello(secret, b []byte) (*ClientHello, error) {
-	uid, err := PeekHello(b)
+	uid, ver, err := peekHello(b)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +197,10 @@ func ParseClientHello(secret, b []byte) (*ClientHello, error) {
 	off := 2 + UIDSize
 	copy(h.Device[:], b[off:off+FingerprintSize])
 	off += FingerprintSize
+	if ver == helloVerV5 {
+		copy(h.Device2[:], b[off:off+FingerprintSize])
+		off += FingerprintSize
+	}
 	copy(h.Eph[:], b[off:off+32])
 	off += 32
 	h.TS = binary.BigEndian.Uint64(b[off : off+8])
@@ -129,7 +211,7 @@ func ParseClientHello(secret, b []byte) (*ClientHello, error) {
 	if age < -helloMaxAge || age > helloMaxAge {
 		return nil, ErrAuth
 	}
-	want := h.mac(secret)
+	want := h.mac(secret, ver)
 	if !hmac.Equal(want[:], h.MAC[:]) {
 		return nil, ErrAuth
 	}

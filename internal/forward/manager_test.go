@@ -499,6 +499,9 @@ func (s *countingStore) BindAccessCodeDevice(id, fingerprint, label string, at t
 	return nil
 }
 func (s *countingStore) UnbindAccessCodeDevice(id string) (string, error) { return "", nil }
+func (s *countingStore) MigrateAccessCodeDevice(id, fromFP, toFP, label string, at time.Time, addr string) (bool, error) {
+	return false, nil
+}
 func (s *countingStore) TouchAccessCode(id string, at time.Time, addr string) error {
 	return nil
 }

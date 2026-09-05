@@ -752,3 +752,139 @@ func TestProbePacketFitsMaxPacket(t *testing.T) {
 		t.Fatalf("OpenPing = %d/%d/%v", id, plainLen, err)
 	}
 }
+
+// ---- Hello v5：设备指纹 v2（克隆虚拟机去重）----
+
+func TestClientHelloV5RoundTrip(t *testing.T) {
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	device2 := [FingerprintSize]byte{0x5A, 0x6B, 0x7C, 0x8D}
+
+	h, _, err := NewClientHelloV5(secret, uid, testDevice, device2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := h.Marshal()
+	if len(wire) != helloLenV5 {
+		t.Fatalf("v5 Hello 长度 = %d, want %d", len(wire), helloLenV5)
+	}
+	if wire[1] != helloVerV5 {
+		t.Fatalf("v5 Hello 版本字节 = %#x, want %#x", wire[1], helloVerV5)
+	}
+	got, err := ParseClientHello(secret, wire)
+	if err != nil {
+		t.Fatalf("ParseClientHello: %v", err)
+	}
+	if got.Device != testDevice || got.Device2 != device2 || got.UID != uid {
+		t.Fatalf("字段回写不一致：device=%v device2=%v", got.Device, got.Device2)
+	}
+}
+
+func TestClientHelloV4MarshalUnchanged(t *testing.T) {
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	h, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := h.Marshal()
+	if len(wire) != helloLen {
+		t.Fatalf("v4 Hello 长度 = %d, want %d", len(wire), helloLen)
+	}
+	if wire[1] != helloVerV4 {
+		t.Fatalf("v4 Hello 版本字节 = %#x, want %#x", wire[1], helloVerV4)
+	}
+	got, err := ParseClientHello(secret, wire)
+	if err != nil {
+		t.Fatalf("ParseClientHello: %v", err)
+	}
+	if got.Device != testDevice {
+		t.Fatal("v4 字段回写不一致")
+	}
+	if got.HasDevice2() {
+		t.Fatal("v4 形态不得携带指纹 v2")
+	}
+}
+
+func TestHelloV5TamperedDevice2Rejected(t *testing.T) {
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	h, _, err := NewClientHelloV5(secret, uid, testDevice, otherDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := h.Marshal()
+	// Device2 位于 v5 布局偏移 50..82（2+16+32 之后），篡改它必须被 MAC 拦下
+	// ——指纹 v2 进 MAC 的回归锁：漏了它，中间人可以把克隆机的指纹 v2 改成
+	// 正主的，绕过克隆去重。
+	if wire[50] == 0xFF {
+		wire[50] = 0xFE
+	} else {
+		wire[50] = 0xFF
+	}
+	if _, err := ParseClientHello(secret, wire); !errors.Is(err, ErrAuth) {
+		t.Fatalf("篡改 Device2 必须报 ErrAuth，得到 %v", err)
+	}
+}
+
+func TestHelloV5DomainSeparation(t *testing.T) {
+	// v4/v5 域标签必须互不认证：v4 的 MAC 拿到 v5 域下验不过，反之亦然。
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	h5, _, err := NewClientHelloV5(secret, uid, testDevice, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h4, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(h5.MAC[:], h4.MAC[:]) {
+		t.Fatal("v4/v5 域标签下同一组字段的 MAC 不应相同")
+	}
+}
+
+func TestPeekHelloVersionMatrix(t *testing.T) {
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	secret := []byte("test-secret")
+
+	mk := func(ver byte, extra int) []byte {
+		h, _, err := NewClientHello(secret, uid, testDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire := h.Marshal()
+		wire[1] = ver
+		return append(wire, make([]byte, extra)...)
+	}
+
+	cases := []struct {
+		name string
+		wire []byte
+		want error
+	}{
+		{"v1 长度", append([]byte{TypeHello}, make([]byte, helloLenV1-1)...), ErrOldVersion},
+		{"v2 长度", append([]byte{TypeHello}, make([]byte, helloLenV2-1)...), ErrOldVersion},
+		{"v4 正常", mk(helloVerV4, 0), nil},
+		{"122 字节但 v3 版本字节", mk(VersionV3, 0), ErrOldVersion},
+		{"122 字节但 v5 版本字节", mk(helloVerV5, 0), ErrOldVersion},
+		{"154 字节 v4 版本字节", mk(helloVerV4, FingerprintSize), ErrOldVersion},
+		{"未知更大长度", mk(helloVerV5, FingerprintSize+7), ErrOldVersion},
+		{"非 Hello 类型", append([]byte{TypeData, 0x04}, make([]byte, 120)...), ErrBadPacket},
+		{"过短垃圾", make([]byte, 100), ErrBadPacket},
+	}
+	for _, tc := range cases {
+		_, _, err := peekHello(tc.wire)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: peekHello err = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	// v5 正常形态单独验证（mk 不产 v5）
+	h5, _, err := NewClientHelloV5(secret, uid, testDevice, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ver, err := peekHello(h5.Marshal()); err != nil || ver != helloVerV5 {
+		t.Fatalf("v5 peekHello: ver=%#x err=%v", ver, err)
+	}
+}

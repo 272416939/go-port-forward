@@ -302,6 +302,39 @@ func (s *boltStore) UnbindAccessCodeDevice(id string) (string, error) {
 	return prev, err
 }
 
+// MigrateAccessCodeDevice 把设备绑定从 fromFP CAS 迁移到 toFP（设备指纹 v2
+// 升级：同一台设备换更强的指纹，不是换设备，**不踢隧道、不改 BoundAt**）。
+// 「比对旧指纹 + 写入新指纹」在同一个写事务内完成（铁律 4b）：fromFP 已不匹配
+// （被并发改写）返回 false，调用方下轮握手自然重估。
+func (s *boltStore) MigrateAccessCodeDevice(id, fromFP, toFP, label string, at time.Time, addr string) (bool, error) {
+	migrated := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(codesBucket)
+		v := b.Get([]byte(id))
+		if v == nil {
+			return fmt.Errorf("%w: %s", ErrCodeNotFound, id)
+		}
+		var r codeRecord
+		if err := json.Unmarshal(v, &r); err != nil {
+			return err
+		}
+		if r.DeviceFingerprint != fromFP {
+			return nil
+		}
+		r.DeviceFingerprint = toFP
+		r.DeviceLabel = label
+		r.LastSeenAt, r.LastSeenAddr = at, addr
+		r.UpdatedAt = at
+		migrated = true
+		data, err := json.Marshal(&r)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(id), data)
+	})
+	return migrated, err
+}
+
 // TouchAccessCode 刷新最近活跃时间与来源地址。
 //
 // 调用方必须限频：这是数据面上的写操作，每个包都写一次会把 bbolt 的 fsync

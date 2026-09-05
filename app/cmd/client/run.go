@@ -54,6 +54,7 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 		e.fail("%v", err)
 		return
 	}
+	device2 := deviceFingerprintV2Bytes()
 	secret := []byte(conf.Secret)
 
 	udp, err := net.DialUDP("udp", nil, serverAddr)
@@ -116,7 +117,7 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 	// 主循环：握手 → 配地址 → 泵；断开后自动重握手，直到 ctx 取消。
 	for ctx.Err() == nil {
 		e.setState(StateConnecting, "")
-		sess, addressing, herr := e.handshake(ctx, udp, uid, device, secret)
+		sess, addressing, herr := e.handshake(ctx, udp, uid, device, device2, secret)
 		if herr != nil {
 			if ctx.Err() != nil {
 				break
@@ -402,7 +403,7 @@ func (e *Engine) fail(format string, a ...any) {
 // handshake 循环发送 Hello 直到收到 Accept 或 ctx 取消，返回会话与服务端
 // 下发的隧道地址。
 func (e *Engine) handshake(ctx context.Context, udp *net.UDPConn,
-	uid tunnel.UID, device [tunnel.FingerprintSize]byte, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
+	uid tunnel.UID, device, device2 [tunnel.FingerprintSize]byte, secret []byte) (*tunnel.Session, tunnelAddressing, error) {
 	var none tunnelAddressing
 	buf := make([]byte, tunnel.MaxPacket+64)
 	// 8 次尝试共用的「残留包已忽略」日志锚点：残留包在握手期间可能持续到达
@@ -415,7 +416,7 @@ attemptLoop:
 		if ctx.Err() != nil {
 			return nil, none, ctx.Err()
 		}
-		hello, priv, err := tunnel.NewClientHello(secret, uid, device)
+		hello, priv, err := tunnel.NewClientHelloV5(secret, uid, device, device2)
 		if err != nil {
 			return nil, none, err
 		}

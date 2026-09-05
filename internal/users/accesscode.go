@@ -18,21 +18,28 @@ import (
 
 // ListAccessCodes 返回某用户的访问码；userID 为空时返回全部（管理员视图）。
 func (s *Service) ListAccessCodes(userID string) ([]*models.AccessCode, error) {
-	var codes []*models.AccessCode
-	var err error
-	if userID == "" {
-		codes, err = s.store.ListAccessCodes()
-	} else {
-		codes, err = s.store.ListAccessCodesByUser(userID)
-	}
+	// 统一取全量：同指纹多码的克隆检测需要跨用户计数（普通用户的列表也要
+	// 标出自己的码是否与他人共用指纹），随后再按作用域过滤。
+	codes, err := s.store.ListAccessCodes()
 	if err != nil {
 		return nil, err
 	}
+	fpCount := map[string]int{}
+	for _, c := range codes {
+		if c.DeviceFingerprint != "" {
+			fpCount[c.DeviceFingerprint]++
+		}
+	}
 	online := s.onlineCodes()
 	names := map[string]string{}
+	out := make([]*models.AccessCode, 0, len(codes))
 	for _, c := range codes {
+		if userID != "" && c.UserID != userID {
+			continue
+		}
 		c.Online = online[c.ID]
 		c.DeviceLabel = models.FingerprintLabel(c.DeviceFingerprint)
+		c.FingerprintShared = c.DeviceFingerprint != "" && fpCount[c.DeviceFingerprint] > 1
 		if userID == "" {
 			if _, seen := names[c.UserID]; !seen {
 				if u, uerr := s.store.GetUser(c.UserID); uerr == nil {
@@ -43,8 +50,9 @@ func (s *Service) ListAccessCodes(userID string) ([]*models.AccessCode, error) {
 			}
 			c.UserName = names[c.UserID]
 		}
+		out = append(out, c)
 	}
-	return codes, nil
+	return out, nil
 }
 
 // GetAccessCode 按 ID 取访问码。
@@ -311,6 +319,13 @@ type CodeIdentity struct {
 // BindDevice 实现 tunnelapp.DeviceBinder：登记设备指纹。
 func (s *Service) BindDevice(codeID, fingerprint, label, addr string) error {
 	return s.store.BindAccessCodeDevice(codeID, fingerprint, label, time.Now(), addr)
+}
+
+// MigrateDevice 实现 tunnelapp.DeviceBinder：把绑定从旧指纹 CAS 迁移到指纹 v2
+// （同一台设备的指纹升级，**不踢隧道**——踢了会把刚迁好的连接当场掐断）。
+// 返回是否真的迁移（旧指纹已被并发改写时为 false，调用方下轮握手自然重估）。
+func (s *Service) MigrateDevice(codeID, fromFP, toFP, label, addr string) (bool, error) {
+	return s.store.MigrateAccessCodeDevice(codeID, fromFP, toFP, label, time.Now(), addr)
 }
 
 // TouchCode 实现 tunnelapp.DeviceBinder：刷新活跃信息。

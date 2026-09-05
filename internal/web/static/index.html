@@ -1171,7 +1171,7 @@
                   <td><span class="badge rounded-pill" :class="c.online ? 'text-bg-success' : 'text-bg-light text-muted'" x-text="c.online ? t('在线','Online') : t('离线','Offline')"></span></td>
                   <td class="small">
                     <template x-if="c.device_label">
-                      <span><i class="bi bi-hdd me-1"></i><span class="font-monospace" x-text="c.device_label"></span></span>
+                      <span><i class="bi bi-hdd me-1"></i><span class="font-monospace" x-text="c.device_label"></span><template x-if="c.fingerprint_shared"><span class="badge text-bg-warning ms-1" x-text="t('疑似克隆机','possible clone')" :title="t('同一设备指纹同时绑定在多个访问码上：疑似克隆虚拟机（MachineGuid 未重置）或接入码被复制到多台机器。','This device fingerprint is bound to multiple access codes: likely cloned VMs (MachineGuid not reset) or the code copied to several machines.')"></span></template></span>
                     </template>
                     <template x-if="!c.device_label">
                       <span class="text-muted" x-text="t('未绑定（下次连接自动绑定）','not bound (auto-binds on next connect)')"></span>

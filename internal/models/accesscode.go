@@ -42,6 +42,9 @@ type AccessCode struct {
 	// 运行时字段，不持久化
 	Online   bool   `json:"online"`
 	UserName string `json:"user_name,omitempty"`
+	// FingerprintShared：同一设备指纹同时绑定在多个访问码上（疑似克隆虚拟机
+	// 或接入码被复制到多台机器）。列表响应的计算字段。
+	FingerprintShared bool `json:"fingerprint_shared,omitempty"`
 }
 
 // Bound 报告该访问码是否已绑定设备。

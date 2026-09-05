@@ -110,8 +110,9 @@ func InspectLegacyHello(secret, b []byte) (clientEph [32]byte, ver byte, ok bool
 
 // LegacyVersionReject 为一条已通过 InspectLegacyHello 的旧版 Hello 构造拒绝
 // 应答：用**该客户端自己的协议版本**的域标签签名，所以旧客户端能验证并显示
-// 出「被拒绝」而不是无应答。reason 固定 0（v3 词表没有版本语义；v4 客户端
-// 不会走到这里——版本一致时根本不会失败）。
+// 出「被拒绝」而不是无应答。reason 固定 0（v3 词表没有版本语义；v4 Hello 在
+// v5 服务端被**接受**（只动 Hello 的版本策略），因此 0x04 不会走到跨版本
+// 应答；reason 6 留给未来真正拒收旧版 Hello 的版本使用）。
 //
 // 入参必须原样是收到的 Hello 报文；MAC 复验失败返回 nil（调用方静默）。
 func LegacyVersionReject(secret, hello []byte) []byte {

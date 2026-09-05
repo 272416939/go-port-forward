@@ -79,6 +79,9 @@ type Store interface {
 	// BindAccessCodeDevice 登记设备指纹；已绑定到别的设备时返回 ErrDeviceMismatch。
 	BindAccessCodeDevice(id, fingerprint, label string, at time.Time, addr string) error
 	UnbindAccessCodeDevice(id string) (string, error)
+	// MigrateAccessCodeDevice 把绑定从旧指纹 CAS 迁移到指纹 v2（同一设备的
+	// 指纹升级，不踢隧道）；旧指纹已不匹配时返回 false，不视为错误。
+	MigrateAccessCodeDevice(id, fromFP, toFP, label string, at time.Time, addr string) (bool, error)
 	TouchAccessCode(id string, at time.Time, addr string) error
 
 	Close() error

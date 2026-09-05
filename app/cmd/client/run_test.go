@@ -68,14 +68,14 @@ func TestHandshakeDrainsStalePacketsBeforeAccept(t *testing.T) {
 	}
 	defer conn.Close()
 
-	var device [tunnel.FingerprintSize]byte
+	device := [tunnel.FingerprintSize]byte{0xA1, 0xB2, 0xC3, 0xD4}
 	done := make(chan struct{})
 	var sess *tunnel.Session
 	var addr tunnelAddressing
 	var herr error
 	go func() {
 		defer close(done)
-		sess, addr, herr = e.handshake(context.Background(), conn, uid, device, secret)
+		sess, addr, herr = e.handshake(context.Background(), conn, uid, device, device, secret)
 	}()
 	select {
 	case <-done:
@@ -133,7 +133,7 @@ func runHandshake(t *testing.T, e *Engine, conn *net.UDPConn, uid tunnel.UID,
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sess, addr, herr = e.handshake(context.Background(), conn, uid, device, secret)
+		sess, addr, herr = e.handshake(context.Background(), conn, uid, device, device, secret)
 	}()
 	select {
 	case <-done:

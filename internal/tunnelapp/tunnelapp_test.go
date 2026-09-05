@@ -89,14 +89,23 @@ func TestStopIsIdempotent(t *testing.T) {
 	}
 }
 
-// fakeBinder 记录 BindDevice 调用次数，用于验证指纹未变时的短路。
+// fakeBinder 记录 BindDevice/MigrateDevice 调用次数，用于验证指纹未变时的
+// 短路与指纹 v2 的迁移路径。
 type fakeBinder struct {
-	binds int
+	binds    int
+	migrates int
+	lastBind string
 }
 
 func (b *fakeBinder) BindDevice(codeID, fingerprint, label, addr string) error {
 	b.binds++
+	b.lastBind = fingerprint
 	return nil
+}
+
+func (b *fakeBinder) MigrateDevice(codeID, fromFP, toFP, label, addr string) (bool, error) {
+	b.migrates++
+	return true, nil
 }
 
 func (b *fakeBinder) TouchCode(codeID, addr string) {}
@@ -285,4 +294,99 @@ func readDrop(conn *net.UDPConn, buf []byte) bool {
 	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	_, _, err := conn.ReadFromUDP(buf)
 	return err == nil
+}
+
+// 设备指纹 v2（Hello v5）的绑定与迁移矩阵：
+// ① 未绑定 → 直接绑 v2；② 已绑主指纹 + 带 v2 → CAS 迁移；③ 已绑 v2 → 短路；
+// ④ device2 == device（本机无第二指纹来源）→ 视为未携带，不迁移；
+// ⑤ 绑定他机 → 拒绝且不得改写绑定。
+func TestHandleHelloFingerprintV2BindingAndMigration(t *testing.T) {
+	nopLogging()
+	serverConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer serverConn.Close()
+	clientConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer clientConn.Close()
+	from := addrPortOf(clientConn.LocalAddr().(*net.UDPAddr))
+
+	secret := []byte("test-secret-test-secret-test!")
+	uid, uerr := tunnel.ParseUID("3d2f5a1e-0000-0000-0000-000000000001")
+	if uerr != nil {
+		t.Fatalf("构造 uid 失败: %v", uerr)
+	}
+	device := [tunnel.FingerprintSize]byte{0xA1, 0xB2, 0xC3, 0xD4}
+	device2 := [tunnel.FingerprintSize]byte{0x11, 0x22, 0x33, 0x44}
+	otherDevice := [tunnel.FingerprintSize]byte{0x99, 0x88, 0x77, 0x66}
+	fp := hex.EncodeToString(device[:])
+	fp2 := hex.EncodeToString(device2[:])
+
+	binder := &fakeBinder{}
+	ident := Identity{
+		CodeID: "c1", UserName: "tester", Secret: secret,
+		TunIP: netip.MustParseAddr("10.66.0.7"), Fingerprint: "",
+	}
+	s := &Server{
+		udp:      serverConn.(*net.UDPConn),
+		peers:    newRegistry(),
+		identity: func(string) (Identity, bool) { return ident, true },
+		binder:   binder,
+		tunPool:  netip.MustParsePrefix("10.66.0.0/16").Masked(),
+		gateway:  netip.MustParseAddr("10.66.0.1"),
+		helloQ:   make(chan helloTask, helloQueueCap),
+		tunMTU:   tunnel.MaxTunMTU,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+
+	hello5, _, herr := tunnel.NewClientHelloV5(secret, uid, device, device2)
+	if herr != nil {
+		t.Fatalf("构造 v5 握手失败: %v", herr)
+	}
+	wire5 := hello5.Marshal()
+	hello5same, _, herr := tunnel.NewClientHelloV5(secret, uid, device, device)
+	if herr != nil {
+		t.Fatalf("构造退化 v5 握手失败: %v", herr)
+	}
+	wire5same := hello5same.Marshal()
+
+	// ① 未绑定：直接绑更强的指纹 v2。
+	s.handleHello(s.udp, wire5, from)
+	if binder.binds != 1 || binder.lastBind != fp2 {
+		t.Fatalf("未绑定应直接绑指纹 v2：binds=%d lastBind=%q", binder.binds, binder.lastBind)
+	}
+
+	// ② 已绑主指纹 + 带 v2：迁移（不新增 bind）。
+	ident.Fingerprint = fp
+	s.handleHello(s.udp, wire5, from)
+	if binder.migrates != 1 || binder.binds != 1 {
+		t.Fatalf("应迁移到指纹 v2：migrates=%d binds=%d", binder.migrates, binder.binds)
+	}
+
+	// ③ 已绑 v2：短路，无任何写库。
+	ident.Fingerprint = fp2
+	s.handleHello(s.udp, wire5, from)
+	if binder.migrates != 1 || binder.binds != 1 {
+		t.Fatalf("已绑 v2 应短路：migrates=%d binds=%d", binder.migrates, binder.binds)
+	}
+
+	// ④ device2 == device：视为未携带 v2，绑主指纹语义（短路）。
+	ident.Fingerprint = fp
+	s.handleHello(s.udp, wire5same, from)
+	if binder.migrates != 1 || binder.binds != 1 {
+		t.Fatalf("退化 v5 应视为未携带：migrates=%d binds=%d", binder.migrates, binder.binds)
+	}
+
+	// ⑤ 绑定他机：仍会尝试登记（互斥语义由存储层拒绝，见 storage 测试），
+	// 但不得发生迁移。
+	ident.Fingerprint = hex.EncodeToString(otherDevice[:])
+	binder.binds, binder.migrates = 0, 0
+	s.handleHello(s.udp, wire5, from)
+	if binder.binds != 1 || binder.migrates != 0 {
+		t.Fatalf("绑定他机应尝试登记且不迁移：binds=%d migrates=%d", binder.binds, binder.migrates)
+	}
 }
