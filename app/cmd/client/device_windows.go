@@ -44,8 +44,9 @@ var (
 	fpHex  string
 	fpErr  error
 
-	fp2Once sync.Once
-	fp2Hex  string
+	fp2Once    sync.Once
+	fp2Hex     string
+	fp2HasUUID bool
 )
 
 // deviceFingerprint 返回本机主指纹（64 位小写 hex）。结果缓存，失败也缓存——
@@ -74,8 +75,18 @@ func deviceFingerprintV2() string {
 			src.smbiosUUID, src.hasUUID = smbiosSystemUUID()
 		}
 		fp2Hex = deviceFingerprintV2From(src)
+		// 来源可见性：克隆去重依赖 SMBIOS UUID，缺失时（部分虚拟化平台给
+		// 占位 UUID）必须让用户知道，否则「还是同设备码」会变成无解之谜。
+		fp2HasUUID = src.machineGUID != "" && src.hasUUID && !isSmbiosPlaceholderUUID(src.smbiosUUID)
 	})
 	return fp2Hex
+}
+
+// deviceFingerprintHasUUID 报告指纹 v2 是否真的掺入了 SMBIOS UUID（false =
+// 已回落主指纹，克隆机无法区分）。
+func deviceFingerprintHasUUID() bool {
+	deviceFingerprintV2()
+	return fp2HasUUID
 }
 
 // fingerprintSource 是指纹 v2 的两路输入，拆出来便于单测注入。

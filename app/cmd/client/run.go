@@ -55,6 +55,13 @@ func (e *Engine) run(ctx context.Context, conf clientConfig) {
 		return
 	}
 	device2 := deviceFingerprintV2Bytes()
+	// 指纹 v2 来源可见性：克隆去重依赖 SMBIOS UUID，缺失时（部分虚拟化平台给
+	// 占位 UUID）用户会看到「两台机器还是同设备码」却无从排查。
+	if deviceFingerprintHasUUID() {
+		e.logf("设备指纹 v2 已启用（来源：SMBIOS UUID，克隆虚拟机可区分）。")
+	} else {
+		e.logf("[!] 设备指纹 v2 未启用（本机无可用 SMBIOS UUID）：与克隆机将无法区分。可在宿主机为本 VM 设置唯一 UUID，或重置 MachineGuid 后在面板解绑重连。")
+	}
 	secret := []byte(conf.Secret)
 
 	udp, err := net.DialUDP("udp", nil, serverAddr)
