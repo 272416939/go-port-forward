@@ -390,3 +390,29 @@ func TestHandleHelloFingerprintV2BindingAndMigration(t *testing.T) {
 		t.Fatalf("绑定他机应尝试登记且不迁移：binds=%d migrates=%d", binder.binds, binder.migrates)
 	}
 }
+
+// TestSubnetBroadcast 锁广播地址计算：/16 → 10.66.255.255（用户日志里那种
+// 客户端固有噪音的目的地）；/24 → 尾段 255；/32 与无效前缀退化为零值
+// （logTunnelInternal 按「不等于」处理，天然不降级）。
+func TestSubnetBroadcast(t *testing.T) {
+	cases := []struct {
+		prefix string
+		want   string
+	}{
+		{"10.66.0.0/16", "10.66.255.255"},
+		{"10.66.0.0/24", "10.66.0.255"},
+		{"192.168.1.128/25", "192.168.1.255"},
+	}
+	for _, tc := range cases {
+		got := subnetBroadcast(netip.MustParsePrefix(tc.prefix))
+		if got.String() != tc.want {
+			t.Fatalf("%s 广播 = %s, want %s", tc.prefix, got, tc.want)
+		}
+	}
+	if got := subnetBroadcast(netip.MustParsePrefix("10.66.0.4/32")); got.IsValid() {
+		t.Fatalf("/32 应退化为零值，得到 %v", got)
+	}
+	if got := subnetBroadcast(netip.Prefix{}); got.IsValid() {
+		t.Fatalf("无效前缀应退化为零值，得到 %v", got)
+	}
+}

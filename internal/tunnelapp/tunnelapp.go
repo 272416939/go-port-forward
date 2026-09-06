@@ -10,6 +10,7 @@
 package tunnelapp
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -157,6 +158,7 @@ type Server struct {
 	lastSpoof     atomic.Int64 // 源地址伪造告警限频锚点
 	lastNonIPv4   atomic.Int64 // 非 IPv4 隧道包丢弃的限频锚点
 	lastInternal  atomic.Int64 // 隧道内互访告警限频锚点
+	lastBcastDrop atomic.Int64 // 子网广播丢弃 debug 日志限频锚点
 	lastReject    atomic.Int64 // 拒绝握手告警限频锚点
 	lastHelloDrop atomic.Int64 // 握手队列溢出丢弃的限频锚点
 	lastOverMTU   atomic.Int64 // 出向包超出隧道 MTU 的限频锚点
@@ -973,9 +975,35 @@ func (s *Server) isTunnelInternal(ip netip.Addr) bool {
 	return ip.IsValid() && s.tunPool.Contains(ip)
 }
 
+// subnetBroadcast 返回 IPv4 前缀的子网广播地址（主机位全 1）。前缀无效或 /32
+// 返回零值（调用方按「不等于」处理，天然退化为不降级）。
+func subnetBroadcast(p netip.Prefix) netip.Addr {
+	if !p.IsValid() || !p.Addr().Is4() || p.Bits() >= 32 {
+		return netip.Addr{}
+	}
+	a := p.Addr().As4()
+	v := binary.BigEndian.Uint32(a[:]) | ((1 << uint(32-p.Bits())) - 1)
+	binary.BigEndian.PutUint32(a[:], v)
+	return netip.AddrFrom4(a)
+}
+
 // logTunnelInternal 限频记录隧道内互访的拦截。direction 是被拦地址在 IP 头里
 // 的位置（"源"/"目的"），方便对上排查方向。
 func (s *Server) logTunnelInternal(ps *peerSession, ip netip.Addr, direction string) {
+	// 子网广播（10.66.255.255 这类）是客户端 OS 的固有噪音：Windows 把虚拟
+	// 网卡当成一块局域网网卡，周期性发 NetBIOS/浏览器服务/局域网发现广播。
+	// 广播不可能指向特定用户，没有任何攻击价值，降为 debug 且用独立限频
+	// 锚点——既不刷屏，也不会把真正值得警惕的单播越界告警挤出限频窗口。
+	// 丢包行为本身与级别无关，一律丢弃。
+	if ip == subnetBroadcast(s.tunPool) {
+		if !throttle(&s.lastBcastDrop, 60) {
+			return
+		}
+		logger.S.Debugw("丢弃指向隧道子网广播的包（用户隔离，客户端固有噪音）",
+			"direction", direction, "addr", ip,
+			"user", ps.userName, "code", ps.codeName, "tun_ip", ps.tunIP)
+		return
+	}
 	if !throttle(&s.lastInternal, 10) {
 		return
 	}
