@@ -228,7 +228,7 @@
                   <th x-text="t('状态','Status')"></th>
                   <th x-text="t('流入','In')"></th>
                   <th x-text="t('流出','Out')"></th>
-                  <th x-text="t('连接数','Conns')"></th>
+                  <th x-text="t('连接数（活跃/累计）','Conns (active/total)')" title="活跃：当前有效会话，空闲即回收；累计：本次启动以来的会话总数，只增不减属正常现象"></th>
                   <th x-text="t('操作','Actions')"></th>
                 </tr>
               </thead>
@@ -256,7 +256,7 @@
                     </td>
                     <td class="small" x-text="fmtBytes(r.bytes_in)"></td>
                     <td class="small" x-text="fmtBytes(r.bytes_out)"></td>
-                    <td class="small"><span x-text="r.active_conns"></span>/<span x-text="r.total_conns"></span></td>
+                    <td class="small" title="左：当前活跃会话（空闲 30 秒自动回收）；右：本次启动以来累计建立的会话数，只增不减"><span x-text="r.active_conns"></span>/<span x-text="r.total_conns"></span></td>
                     <td>
                       <div class="d-flex gap-1">
                         <button class="btn btn-xs btn-outline-secondary" @click="editRule(r)" :title="t('编辑','Edit')">
