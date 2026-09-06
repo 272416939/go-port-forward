@@ -416,3 +416,45 @@ func TestSubnetBroadcast(t *testing.T) {
 		t.Fatalf("无效前缀应退化为零值，得到 %v", got)
 	}
 }
+
+// TestHandlePongObservesRTT 锁「面板往返延迟」的数据源：服务端心跳 Ping 的
+// 应答经验证后必须观测 RTT（此前 TypePong 只刷活跃时间，往返延迟恒为空）。
+// 无效 Pong（错误密钥）必须拒绝且不产生观测。
+func TestHandlePongObservesRTT(t *testing.T) {
+	var k1, k2 [32]byte
+	k1[0], k2[0] = 0x11, 0x22
+	clientSess, err := tunnel.NewClientSession(&k1, &k2, 0, 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSess, err := tunnel.NewServerSession(&k1, &k2, 0, 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident := Identity{
+		CodeID: "c1", UserName: "tester", CodeName: "code",
+		TunIP: netip.MustParseAddr("10.66.0.7"),
+	}
+	ps := newPeerSession(ident, serverSess,
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}, 1400)
+	ps.lastPingSentNanos.Store(time.Now().UnixNano() - int64(50*time.Millisecond))
+
+	s := &Server{}
+	wire := clientSess.SealPong(make([]byte, 0, 64), 0, 0)
+	if !s.handlePong(ps, wire) {
+		t.Fatal("有效 Pong 应通过验证")
+	}
+	if rtt := serverSess.Stats().View().RTTMS; rtt <= 0 {
+		t.Fatalf("RTT 应有观测值（约 50ms），得到 %v", rtt)
+	}
+
+	// 错误密钥的 Pong：拒绝且不污染观测。
+	bad1, bad2 := [32]byte{0x99}, [32]byte{0x99}
+	otherSess, err := tunnel.NewClientSession(&bad1, &bad2, 0, 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.handlePong(ps, otherSess.SealPong(make([]byte, 0, 64), 0, 0)) {
+		t.Fatal("错误密钥的 Pong 必须拒绝")
+	}
+}

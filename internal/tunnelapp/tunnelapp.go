@@ -609,7 +609,7 @@ func (s *Server) handleSessionPacket(ps *peerSession, pkt []byte, batch *tunnet.
 	case tunnel.TypePong:
 		// 必须解密验证：此前只看首字节就刷新活跃时间，任何人伪造一个 0x06
 		// 字节就能给别人的会话续命（也就能让空闲回收永不触发）。
-		if _, _, perr := sess.OpenPong(pkt); perr != nil {
+		if !s.handlePong(ps, pkt) {
 			return
 		}
 		s.markActive(ps)
@@ -683,6 +683,19 @@ func (s *Server) deliverInbound(ps *peerSession, pkt []byte, batch *tunnet.Batch
 // pongBuf 取出该会话的应答缓冲。Pong 由入向泵单 goroutine 发出，可以安全复用
 // 会话内的暂存。
 func (s *Server) pongBuf(ps *peerSession) []byte { return ps.ctrlOut[:0] }
+
+// handlePong 处理客户端对服务端心跳的应答：验证并观测 RTT——面板「往返延迟」
+// 的数据源（Ping 在 heartbeat 里发出，基线记在 ps.lastPingSentNanos）。
+// 返回 false 表示包无效（调用方静默丢弃）。
+func (s *Server) handlePong(ps *peerSession, wire []byte) bool {
+	if _, _, err := ps.sess.OpenPong(wire); err != nil {
+		return false
+	}
+	if sent := ps.lastPingSentNanos.Load(); sent > 0 {
+		ps.sess.Stats().ObserveRTT(time.Duration(time.Now().UnixNano() - sent))
+	}
+	return true
+}
 
 // sendTo 逐包发送一个已封装的包（低频路径：Pong、心跳、控制消息）。
 func (s *Server) sendTo(ps *peerSession, wire []byte) {
@@ -1138,6 +1151,7 @@ func (s *Server) heartbeat(udpConn *net.UDPConn) {
 		case <-tick.C:
 			for _, ps := range s.peers.snapshot() {
 				wire := ps.sess.SealPing(buf[:0], 0, 0)
+				ps.lastPingSentNanos.Store(time.Now().UnixNano())
 				if _, err := udpConn.WriteToUDPAddrPort(wire, ps.addrPort); err != nil {
 					ps.sess.Stats().AddTxDropped(1)
 				}

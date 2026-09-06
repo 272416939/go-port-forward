@@ -61,6 +61,9 @@ type peerSession struct {
 	lastSeen atomic.Int64 // Unix 秒
 	// lastTouch 是最近一次把活跃时间写回存储的时刻（Unix 秒），用于限频。
 	lastTouch atomic.Int64
+	// lastPingSentNanos 是服务端最近一次对本会话发心跳 Ping 的时刻（纳秒），
+	// 由心跳 goroutine 写、入向泵读——RTT 观测（面板「往返延迟」）的基线。
+	lastPingSentNanos atomic.Int64
 	// mtu 是本会话协商的隧道 MTU（出向超过它的包无法转发，计入统计）。
 	mtu int
 	// ctrlOut 是 Pong 应答的封装缓冲。Pong 只由入向泵单 goroutine 发出，
