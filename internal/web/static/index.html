@@ -1210,6 +1210,14 @@
               <i class="bi bi-clipboard"></i><span class="d-none d-sm-inline" x-text="t('复制','Copy')"></span>
             </button>
           </div>
+          <div class="input-group input-group-sm mb-2">
+            <span class="input-group-text" x-text="t('隧道密钥','Tunnel secret')"></span>
+            <input class="form-control font-monospace" :value="codeText.secret" readonly/>
+            <button class="btn btn-outline-secondary btn-icon" @click="copyText(codeText.secret, '隧道密钥已复制', 'Tunnel secret copied')">
+              <i class="bi bi-clipboard"></i>
+            </button>
+          </div>
+          <div class="form-text small text-muted mb-2" x-text="t('隧道密钥与接入码内嵌的密钥相同：pf-client 粘贴接入码后已自动保存，仅在手动配置时需要单独使用。','The tunnel secret is identical to the key embedded in the access code; pf-client saves it automatically after pasting — only needed for manual setup.')"></div>
           <div class="row g-2 small text-muted">
             <div class="col-md-4"><span x-text="t('中转机地址','Relay address')"></span>: <span class="font-monospace" x-text="codeText.addr"></span></div>
             <div class="col-md-4"><span x-text="t('隧道地址','Tunnel IP')"></span>: <span class="font-monospace" x-text="codeText.tun_ip"></span></div>
