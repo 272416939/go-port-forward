@@ -95,6 +95,16 @@ Device2 为零值，于是退化成 122B 的 v4 形态——而新服务端只�
 区分「信令到了但数据面没通」是 UDP 数据端口没放行 / candidate 公网 IP 指错，还是 ufrag 没
 匹配。仅为可观测性调整，不改逻辑。
 
+**NetherNet SDP 重写把 CRLF 改成 LF，客户端静默不进 ICE**
+
+BDS 的 SDP answer 按 RFC 4566 用 CRLF 分行；`rewriteSDP` 旧实现 `Split("\n")` +
+`TrimSpace` + `Join("\n")` 无条件输出 LF。基岩版 NetherNet 客户端的 SDP 解析器对
+行尾敏感，收到 LF-only 的 answer 解析不到 candidate → 静默不进 ICE。症状：信令通、
+`registered NetherNet session` 打得到，但数据面一个 STUN 都收不到（无
+`learned`/`dropped`），抓包只见手动测试包、不见客户端 UDP。现参照 NetherProxy 检测
+输入行尾、按同一种行尾重组；另在 `handleJoin` 加 debug 日志，同时落盘 BDS 原始 answer
+与重写后的 answer 便于核对。配套 `TestRewriteSDPPreservesCRLF`。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

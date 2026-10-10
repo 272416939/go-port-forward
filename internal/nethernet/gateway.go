@@ -342,6 +342,16 @@ func (g *Gateway) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Rewrite SDP answer (replace BDS internal address with public address)
 	rewrittenAnswer := g.rewriteSDP(string(answerBody))
 
+	// debug：把 BDS 原始 answer 与重写后的 answer 都落盘，核对客户端实际收到的 SDP
+	// （candidate/m=/c= 重写是否到位、行尾 CRLF 是否保留）。信令/数据面排障关键证据。
+	logger.S.Debugw("NetherNet SDP answer",
+		"status", resp.StatusCode,
+		"content_type", resp.Header.Get("Content-Type"),
+		"data_port", g.dataPort,
+		"original", string(answerBody),
+		"rewritten", rewrittenAnswer,
+	)
+
 	// Register session with multiplexer
 	ufrag := extractIceUfrag(rewrittenAnswer)
 	if ufrag != "" {
@@ -370,7 +380,16 @@ func (g *Gateway) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 // rewriteSDP rewrites SDP answer to replace internal candidate with public address
 func (g *Gateway) rewriteSDP(sdp string) string {
-	lines := strings.Split(sdp, "\n")
+	// 保留原始行尾（CRLF/LF）。SDP 规范（RFC 4566）用 CRLF 分隔行，基岩版
+	// NetherNet 客户端的 SDP 解析器对行尾敏感：旧实现无条件按 "\n" 重组，把 BDS
+	// 的 CRLF answer 改成了 LF，客户端解析不到 candidate → 静默不进 ICE，症状正是
+	// 「信令通、registered 有、数据面一个 STUN 都收不到」。参照 NetherProxy：检测
+	// 输入行尾、按同一种行尾重组，除目标字段外尽量逐字节不变。
+	sep := "\n"
+	if strings.Contains(sdp, "\r\n") {
+		sep = "\r\n"
+	}
+	lines := strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n")
 	var result []string
 
 	for _, line := range lines {
@@ -405,7 +424,7 @@ func (g *Gateway) rewriteSDP(sdp string) string {
 		result = append(result, line)
 	}
 
-	return strings.Join(result, "\n")
+	return strings.Join(result, sep)
 }
 
 // backendDataPort 返回 BDS WebRTC 数据面真正监听的 UDP 端口，取自 SDP answer 的

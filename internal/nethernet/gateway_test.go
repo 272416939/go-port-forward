@@ -89,6 +89,38 @@ a=candidate:1 1 UDP 2130706431 1.2.3.4 19131 typ host`
 	}
 }
 
+// rewriteSDP 必须保留 BDS answer 的行尾（CRLF）。基岩版 NetherNet 客户端对 SDP
+// 行尾敏感：把 CRLF 改成 LF 会让客户端解析不到 candidate、静默不进 ICE（症状=信令通
+// 但数据面一个 STUN 都收不到）。锁住：CRLF 输入 → CRLF 输出，且 c=/m=/candidate 仍
+// 被重写成公网地址。
+func TestRewriteSDPPreservesCRLF(t *testing.T) {
+	g := &Gateway{publicIP: "1.2.3.4", dataPort: 19131}
+
+	crlf := "v=0\r\n" +
+		"o=- 0 0 IN IP4 10.66.0.3\r\n" +
+		"c=IN IP4 10.66.0.3\r\n" +
+		"m=application 19137 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
+		"a=ice-ufrag:test123\r\n" +
+		"a=candidate:1 1 UDP 2130706431 10.66.0.3 19137 typ host\r\n"
+
+	out := g.rewriteSDP(crlf)
+
+	if !strings.Contains(out, "\r\n") {
+		t.Fatalf("CRLF 未保留，客户端 SDP 解析器可能拒绝该 answer：\n%q", out)
+	}
+	// 注意：o= 行的 origin 地址是会话元数据、不用于建连，NetherProxy 同样不改它，
+	// 这里只校验真正决定连接目标的 c=/m=/candidate 三处被重写成公网地址。
+	for _, want := range []string{
+		"c=IN IP4 1.2.3.4\r\n",
+		"m=application 19131 UDP/DTLS/SCTP webrtc-datachannel\r\n",
+		"a=candidate:1 1 UDP 2130706431 1.2.3.4 19131 typ host\r\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("重写后的 answer 缺少 %q：\n%s", want, out)
+		}
+	}
+}
+
 func TestExtractIceUfrag(t *testing.T) {
 	sdp := `v=0
 a=ice-ufrag:test123
