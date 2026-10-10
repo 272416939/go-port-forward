@@ -64,55 +64,91 @@ func buildHello(secret []byte, uid UID, device [FingerprintSize]byte, ver byte, 
 }
 
 // PeekLegacyHelloUID 从一个「版本过旧但格式可识别」的 Hello 里取出声称的
-// 访问码 ID（v3 与 v4 的字段偏移相同）。只做长度与版本字节检查，不验证 MAC。
-// v1/v2 的布局不同，一律返回 false。
+// 访问码 ID。只做长度与版本字节检查，不验证 MAC。v1/v2 的布局不同，一律
+// 返回 false。
+//
+// v5 硬切换后要识别的旧版本有三档：v3（0x03）、v4（0x04，122B）、
+// v5（0x05，154B）。三者的 uid 偏移相同（都在 b[2:18]），所以长度只用来
+// 兜底防越界。
 func PeekLegacyHelloUID(b []byte) (UID, bool) {
 	var uid UID
 	if len(b) < helloLen || b[0] != TypeHello {
 		return uid, false
 	}
-	if b[1] != VersionV3 && b[1] != Version {
-		return uid, false
+	switch b[1] {
+	case VersionV3, VersionV4, helloVerV5:
+		copy(uid[:], b[2:2+UIDSize])
+		return uid, true
 	}
-	copy(uid[:], b[2:2+UIDSize])
-	return uid, true
+	return uid, false
 }
 
 // InspectLegacyHello 用对应版本的域标签验证一条旧版 Hello 的 MAC。
 // 通过则返回客户端临时公钥与它的协议版本；失败一律 ok=false（调用方保持静默）。
 // 时间窗检查与当前版本一致（防重放）。
+//
+// v4（122B）与 v5（154B）的字段偏移不同——v5 中间多一段 Device2，eph/ts/mac
+// 整体后移 32 字节。按版本分派偏移，否则会把 v5 包的 MAC 验成一坨噪声。
 func InspectLegacyHello(secret, b []byte) (clientEph [32]byte, ver byte, ok bool) {
 	if len(b) < helloLen || b[0] != TypeHello {
 		return clientEph, 0, false
 	}
 	ver = b[1]
 	var domain []byte
+	var ephOff, tsOff, macOff int
 	switch ver {
-	case VersionV3:
-		domain = helloDomainV3
-	case Version:
-		domain = helloDomain
+	case VersionV3, VersionV4:
+		domain = helloDomainForLegacy(ver)
+		ephOff, tsOff, macOff = 50, 82, 90
+	case helloVerV5:
+		domain = helloDomain5
+		ephOff, tsOff, macOff = 82, 114, 122
 	default:
 		return clientEph, 0, false
 	}
-	ts := binary.BigEndian.Uint64(b[82:90])
+	if len(b) < macOff+32 {
+		return clientEph, 0, false
+	}
+	ts := binary.BigEndian.Uint64(b[tsOff : tsOff+8])
 	age := time.Since(time.Unix(int64(ts), 0))
 	if age < -helloMaxAge || age > helloMaxAge {
 		return clientEph, 0, false
 	}
-	want := macPSK(secret, domain, []byte{ver}, b[2:18], b[18:50], b[50:82], b[82:90])
-	if !hmac.Equal(want[:], b[90:122]) {
+	// 字段集随布局变化：122B 的 v3/v4 是 (uid, device, eph, ts)；154B 的 v5
+	// 中间多一段 Device2 且它**进 MAC**（指纹 v2 必须受认证，否则中间人能把
+	// 克隆机的指纹 v2 改成正主的）。漏掉它会让合法旧 v5 客户端复验失败，
+	// 又回到「无应答」。
+	var want [32]byte
+	if ver == helloVerV5 {
+		want = macPSK(secret, domain, []byte{ver},
+			b[2:18], b[18:50], b[50:82], b[ephOff:ephOff+32], b[tsOff:tsOff+8])
+	} else {
+		want = macPSK(secret, domain, []byte{ver},
+			b[2:18], b[18:50], b[ephOff:ephOff+32], b[tsOff:tsOff+8])
+	}
+	if !hmac.Equal(want[:], b[macOff:macOff+32]) {
 		return clientEph, 0, false
 	}
-	copy(clientEph[:], b[50:82])
+	copy(clientEph[:], b[ephOff:ephOff+32])
 	return clientEph, ver, true
+}
+
+// helloDomainForLegacy 返回 122B 旧 Hello 的域标签（v3 与 v4 各有一个）。
+func helloDomainForLegacy(ver byte) []byte {
+	if ver == VersionV3 {
+		return helloDomainV3
+	}
+	return helloDomain
 }
 
 // LegacyVersionReject 为一条已通过 InspectLegacyHello 的旧版 Hello 构造拒绝
 // 应答：用**该客户端自己的协议版本**的域标签签名，所以旧客户端能验证并显示
-// 出「被拒绝」而不是无应答。reason 固定 0（v3 词表没有版本语义；v4 Hello 在
-// v5 服务端被**接受**（只动 Hello 的版本策略），因此 0x04 不会走到跨版本
-// 应答；reason 6 留给未来真正拒收旧版 Hello 的版本使用）。
+// 出「被拒绝」而不是无应答。
+//
+// 版本字节的取值要注意：旧客户端（v4 与 v5 Hello 两种）的 ParseServerReject
+// 都只认**它自己时代的全局 Version = 0x04**。所以这两种旧 Hello 回拒绝时
+// 版本字节一律写 0x04 + rejectDomainV4——写 0x05 旧客户端会当成异端包丢弃，
+// 又回到「无应答」。
 //
 // 入参必须原样是收到的 Hello 报文；MAC 复验失败返回 nil（调用方静默）。
 func LegacyVersionReject(secret, hello []byte) []byte {
@@ -120,19 +156,20 @@ func LegacyVersionReject(secret, hello []byte) []byte {
 	if !ok {
 		return nil
 	}
+	var outVer byte
 	var domain []byte
 	switch ver {
 	case VersionV3:
-		domain = rejectDomainV3
-	case Version:
-		domain = rejectDomain
+		outVer, domain = VersionV3, rejectDomainV3
+	case VersionV4, helloVerV5:
+		outVer, domain = VersionV4, rejectDomainV4
 	default:
 		return nil
 	}
 	reason := byte(RejectUnknown)
-	mac := macPSK(secret, domain, []byte{ver}, []byte{reason}, eph[:])
+	mac := macPSK(secret, domain, []byte{outVer}, []byte{reason}, eph[:])
 	out := make([]byte, 0, rejectLen)
-	out = append(out, TypeReject, ver, reason)
+	out = append(out, TypeReject, outVer, reason)
 	out = append(out, mac[:]...)
 	return out
 }

@@ -934,7 +934,7 @@ func (s *Server) logOldVersion(from netip.AddrPort) {
 	if !throttle(&s.lastOldVer, 30) {
 		return
 	}
-	logger.S.Warnw("隧道客户端协议版本过旧，请升级 pf-client（当前版本要求 v4 握手：方向密钥分离 + AEAD）", "src", from)
+	logger.S.Warnw("隧道客户端协议版本过旧，请升级 pf-client（当前版本要求 v5 握手）", "src", from)
 }
 
 func (s *Server) logAuthFail(from netip.AddrPort, reason, who string) {

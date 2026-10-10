@@ -87,11 +87,12 @@ type LogConfig struct {
 
 // ForwardConfig holds forwarding tuning parameters.
 type ForwardConfig struct {
-	PoolSize          int `mapstructure:"pool_size"`           // goroutine pool size (0 = NumCPU*64)
-	BufferSize        int `mapstructure:"buffer_size"`         // I/O buffer size in bytes
-	UDPTimeout        int `mapstructure:"udp_timeout"`         // UDP session idle timeout (seconds)
-	DialTimeout       int `mapstructure:"dial_timeout"`        // outbound dial timeout (seconds)
-	ConnLogMaxEntries int `mapstructure:"connlog_max_entries"` // connection log retention cap (rows)
+	PoolSize          int    `mapstructure:"pool_size"`           // goroutine pool size (0 = NumCPU*64)
+	BufferSize        int    `mapstructure:"buffer_size"`         // I/O buffer size in bytes
+	UDPTimeout        int    `mapstructure:"udp_timeout"`         // UDP session idle timeout (seconds)
+	DialTimeout       int    `mapstructure:"dial_timeout"`        // outbound dial timeout (seconds)
+	ConnLogMaxEntries int    `mapstructure:"connlog_max_entries"` // connection log retention cap (rows)
+	PublicIP          string `mapstructure:"public_ip"`           // Public IP for NetherNet SDP rewriting (auto-detect if empty)
 }
 
 // GCConfig holds garbage collection management configuration.
@@ -119,9 +120,10 @@ var global *AppConfig
 //
 // 注意：运行时行为不依赖版本号——缺失的键一律按代码默认值生效，即使升级
 // 写回失败也不影响启动。
-const ConfigVersion = 2
+const ConfigVersion = 3
 
 // v2 = 新增 tunnel.io_mode / fec / tail_dup / udp_gro / udp_gso。
+// v3 = 新增 forward.public_ip（NetherNet 的 SDP 重写用公网地址，留空自动探测）。
 
 // upgradedNote 记录最近一次配置文件升级的说明（Load 在 logger 初始化之前运行，
 // 这里只存字符串，由 main 在日志可用后取出打印一次）。
@@ -205,6 +207,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("forward.udp_timeout", 30)
 	v.SetDefault("forward.dial_timeout", 10)
 	v.SetDefault("forward.connlog_max_entries", 2000)
+	// NetherNet 的 SDP 重写用的公网地址；空 = 启动时自动探测出口网卡。
+	v.SetDefault("forward.public_ip", "")
 
 	v.SetDefault("tunnel.enabled", false)
 	v.SetDefault("tunnel.listen", ":7947")

@@ -50,8 +50,8 @@ func TestLoadFreshWritesVersionAndAllKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, key := range []string{"version: 2", "io_mode: batch", "fec: false",
-		"tail_dup: false", "udp_gro: false", "udp_gso: false"} {
+	for _, key := range []string{"version: 3", "io_mode: batch", "fec: false",
+		"tail_dup: false", "udp_gro: false", "udp_gso: false", "public_ip: \"\""} {
 		if !strings.Contains(text, key) {
 			t.Fatalf("新生成的文件缺少 %q：\n%s", key, text)
 		}
@@ -96,7 +96,7 @@ func TestLoadUpgradesV1FileInPlace(t *testing.T) {
 	text := string(raw)
 
 	// 新键补全。
-	if !strings.Contains(text, "version: 2") {
+	if !strings.Contains(text, "version: 3") {
 		t.Fatalf("升级后的文件应带当前版本号：\n%s", text)
 	}
 	for _, key := range []string{"io_mode:", "fec:", "tail_dup:", "udp_gro:", "udp_gso:"} {
@@ -137,7 +137,7 @@ func TestLoadUpgradesV1FileInPlace(t *testing.T) {
 	}
 
 	// 升级说明被记录（main 在日志可用后打印）。
-	if note := TakeUpgradeNote(); !strings.Contains(note, "v1 升级到 v2") {
+	if note := TakeUpgradeNote(); !strings.Contains(note, "v1 升级到 v3") {
 		t.Fatalf("升级说明不符: %q", note)
 	}
 	// 取过即清空，避免下次启动重复打印。
@@ -155,8 +155,8 @@ func TestLoadDoesNotRewriteCurrentVersion(t *testing.T) {
 	}
 	// 在文件里手写一段注释——用户的真实习惯；当前版本下重写会把它弄丢。
 	raw, _ := os.ReadFile(path)
-	annotated := strings.Replace(string(raw), "version: 2",
-		"# 这个端口是公网入口，改动前先看运维手册\nversion: 2", 1)
+	annotated := strings.Replace(string(raw), "version: 3",
+		"# 这个端口是公网入口，改动前先看运维手册\nversion: 3", 1)
 	if err := os.WriteFile(path, []byte(annotated), 0o600); err != nil {
 		t.Fatal(err)
 	}

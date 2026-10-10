@@ -45,7 +45,7 @@ func sessionPair(t testing.TB, feats uint8) (client, server *Session) {
 	secret := []byte("per-code-secret")
 	uid := mustUID(t, "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9")
 
-	hello, clientPriv, err := NewClientHello(secret, uid, testDevice)
+	hello, clientPriv, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestHandshakeAndSessionRoundTrip(t *testing.T) {
 	secret := []byte("per-user-secret-001")
 	uid := mustUID(t, "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9")
 
-	hello, clientPriv, err := NewClientHello(secret, uid, testDevice)
+	hello, clientPriv, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestCounterIsAuthenticated(t *testing.T) {
 
 func TestWrongSecretRejected(t *testing.T) {
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello([]byte("right-secret"), uid, testDevice)
+	hello, _, err := NewClientHelloV6([]byte("right-secret"), uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestCrossUserSecretRejected(t *testing.T) {
 	uidA := mustUID(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	uidB := mustUID(t, "11111111-2222-3333-4444-555555555555")
 
-	hello, _, err := NewClientHello(secretA, uidA, testDevice)
+	hello, _, err := NewClientHelloV6(secretA, uidA, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestCrossUserSecretRejected(t *testing.T) {
 func TestTamperedAcceptFieldsRejected(t *testing.T) {
 	secret := []byte("s")
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello(secret, uid, testDevice)
+	hello, _, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestOldAcceptReportedAsOldVersion(t *testing.T) {
 func TestTamperedDeviceRejected(t *testing.T) {
 	secret := []byte("s")
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello(secret, uid, testDevice)
+	hello, _, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestTamperedDeviceRejected(t *testing.T) {
 func TestRejectRequiresValidMAC(t *testing.T) {
 	secret := []byte("s")
 	uid := mustUID(t, "3f2b1c4d5e6f40718293a4b5c6d7e8f9")
-	hello, _, err := NewClientHello(secret, uid, testDevice)
+	hello, _, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,23 +753,23 @@ func TestProbePacketFitsMaxPacket(t *testing.T) {
 	}
 }
 
-// ---- Hello v5：设备指纹 v2（克隆虚拟机去重）----
+// ---- Hello v6：当前形态（154B，设备指纹 v2）----
 
-func TestClientHelloV5RoundTrip(t *testing.T) {
+func TestClientHelloV6RoundTrip(t *testing.T) {
 	secret := []byte("test-secret")
 	uid := mustUID(t, "00112233445566778899aabbccddeeff")
 	device2 := [FingerprintSize]byte{0x5A, 0x6B, 0x7C, 0x8D}
 
-	h, _, err := NewClientHelloV5(secret, uid, testDevice, device2)
+	h, _, err := NewClientHelloV6(secret, uid, testDevice, device2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wire := h.Marshal()
 	if len(wire) != helloLenV5 {
-		t.Fatalf("v5 Hello 长度 = %d, want %d", len(wire), helloLenV5)
+		t.Fatalf("v6 Hello 长度 = %d, want %d", len(wire), helloLenV5)
 	}
-	if wire[1] != helloVerV5 {
-		t.Fatalf("v5 Hello 版本字节 = %#x, want %#x", wire[1], helloVerV5)
+	if wire[1] != helloVerV6 {
+		t.Fatalf("v6 Hello 版本字节 = %#x, want %#x", wire[1], helloVerV6)
 	}
 	got, err := ParseClientHello(secret, wire)
 	if err != nil {
@@ -780,7 +780,9 @@ func TestClientHelloV5RoundTrip(t *testing.T) {
 	}
 }
 
-func TestClientHelloV4MarshalUnchanged(t *testing.T) {
+// v4 形态的线上布局必须保持不变——服务端要靠它识别旧客户端并回跨版本拒绝。
+// 但 ParseClientHello 现在必须拒绝它（硬切换），这是本测试的核心断言。
+func TestClientHelloV4MarshalUnchangedButRejected(t *testing.T) {
 	secret := []byte("test-secret")
 	uid := mustUID(t, "00112233445566778899aabbccddeeff")
 	h, _, err := NewClientHello(secret, uid, testDevice)
@@ -794,27 +796,20 @@ func TestClientHelloV4MarshalUnchanged(t *testing.T) {
 	if wire[1] != helloVerV4 {
 		t.Fatalf("v4 Hello 版本字节 = %#x, want %#x", wire[1], helloVerV4)
 	}
-	got, err := ParseClientHello(secret, wire)
-	if err != nil {
-		t.Fatalf("ParseClientHello: %v", err)
-	}
-	if got.Device != testDevice {
-		t.Fatal("v4 字段回写不一致")
-	}
-	if got.HasDevice2() {
-		t.Fatal("v4 形态不得携带指纹 v2")
+	if _, err := ParseClientHello(secret, wire); !errors.Is(err, ErrOldVersion) {
+		t.Fatalf("v4 Hello 必须报 ErrOldVersion，得到 %v", err)
 	}
 }
 
-func TestHelloV5TamperedDevice2Rejected(t *testing.T) {
+func TestHelloV6TamperedDevice2Rejected(t *testing.T) {
 	secret := []byte("test-secret")
 	uid := mustUID(t, "00112233445566778899aabbccddeeff")
-	h, _, err := NewClientHelloV5(secret, uid, testDevice, otherDevice)
+	h, _, err := NewClientHelloV6(secret, uid, testDevice, otherDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wire := h.Marshal()
-	// Device2 位于 v5 布局偏移 50..82（2+16+32 之后），篡改它必须被 MAC 拦下
+	// Device2 位于 154B 布局偏移 50..82（2+16+32 之后），篡改它必须被 MAC 拦下
 	// ——指纹 v2 进 MAC 的回归锁：漏了它，中间人可以把克隆机的指纹 v2 改成
 	// 正主的，绕过克隆去重。
 	if wire[50] == 0xFF {
@@ -827,11 +822,11 @@ func TestHelloV5TamperedDevice2Rejected(t *testing.T) {
 	}
 }
 
-func TestHelloV5DomainSeparation(t *testing.T) {
-	// v4/v5 域标签必须互不认证：v4 的 MAC 拿到 v5 域下验不过，反之亦然。
+func TestHelloV6DomainSeparation(t *testing.T) {
+	// v4/v6 域标签必须互不认证：v4 的 MAC 拿到 v6 域下验不过，反之亦然。
 	secret := []byte("test-secret")
 	uid := mustUID(t, "00112233445566778899aabbccddeeff")
-	h5, _, err := NewClientHelloV5(secret, uid, testDevice, testDevice)
+	h6, _, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,8 +834,91 @@ func TestHelloV5DomainSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(h5.MAC[:], h4.MAC[:]) {
-		t.Fatal("v4/v5 域标签下同一组字段的 MAC 不应相同")
+	if bytes.Equal(h6.MAC[:], h4.MAC[:]) {
+		t.Fatal("v4/v6 域标签下同一组字段的 MAC 不应相同")
+	}
+}
+
+// ---- v5 硬切换：旧客户端必须被拒，且拒得可诊断 ----
+
+// 旧客户端（v4 与 v5 两种 Hello）连新服务端，必须得到 ErrOldVersion 而不是
+// ErrAuth/ErrBadPacket——后两者的文案会让运维去查密钥、查网络。
+func TestOldClientHellosRejectedAsOldVersion(t *testing.T) {
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+
+	old4, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 旧版 v5 形态：布局与 v6 相同，只有版本字节与域标签不同。用 v6 构造后
+	// 改回旧版本字节、并按旧域标签重签，得到一条真正合法的旧 v5 Hello。
+	old5, _, err := NewClientHelloV6(secret, uid, testDevice, otherDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire5 := old5.Marshal()
+	wire5[1] = helloVerV5
+	// 按旧域标签重签（slice 元素不可寻址，先取出再整体写回）
+	resigned := macPSK(secret, helloDomain5,
+		[]byte{helloVerV5}, wire5[2:18], wire5[18:50], wire5[50:82], wire5[82:114], wire5[114:122])
+	copy(wire5[122:154], resigned[:])
+
+	for name, wire := range map[string][]byte{"v4": old4.Marshal(), "v5": wire5} {
+		if _, err := ParseClientHello(secret, wire); !errors.Is(err, ErrOldVersion) {
+			t.Errorf("旧版 %s Hello 必须报 ErrOldVersion，得到 %v", name, err)
+		}
+		if _, err := PeekHello(wire); !errors.Is(err, ErrOldVersion) {
+			t.Errorf("旧版 %s Hello 的 PeekHello 必须报 ErrOldVersion，得到 %v", name, err)
+		}
+	}
+}
+
+// 反向：新客户端连旧服务端。旧服务端的 Accept 版本字节是 0x04，新客户端必须
+// 报 ErrOldVersion（界面据此提示「服务端版本过旧」），而不是认证失败。
+func TestNewClientRejectsOldServerAccept(t *testing.T) {
+	if Version != 0x05 {
+		t.Fatalf("当前协议版本应为 0x05，实际 %#x", Version)
+	}
+	if VersionV4 != 0x04 || VersionV3 != 0x03 {
+		t.Fatalf("历史版本常量缺失：V4=%#x V3=%#x", VersionV4, VersionV3)
+	}
+	old := make([]byte, acceptLen)
+	old[0], old[1] = TypeAccept, VersionV4
+	if _, err := ParseServerAccept([]byte("s"), old, [32]byte{}); !errors.Is(err, ErrOldVersion) {
+		t.Fatalf("旧服务端 Accept 必须报 ErrOldVersion，得到 %v", err)
+	}
+}
+
+// 机器上两个指纹来源都取不到时（device 与 device2 都是零值），客户端仍然必须发
+// 154B 的 v6 形态。若按 HasDevice2() 推断布局而退化成 122B，服务端会把它当旧版
+// 拒掉——症状是「这台机器就是连不上」，而真正的原因只是没指纹，极难排查。
+func TestClientHelloV6AlwaysUsesV6LayoutEvenWithoutFingerprints(t *testing.T) {
+	secret := []byte("test-secret")
+	uid := mustUID(t, "00112233445566778899aabbccddeeff")
+	var zero [FingerprintSize]byte
+
+	h, _, err := NewClientHelloV6(secret, uid, zero, zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := h.Marshal()
+	if len(wire) != helloLenV5 {
+		t.Fatalf("零指纹也应发 154B，实际 %d", len(wire))
+	}
+	if wire[1] != helloVerV6 {
+		t.Fatalf("零指纹的版本字节 = %#x, want %#x", wire[1], helloVerV6)
+	}
+	got, err := ParseClientHello(secret, wire)
+	if err != nil {
+		t.Fatalf("零指纹的 v6 Hello 必须能被服务端接受：%v", err)
+	}
+	if got.HasDevice2() {
+		t.Fatal("零指纹时 Device2 应为零值（服务端据此跳过迁移）")
+	}
+	// 重新序列化必须仍得到同一条包（ver 字段在解析后被回填）
+	if !bytes.Equal(got.Marshal(), wire) {
+		t.Fatal("解析后再序列化应与原包逐字节一致")
 	}
 }
 
@@ -865,12 +943,13 @@ func TestPeekHelloVersionMatrix(t *testing.T) {
 	}{
 		{"v1 长度", append([]byte{TypeHello}, make([]byte, helloLenV1-1)...), ErrOldVersion},
 		{"v2 长度", append([]byte{TypeHello}, make([]byte, helloLenV2-1)...), ErrOldVersion},
-		{"v4 正常", mk(helloVerV4, 0), nil},
-		{"122 字节但 v3 版本字节", mk(VersionV3, 0), ErrOldVersion},
-		{"122 字节但 v5 版本字节", mk(helloVerV5, 0), ErrOldVersion},
-		{"154 字节 v4 版本字节", mk(helloVerV4, FingerprintSize), ErrOldVersion},
-		{"未知更大长度", mk(helloVerV5, FingerprintSize+7), ErrOldVersion},
-		{"非 Hello 类型", append([]byte{TypeData, 0x04}, make([]byte, 120)...), ErrBadPacket},
+		{"v6 正常", mk(helloVerV6, FingerprintSize), nil},
+		{"122 字节 v4 版本字节", mk(helloVerV4, 0), ErrOldVersion},
+		{"122 字节 v3 版本字节", mk(VersionV3, 0), ErrOldVersion},
+		{"154 字节但 v5 版本字节", mk(helloVerV5, FingerprintSize), ErrOldVersion},
+		{"154 字节但 v4 版本字节", mk(helloVerV4, FingerprintSize), ErrOldVersion},
+		{"未知更大长度", mk(helloVerV6, FingerprintSize+7), ErrOldVersion},
+		{"非 Hello 类型", append([]byte{TypeData, 0x05}, make([]byte, 152)...), ErrBadPacket},
 		{"过短垃圾", make([]byte, 100), ErrBadPacket},
 	}
 	for _, tc := range cases {
@@ -879,12 +958,12 @@ func TestPeekHelloVersionMatrix(t *testing.T) {
 			t.Errorf("%s: peekHello err = %v, want %v", tc.name, err, tc.want)
 		}
 	}
-	// v5 正常形态单独验证（mk 不产 v5）
-	h5, _, err := NewClientHelloV5(secret, uid, testDevice, testDevice)
+	// v6 正常形态单独验证版本字节回读
+	h6, _, err := NewClientHelloV6(secret, uid, testDevice, testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ver, err := peekHello(h5.Marshal()); err != nil || ver != helloVerV5 {
-		t.Fatalf("v5 peekHello: ver=%#x err=%v", ver, err)
+	if _, ver, err := peekHello(h6.Marshal()); err != nil || ver != helloVerV6 {
+		t.Fatalf("v6 peekHello: ver=%#x err=%v", ver, err)
 	}
 }

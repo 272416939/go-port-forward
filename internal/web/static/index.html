@@ -244,6 +244,12 @@
                     <td class="font-monospace small" x-text="(r.listen_addr||'0.0.0.0')+':'+r.listen_port"></td>
                     <td>
                       <span class="badge text-bg-secondary rounded-pill" x-text="(r.protocol||'tcp').toUpperCase()"></span>
+                      <!-- NetherNet 标识：这类规则的数据面走 WebRTC 多路复用，玩家看到的
+                           端口是信令端口，与普通 UDP 转发规则排查路径不同。 -->
+                      <span class="badge text-bg-info rounded-pill ms-1" style="display:none"
+                            x-show="r.nethernet"
+                            :title="t('NetherNet（WebRTC）代理：HTTP/HTTPS 信令 + UDP 数据面多路复用','NetherNet (WebRTC) proxy: HTTP/HTTPS signaling + UDP data-plane multiplexing')"
+                            x-text="t('NetherNet','NetherNet')"></span>
                     </td>
                     <td class="font-monospace small" x-text="r.target_addr+':'+r.target_port"></td>
                     <td>
@@ -434,6 +440,79 @@
             <div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" x-model="form.proxy_protocol" id="chkProxyProto"/>
               <label class="form-check-label" for="chkProxyProto" :title="t('向目标服务器注入 PROXY Protocol v2 头以透传客户端真实 IP，需后端支持该协议，否则会把头当作应用数据','Prepends a PROXY Protocol v2 header carrying the real client IP toward the target. The backend must support it, otherwise the header is treated as payload')" x-text="t('启用真实IP透传','Real IP Passthrough (PROXY v2)')"></label>
+            </div>
+          </div>
+
+          <!-- NetherNet 模式（仅在透明代理模式下显示） -->
+          <div class="col-12" style="display:none" x-show="form.mode==='transparent'">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" x-model="form.nethernet" id="chkNetherNet"/>
+              <label class="form-check-label" for="chkNetherNet">
+                <span x-text="t('启用 NetherNet 模式','Enable NetherNet Mode')"></span>
+                <small class="text-muted ms-1" x-text="t('(Minecraft 基岩版 1.20.60+ 新网络协议)','(Minecraft Bedrock 1.20.60+ new protocol)')"></small>
+              </label>
+            </div>
+            <div class="form-text" x-text="t('启用后支持 HTTP/HTTPS 双协议信令，自动处理 SDP 重写与 UDP 多路复用；后端零插件看到玩家真实 IP。iOS 玩家需要 HTTPS。','Enables HTTP/HTTPS dual-protocol signaling with automatic SDP rewrite and UDP multiplexing; the backend still sees real player IPs with no plugins. iOS requires HTTPS.')"></div>
+          </div>
+
+          <!-- NetherNet TLS 配置（NetherNet 开关打开才显示）。用 x-show 而非
+               x-if：这些字段必须始终存在于表单里，否则关掉再打开 NetherNet 时
+               Alpine 会重建节点、丢掉用户已填的证书路径。 -->
+          <div class="col-12" style="display:none" x-show="form.mode==='transparent' && form.nethernet">
+            <div class="card bg-light">
+              <div class="card-body py-2">
+                <h6 class="card-title mb-2" x-text="t('NetherNet TLS 配置','NetherNet TLS Configuration')"></h6>
+
+                <div class="row g-2">
+                  <div class="col-12">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" x-model="form.nethernet_tls_enabled" id="chkNetherNetTLS"/>
+                      <label class="form-check-label" for="chkNetherNetTLS" x-text="t('启用 TLS（iOS 必需）','Enable TLS (Required for iOS)')"></label>
+                    </div>
+                    <div class="form-text" x-text="t('安卓玩家可用明文 HTTP；iOS 玩家必须 HTTPS。','Android players can use plain HTTP; iOS requires HTTPS.')"></div>
+                  </div>
+
+                  <div class="col-12" style="display:none" x-show="form.nethernet_tls_enabled">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" x-model="form.nethernet_tls_dual" id="chkNetherNetDual"/>
+                      <label class="form-check-label" for="chkNetherNetDual">
+                        <span x-text="t('双模式（同端口同时支持 HTTP + HTTPS）','Dual Mode (HTTP + HTTPS on same port)')"></span>
+                      </label>
+                    </div>
+                    <div class="form-text" x-text="t('推荐开启：安卓使用 HTTP，iOS 使用 HTTPS，无需分端口','Recommended: Android uses HTTP, iOS uses HTTPS, no separate ports')"></div>
+                  </div>
+
+                  <!-- 证书/私钥是「粘贴内容」而不是服务器路径：每个用户有自己的域名
+                       与自己申请的证书，服务端只负责把内容加载成 keypair。 -->
+                  <div class="col-12" style="display:none" x-show="form.nethernet_tls_enabled">
+                    <label class="form-label">
+                      <span x-text="t('证书内容（PEM）','Certificate (PEM)')"></span>
+                      <span class="text-danger">*</span>
+                    </label>
+                    <textarea class="form-control font-monospace" rows="4" x-model="form.nethernet_cert_pem"
+                              :placeholder="t('-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----','-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----')"></textarea>
+                    <div class="form-text" x-text="t('粘贴 fullchain（含中间证书）。用你自己的域名申请，例如 Let\u2019s Encrypt。','Paste the fullchain (including intermediates). Issued for your own domain, e.g. Let\u2019s Encrypt.')"></div>
+                  </div>
+
+                  <div class="col-12" style="display:none" x-show="form.nethernet_tls_enabled">
+                    <label class="form-label">
+                      <span x-text="t('私钥内容（PEM）','Private Key (PEM)')"></span>
+                      <span class="text-danger">*</span>
+                    </label>
+                    <textarea class="form-control font-monospace" rows="4" x-model="form.nethernet_key_pem"
+                              :placeholder="t('-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----','-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----')"></textarea>
+                    <div class="form-text" x-text="t('与上面证书配对的私钥。加密过的私钥不被支持。','The private key matching the certificate above. Encrypted keys are not supported.')"></div>
+                  </div>
+
+                  <div class="col-md-6" style="display:none" x-show="form.nethernet_tls_enabled">
+                    <label class="form-label" x-text="t('UDP 数据端口','UDP Data Port')"></label>
+                    <input class="form-control" type="number" min="1" max="65535"
+                           x-model.number="form.nethernet_data_port"
+                           :placeholder="t('默认为信令端口+1','Defaults to signal port + 1')"/>
+                    <div class="form-text" x-text="t('WebRTC 数据传输端口（留空自动使用监听端口+1）','WebRTC data port (auto: listen port + 1)')"></div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2805,6 +2884,13 @@ function portForwardApp() {
 	        add_firewall:false,
 	        proxy_protocol:false,
 	        transparent:false,
+	        // NetherNet 相关字段
+	        nethernet: false,
+	        nethernet_tls_enabled: false,
+	        nethernet_tls_dual: true,
+	        nethernet_cert_pem: '',
+	        nethernet_key_pem: '',
+	        nethernet_data_port: null,
 	      }
 	    },
 
@@ -2824,12 +2910,20 @@ function portForwardApp() {
 	        add_firewall: rule.add_firewall ?? false,
 	        proxy_protocol: rule.proxy_protocol ?? false,
 	        transparent: rule.transparent ?? false,
+	        // NetherNet 相关字段
+	        nethernet: rule.nethernet ?? false,
+	        nethernet_tls_enabled: rule.nethernet_tls?.enabled ?? false,
+	        nethernet_tls_dual: rule.nethernet_tls?.dual ?? true,
+	        nethernet_cert_pem: rule.nethernet_tls?.cert_pem ?? '',
+	        nethernet_key_pem: rule.nethernet_tls?.key_pem ?? '',
+	        nethernet_data_port: rule.nethernet_tls?.data_port ?? null,
 	      }
 	    },
 
 	    buildRulePayload() {
 	      const transparent = this.form.mode === 'transparent'
-	      return {
+	      const nethernet = transparent && !!this.form.nethernet
+	      const payload = {
 	        name: this.form.name,
 	        listen_addr: this.form.listen_addr,
 	        listen_port: Number(this.form.listen_port),
@@ -2842,7 +2936,23 @@ function portForwardApp() {
 	        add_firewall: !!this.form.add_firewall,
 	        proxy_protocol: transparent ? false : !!this.form.proxy_protocol,
 	        transparent: transparent,
+	        nethernet: nethernet,
 	      }
+	      // NetherNet 配置仅在开关打开时提交；否则不提交该字段（DisallowUnknownFields
+	      // 已过时风险之外，还避免给后端塞一个半成品结构体）。
+	      if (nethernet) {
+	        const tls = {
+	          enabled: !!this.form.nethernet_tls_enabled,
+	          dual:    !!this.form.nethernet_tls_dual,
+	          data_port: this.form.nethernet_data_port ? Number(this.form.nethernet_data_port) : 0,
+	        }
+	        if (tls.enabled) {
+	          tls.cert_pem = (this.form.nethernet_cert_pem || '').trim()
+	          tls.key_pem  = (this.form.nethernet_key_pem || '').trim()
+	        }
+	        payload.nethernet_tls = tls
+	      }
+	      return payload
 	    },
 
 	    async inspectRuleFromDiagnostics(id, options = {}) {
@@ -2894,6 +3004,16 @@ function portForwardApp() {
           '该地址是访问码的隧道地址：经隧道转发的流量请改用「透明代理」模式（转发目标选访问码，仅支持 UDP）；TCP 无法经隧道转发。',
           'That address is an access-code tunnel address; switch to Transparent mode for tunnel traffic (UDP only). TCP cannot be forwarded through the tunnel.')
         return
+      }
+
+      // NetherNet 校验：开启 NetherNet 时 TLS 若启用则证书/私钥内容必填。
+      // 只做「非空」检查；能不能配成一对由服务端在保存时解析并回报。
+      if (this.form.mode === 'transparent' && this.form.nethernet && this.form.nethernet_tls_enabled) {
+        if (!this.form.nethernet_cert_pem || !this.form.nethernet_key_pem) {
+          this.formError = _t('已启用 NetherNet TLS：请粘贴证书内容与私钥内容（PEM）。iOS 玩家需要 HTTPS。',
+                             'NetherNet TLS is enabled: paste both the certificate and private key (PEM). iOS requires HTTPS.')
+          return
+        }
       }
 
       this.saving = true

@@ -46,6 +46,7 @@ var configLayout = []sectionDoc{
 			{key: "forward.connlog_max_entries", comment: "连接日志保留上限的兜底值；正式生效值在\n# 面板「全局设置 → 每用户日志保留上限」（默认 10000 条，环形裁剪最旧）"},
 			{key: "forward.dial_timeout", comment: "出站连接超时（秒）"},
 			{key: "forward.pool_size", comment: "转发协程池容量；0 = 自动（CPU 数 × 64）"},
+			{key: "forward.public_ip", comment: "NetherNet 的 SDP 重写用的公网地址\n# （玩家连这个地址）。留空则自动探测出口网卡地址；NAT/容器环境下\n# 探测到的可能是内网地址，那时必须手动指定"},
 			{key: "forward.udp_timeout", comment: "UDP 会话空闲超时（秒）：超时会话回收，下个包新建"},
 		},
 	},

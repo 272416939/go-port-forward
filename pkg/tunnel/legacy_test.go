@@ -116,6 +116,61 @@ func TestLegacyVersionRejectVerifiableByV3Client(t *testing.T) {
 		t.Fatal("MAC 无效时必须返回 nil（调用方静默）")
 	}
 }
+// v5 硬切换后，旧客户端有两种 Hello 形态（v4 的 122B 与 v5 的 154B）。
+// 服务端给它们的跨版本拒绝都必须能被**旧客户端自己的 ParseServerReject** 验证——
+// 而旧客户端只认它那个时代的全局版本 0x04 + pfapp-reject-v4 域，所以拒绝包的
+// 版本字节必须写 0x04，不能写当前的 0x05，也不能照抄 Hello 里的 0x05。
+func TestLegacyRejectIsVerifiableByOldClients(t *testing.T) {
+	secret := []byte("s")
+	uid := mustUID(t, "3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9")
+
+	// 旧 v4 Hello（122B）
+	h4, _, err := NewClientHello(secret, uid, testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 旧 v5 Hello（154B）：用当前构造器改回旧版本字节并按旧域重签
+	h5, _, err := NewClientHelloV6(secret, uid, testDevice, otherDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire5 := h5.Marshal()
+	wire5[1] = helloVerV5
+	resigned := macPSK(secret, helloDomain5,
+		[]byte{helloVerV5}, wire5[2:18], wire5[18:50], wire5[50:82], wire5[82:114], wire5[114:122])
+	copy(wire5[122:154], resigned[:])
+
+	// 旧客户端 Eph 的位置：v4 在 50..82，v5 在 82..114
+	for name, tc := range map[string]struct {
+		wire  []byte
+		ephAt int
+	}{
+		"v4 hello": {h4.Marshal(), 50},
+		"v5 hello": {wire5, 82},
+	} {
+		reject := LegacyVersionReject(secret, tc.wire)
+		if reject == nil {
+			t.Fatalf("%s：必须产出拒绝应答（MAC 验证通过的旧客户端不该被静默）", name)
+		}
+		if len(reject) != rejectLen {
+			t.Fatalf("%s：拒绝应答长度 = %d, want %d", name, len(reject), rejectLen)
+		}
+		// 版本字节必须是旧客户端认的 0x04，且 reason 为 0
+		if reject[1] != VersionV4 || reject[2] != byte(RejectUnknown) {
+			t.Fatalf("%s：拒绝应答 [1]=%#x [2]=%#x, want %#x/0", name, reject[1], reject[2], VersionV4)
+		}
+		// 用旧客户端的算法独立复验 MAC（域 pfapp-reject-v4 + 版本字节 0x04）。
+		// 不能用新客户端的 ParseServerReject 来验——它只认当前的 0x05，而这
+		// 条包本来就是发给旧客户端的。
+		want := macPSK(secret, rejectDomainV4, []byte{VersionV4},
+			[]byte{byte(RejectUnknown)}, tc.wire[tc.ephAt:tc.ephAt+32])
+		if !hmac.Equal(want[:], reject[3:]) {
+			t.Fatalf("%s：拒绝应答 MAC 与旧客户端算法不一致——旧客户端会显示「无法验证」而不是拒绝原因", name)
+		}
+	}
+}
+
+
 
 func TestClassifyLegacyProbeReply(t *testing.T) {
 	secret := []byte("s")

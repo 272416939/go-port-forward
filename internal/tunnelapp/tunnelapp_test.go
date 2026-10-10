@@ -155,7 +155,7 @@ func TestHandleHelloSkipsBindWhenFingerprintUnchanged(t *testing.T) {
 		done:     make(chan struct{}),
 	}
 
-	hello, _, herr := tunnel.NewClientHello(secret, uid, device)
+	hello, _, herr := tunnel.NewClientHelloV6(secret, uid, device, device)
 	if herr != nil {
 		t.Fatalf("构造握手失败: %v", herr)
 	}
@@ -177,7 +177,7 @@ func TestHandleHelloSkipsBindWhenFingerprintUnchanged(t *testing.T) {
 
 	// 换了设备（库里指纹是别的机器）：必须再次写库（互斥绑定语义不变）。
 	other := [tunnel.FingerprintSize]byte{0x11, 0x22, 0x33, 0x44}
-	hello2, _, herr := tunnel.NewClientHello(secret, uid, other)
+	hello2, _, herr := tunnel.NewClientHelloV6(secret, uid, other, other)
 	if herr != nil {
 		t.Fatalf("构造握手失败: %v", herr)
 	}
@@ -343,14 +343,14 @@ func TestHandleHelloFingerprintV2BindingAndMigration(t *testing.T) {
 		done:     make(chan struct{}),
 	}
 
-	hello5, _, herr := tunnel.NewClientHelloV5(secret, uid, device, device2)
+	hello5, _, herr := tunnel.NewClientHelloV6(secret, uid, device, device2)
 	if herr != nil {
-		t.Fatalf("构造 v5 握手失败: %v", herr)
+		t.Fatalf("构造 v6 握手失败: %v", herr)
 	}
 	wire5 := hello5.Marshal()
-	hello5same, _, herr := tunnel.NewClientHelloV5(secret, uid, device, device)
+	hello5same, _, herr := tunnel.NewClientHelloV6(secret, uid, device, device)
 	if herr != nil {
-		t.Fatalf("构造退化 v5 握手失败: %v", herr)
+		t.Fatalf("构造退化 v6 握手失败: %v", herr)
 	}
 	wire5same := hello5same.Marshal()
 

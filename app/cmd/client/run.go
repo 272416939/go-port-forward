@@ -426,7 +426,7 @@ attemptLoop:
 		if ctx.Err() != nil {
 			return nil, none, ctx.Err()
 		}
-		hello, priv, err := tunnel.NewClientHelloV5(secret, uid, device, device2)
+		hello, priv, err := tunnel.NewClientHelloV6(secret, uid, device, device2)
 		if err != nil {
 			return nil, none, err
 		}

@@ -4,6 +4,94 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.0] - 2026-10-10
+
+### Added
+
+**Minecraft 基岩版 NetherNet（WebRTC）透明代理**
+
+透明模式下新增 NetherNet 开关，开启后由信令网关 + 数据多路复用器两部分组成：
+
+- **信令网关**：监听 `HTTP/HTTPS`（或双模式同端口），处理 `/v1/join` 与
+  `/v1/join/:networkID`，把 SDP offer/answer 里的 candidate `IP:PORT`、`m=`/`c=`
+  行重写为网关的公网地址，再转发给内网 BDS
+- **数据多路复用器**：所有玩家的 WebRTC 流量复用一个 UDP 数据端口，按
+  `ice-ufrag` 区分会话；用 STUN 报文学习玩家真实 5-tuple，回程按会话单 reader
+  发回——后端 BDS 看到的是玩家真实 IP，不是网关地址
+- 数据面走透明源（复用 `IP_TRANSPARENT`），拿不到能力时退化并只告警一次
+- 证书是**用户粘贴的 PEM 内容**（每人自有域名/证书，如 Let's Encrypt），不是服务
+  器路径；保存时即用 `tls.X509KeyPair` 实配校验，不配对当场报错，上限 128KB
+- 新增配置项 `forward.public_ip`：SDP 重写用的公网地址，留空自动探测（NAT/容器
+  下探测到的可能是内网地址，需手动指定）
+
+### Changed
+
+**隧道协议硬切换 v4 → v5：旧客户端一律不被接受**
+
+全局握手版本 `Version` 由 `0x04` 升至 `0x05`，Hello 形态由 v5（0x05）升至
+v6（0x06，域标签 `pfapp-hello-v6`）。**存量 v1.1.x 客户端连不上新服务端**，
+两端必须成对升级，顺序：**先服务端，再客户端**（客户端后升级期间只会握手失败并
+每 3 秒重试，升级后自动恢复，无需人工干预）。
+
+- 服务端 `PeekHello` 现在只接受 154B + 版本字节 0x06；v3/v4（122B）与旧 v5
+  （154B 但版本字节 0x05）一律 `ErrOldVersion`
+- Accept/Reject 的版本字节随全局版本升到 0x05，域标签升为
+  `pfapp-accept-v5` / `pfapp-reject-v5`
+- 跨版本拒绝应答链路扩展为三档旧版本：对 MAC 验证通过的旧客户端，用它**自己时代
+  的版本**回拒绝（v3 → v3 标签；v4/v5 Hello → 版本字节 0x04 + `pfapp-reject-v4`），
+  旧客户端因此显示「被拒绝」而不是无应答
+- `InspectLegacyHello` 按版本分派字段偏移：v5 Hello（154B）比 v4 多一段 Device2，
+  eph/ts/mac 整体后移 32 字节——不分开算会把旧包的 MAC 验成一坨噪声
+
+### Fixed
+
+**NetherNet 规则一律进错误态**（面板显示红色「错误」徽标）
+
+透明规则的「目标地址」填的是访问码的隧道 IP（如 `10.66.0.3`），端口在独立的
+「目标端口」字段里；而信令网关用 `net.SplitHostPort(TargetAddr)` 解析，那里本来
+就不带端口，于是每次启动都失败。症状很典型：日志里只有多路复用器起来了、
+**网关那行从没出现**。现在按两个独立字段组装 `IP:PORT`，并对端口做范围校验。
+
+**零指纹机器将无法连接**（本次硬切换引入并当场修掉）
+
+`NewClientHelloV6` 原先按 `HasDevice2()` 推断线上布局：机器上两个指纹来源都取不到时
+Device2 为零值，于是退化成 122B 的 v4 形态——而新服务端只认 154B 的 v6，结果是
+「这台机器就是连不上」，真正的原因只是没指纹。现在 Hello 携带显式的 `ver` 字段，
+`Marshal` 依据它决定布局，**恒定发 154B**；零指纹只表示「没有第二指纹」，不再表示
+「退回旧协议」。
+
+## [v1.2.0] - 2026-10-10
+
+### Added
+
+**NetherNet 代理模式**（透明代理模式下的新开关，仅 Linux + root）
+
+Minecraft 基岩版 1.20.60+ 的 NetherNet（WebRTC：HTTP 信令 + STUN/DTLS/SCTP 数据面）
+此前无法经隧道发布——它需要应用层协商，而本项目只做 IP 层转发。现在在**添加/编辑规则
+→ 透明代理模式**里打开「启用 NetherNet 模式」即可，后端 BDS 零改动、零插件，
+且**仍然看到玩家真实 IP**。
+
+- **信令网关**：`GET /v1/join`（MOTD）与 `POST /v1/join/:networkID`（SDP 协商）透传
+  到后端 BDS，并把 SDP answer 里的 candidate/m=/c= 重写为中转机公网地址
+- **数据面多路复用**：公网只开一个 UDP 端口承载全部玩家，按 ice-ufrag 找到会话并
+  「学习」客户端真实地址，之后的 DTLS/SCTP 包按已学习的 5-tuple 转发；
+  后端回程由每会话一个 reader 经数据端口发回玩家
+- **HTTP/HTTPS 双模式**：同一端口嗅探首字节分流——安卓客户端走明文 HTTP，
+  iOS 客户端走 HTTPS，无需分端口
+- **证书由用户自行粘贴 PEM 内容**：每个用户有自己的域名与自己申请的证书，
+  粘贴 certificate/private key 全文即可（不是服务器路径）。保存时用
+  `tls.X509KeyPair` 试解析，**证书与私钥不配对当场报错**，不必等规则启动失败
+- 数据面沿用 `IP_TRANSPARENT` 以玩家真实地址为源发包（与普通透明转发同一机制），
+  拿不到透明 socket 时退化为中转机地址并明确告警，不静默丢失真实 IP
+- 规则列表协议列新增 **NetherNet** 徽标（悬停显示该规则的数据面形态）
+
+配置新增 `forward.public_ip`：SDP 重写用的公网地址，留空则自动探测出口网卡。
+
+### Changed
+
+- NetherNet 开关与其 TLS 配置（含证书内容、数据端口）变更会触发该规则数据面重启——
+  端口与证书是 Gateway/Multiplexer 启动时绑定的，热更新会让新旧两套抢同一个端口
+
 ## [v1.1.2] - 2026-09-06
 
 ### Added

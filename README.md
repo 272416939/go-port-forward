@@ -239,6 +239,10 @@ forward:
     dial_timeout: 10
 # 转发协程池容量；0 = 自动（CPU 数 × 64）
     pool_size: 0
+# NetherNet 的 SDP 重写用的公网地址
+# （玩家连这个地址）。留空则自动探测出口网卡地址；NAT/容器环境下
+# 探测到的可能是内网地址，那时必须手动指定
+    public_ip: ""
 # UDP 会话空闲超时（秒）：超时会话回收，下个包新建
     udp_timeout: 30
 # ── 垃圾回收 ──
@@ -314,7 +318,7 @@ tunnel:
     udp_gso: false
 # 配置文件模式版本（程序维护，勿手改）：
 # 升级程序后自动补全新增配置项，原文件备份为 config.yaml.v<N>.bak
-version: 2
+version: 3
 # ── 管理面板 ──
 web:
 # 监听地址；对外服务改 0.0.0.0 并置于 TLS 反代之后
@@ -373,6 +377,7 @@ web:
 | 字段 Field | 默认 Default | 说明 Notes |
 |---|---|---|
 | `pool_size` | `0` | 转发协程池容量，0 = 自动（CPU 数 × 64）forwarding goroutine pool, 0 = auto |
+| `public_ip` | `""` | NetherNet 的 SDP 重写用的公网地址，留空自动探测；NAT/容器下探测到的可能是内网地址，须手动指定 public IP for NetherNet SDP rewriting, empty = auto-detect |
 | `buffer_size` | `32768` | I/O 缓冲区大小（字节）I/O buffer (bytes) |
 | `dial_timeout` | `10` | 出站连接超时（秒）outbound dial timeout (s) |
 | `udp_timeout` | `30` | UDP 会话空闲超时（秒），超时会话回收、下个包新建 UDP session idle timeout (s) |

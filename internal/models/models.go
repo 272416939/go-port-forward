@@ -1,6 +1,7 @@
 package models
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
@@ -58,6 +59,76 @@ type ForwardRule struct {
 	AddFirewall   bool       `json:"add_firewall"`   // auto-add firewall rule on creation
 	ProxyProtocol bool       `json:"proxy_protocol"` // prepend PROXY Protocol v2 header with real client IP toward target
 	Transparent   bool       `json:"transparent"`    // bind real client source IP toward target (Linux+root only; pair with tunnel)
+	NetherNet     bool       `json:"nethernet"`      // NetherNet proxy mode: HTTP/HTTPS signaling + UDP multiplexer (requires transparent mode)
+	// NetherNet TLS configuration (only when NetherNet=true)
+	NetherNetTLS *NetherNetTLS `json:"nethernet_tls,omitempty"`
+}
+
+// NetherNetTLS holds TLS configuration for NetherNet proxy mode.
+//
+// 证书是**用户粘贴进来的 PEM 内容**，不是服务器上的路径：每个用户有自己的域名
+// 与自己的证书，服务端只负责把内容加载成 keypair。存的是内容而非引用，所以
+// bbolt 里会随规则一起持久化（rules.db 已是 0600）。
+type NetherNetTLS struct {
+	Enabled bool `json:"enabled"` // Enable TLS
+	Dual    bool `json:"dual"`    // Dual mode: same port for HTTP (Android) + HTTPS (iOS)
+	// CertPEM 是证书内容（PEM；含中间证书时贴整条链）。用户从面板粘贴。
+	CertPEM string `json:"cert_pem"`
+	// KeyPEM 是配套私钥内容（PEM）。
+	KeyPEM string `json:"key_pem"`
+	// SignalPort 留 0 表示用规则的监听端口。
+	SignalPort int `json:"signal_port"`
+	// DataPort 留 0 表示用规则的监听端口 + 1。
+	DataPort int `json:"data_port"`
+}
+
+// MaxNetherNetPEMBytes 限制单份 PEM 的长度。完整证书链通常几 KB，128KB 足够
+// 宽裕；上限的意义是防止把规则当成任意文件的存储位（bbolt 单值过大也会拖慢
+// 每次规则列表查询）。
+const MaxNetherNetPEMBytes = 128 << 10
+
+// Validate checks the NetherNet TLS configuration.
+//
+// TLS 启用时证书与私钥不仅必填，还必须**真的能配成一对**——粘贴时最常见的错误
+// 是证书与私钥不配对、或只贴了一半。在这里用 tls.X509KeyPair 试解析，用户保存
+// 时就能看到明确错误；否则要等规则启动失败（进入 error 态）才发现，而那距离
+// 粘贴已经过了好几步。
+func (t *NetherNetTLS) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if t.DataPort < 0 || t.DataPort > 65535 {
+		return fmt.Errorf("NetherNet 数据端口超出范围（1-65535，0 表示默认）| data port out of range")
+	}
+	if t.SignalPort < 0 || t.SignalPort > 65535 {
+		return fmt.Errorf("NetherNet 信令端口超出范围（1-65535，0 表示默认）| signal port out of range")
+	}
+	if !t.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(t.CertPEM) == "" || strings.TrimSpace(t.KeyPEM) == "" {
+		return fmt.Errorf("已启用 NetherNet TLS：请粘贴证书内容与私钥内容 | NetherNet TLS enabled: paste both the certificate and the private key")
+	}
+	if len(t.CertPEM) > MaxNetherNetPEMBytes || len(t.KeyPEM) > MaxNetherNetPEMBytes {
+		return fmt.Errorf("证书或私钥内容过大（上限 %d KB）| certificate or key content too large (limit %d KB)", MaxNetherNetPEMBytes>>10, MaxNetherNetPEMBytes>>10)
+	}
+	if _, err := tls.X509KeyPair([]byte(t.CertPEM), []byte(t.KeyPEM)); err != nil {
+		return fmt.Errorf("证书与私钥无法配对：%v（请确认两者属于同一个证书，且私钥未被加密）| certificate and key do not form a pair: %v", err, err)
+	}
+	return nil
+}
+
+// Normalize trims surrounding whitespace on the pasted PEM blocks. 粘贴板内容
+// 常带首尾空白与 CRLF；trim 后既让存储干净，也让 requiresForwarderRestart 的
+// 比较稳定（否则只改空白也会被判定为「证书变了」而重启数据面）。
+func (t *NetherNetTLS) Normalize() *NetherNetTLS {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	out.CertPEM = strings.TrimSpace(out.CertPEM)
+	out.KeyPEM = strings.TrimSpace(out.KeyPEM)
+	return &out
 }
 
 // ListenKey returns a unique key for the listen address+port+protocol combination
@@ -200,6 +271,12 @@ type CreateRuleRequest struct {
 	ProxyProtocol bool     `json:"proxy_protocol"`
 	Transparent   bool     `json:"transparent"`
 	Enabled       bool     `json:"enabled"`
+	// NetherNet 开启 Minecraft 基岩版 NetherNet（WebRTC）代理：HTTP/HTTPS 信令
+	// + UDP 数据面多路复用。必须配合透明模式（transparent=true）与 UDP 协议。
+	NetherNet bool `json:"nethernet"`
+	// NetherNetTLS 是该规则自己的 TLS 配置（每个用户填自己的证书路径），
+	// 仅 NetherNet=true 时有意义。
+	NetherNetTLS *NetherNetTLS `json:"nethernet_tls,omitempty"`
 }
 
 // UpdateRuleRequest is the API request for updating a rule
@@ -216,6 +293,10 @@ type UpdateRuleRequest struct {
 	Transparent   *bool     `json:"transparent"`
 	Comment       *string   `json:"comment"`
 	Enabled       *bool     `json:"enabled"`
+	// NetherNet 同 CreateRuleRequest；指针 nil 表示本次不修改该字段。
+	NetherNet *bool `json:"nethernet"`
+	// NetherNetTLS 为 nil 表示不修改；非 nil 则整体替换（用户重新填了一套证书）。
+	NetherNetTLS *NetherNetTLS `json:"nethernet_tls,omitempty"`
 }
 
 // WSLImportRequest is the API request for importing WSL2 ports
@@ -439,6 +520,19 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 	if req.Transparent && req.Protocol != ProtocolUDP {
 		return fmt.Errorf("透明模式仅支持 UDP 规则（TCP 回包无法送达透明 socket）| transparent mode only supports UDP rules")
 	}
+	// NetherNet 依赖透明模式的源地址保真（玩家真实 IP）与 UDP-only，缺一不可。
+	if req.NetherNet {
+		if !req.Transparent {
+			return fmt.Errorf("NetherNet 模式必须开启透明模式（否则后端看不到玩家真实 IP）| NetherNet mode requires transparent mode")
+		}
+		if req.Protocol != ProtocolUDP {
+			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
+		}
+	}
+	if err := req.NetherNetTLS.Validate(); err != nil {
+		return err
+	}
+	req.NetherNetTLS = req.NetherNetTLS.Normalize()
 	return nil
 }
 
@@ -474,6 +568,20 @@ func ValidateForwardRule(rule *ForwardRule) error {
 	if rule.Transparent && rule.Protocol != ProtocolUDP {
 		return fmt.Errorf("透明模式仅支持 UDP 规则（TCP 回包无法送达透明 socket）| transparent mode only supports UDP rules")
 	}
+	// 与 ValidateCreateRuleRequest 同源：NetherNet 的三项前置条件在合并后的
+	// 规则上再校验一次——更新请求可以只改 transparent/protocol，逐字段校验会漏。
+	if rule.NetherNet {
+		if !rule.Transparent {
+			return fmt.Errorf("NetherNet 模式必须开启透明模式（否则后端看不到玩家真实 IP）| NetherNet mode requires transparent mode")
+		}
+		if rule.Protocol != ProtocolUDP {
+			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
+		}
+	}
+	if err := rule.NetherNetTLS.Validate(); err != nil {
+		return err
+	}
+	rule.NetherNetTLS = rule.NetherNetTLS.Normalize()
 	return nil
 }
 

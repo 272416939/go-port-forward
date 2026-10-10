@@ -12,6 +12,7 @@ import (
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
+	"go-port-forward/internal/nethernet"
 	"go-port-forward/internal/storage"
 	"go-port-forward/pkg/pool"
 
@@ -26,8 +27,10 @@ var (
 )
 
 type entry struct {
-	tcp *TCPForwarder
-	udp *UDPForwarder
+	tcp        *TCPForwarder
+	udp        *UDPForwarder
+	netherGw   *nethernet.Gateway     // NetherNet HTTP/HTTPS gateway
+	netherMux  *nethernet.Multiplexer // NetherNet UDP multiplexer
 }
 
 // Manager owns the lifecycle of all active forwarders.
@@ -346,6 +349,8 @@ func (m *Manager) AddRule(req *models.CreateRuleRequest) (*models.ForwardRule, e
 		AddFirewall:   normalized.AddFirewall,
 		ProxyProtocol: normalized.ProxyProtocol,
 		Transparent:   normalized.Transparent,
+		NetherNet:     normalized.NetherNet,
+		NetherNetTLS:  normalized.NetherNetTLS,
 		Comment:       normalized.Comment,
 		Enabled:       normalized.Enabled,
 		CreatedAt:     time.Now(),
@@ -887,7 +892,41 @@ func (m *Manager) startForwarders(r *models.ForwardRule) error {
 			return err
 		}
 	}
+
+	// NetherNet 模式前置条件。启动路径单独校验而不是只依赖保存时的校验：
+	// 存量规则（bbolt 里旧记录）没有这些字段，人工改库或旧版本写下的
+	// NetherNet 规则可能缺透明模式，启动时静默起一个语义错误的转发器比
+	// 直接报错难排查得多。
+	if r.NetherNet {
+		if !r.Transparent {
+			return fmt.Errorf("NetherNet 模式需要启用透明模式 | NetherNet requires transparent mode")
+		}
+		if r.Protocol != models.ProtocolUDP {
+			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet only supports UDP protocol")
+		}
+		if r.NetherNetTLS != nil {
+			if err := r.NetherNetTLS.Validate(); err != nil {
+				return err
+			}
+		}
+	}
+
 	e := &entry{}
+
+	// NetherNet 模式：启动 Gateway（HTTP/HTTPS 信令）+ Multiplexer（UDP 数据面）。
+	// 与普通转发器二选一——NetherNet 的数据面由 Multiplexer 独占，再起一个
+	// UDPForwarder 会抢同一个监听端口。
+	if r.NetherNet {
+		if err := m.startNetherNet(r, e); err != nil {
+			return fmt.Errorf("NetherNet 启动失败 | failed to start NetherNet: %w", err)
+		}
+		m.mu.Lock()
+		m.active[r.ID] = e
+		m.mu.Unlock()
+		return nil
+	}
+
+	// 普通转发模式
 	if r.Protocol == models.ProtocolTCP || r.Protocol == models.ProtocolBoth {
 		t := newTCPForwarder(r, m.cfg.DialTimeout, m.cfg.BufferSize)
 		t.svc = m.svc
@@ -913,6 +952,99 @@ func (m *Manager) startForwarders(r *models.ForwardRule) error {
 	return nil
 }
 
+// startNetherNet starts NetherNet gateway and multiplexer
+func (m *Manager) startNetherNet(r *models.ForwardRule, e *entry) error {
+	// Get public IP (configurable, falls back to the default-route interface)
+	publicIP := m.getPublicIP()
+	if publicIP == "" {
+		return fmt.Errorf("无法获取公网 IP，请在 forward.public_ip 中指定 | cannot detect public IP; set forward.public_ip")
+	}
+
+	// Determine data port (default: signal port + 1)
+	dataPort := r.ListenPort + 1
+	if r.NetherNetTLS != nil && r.NetherNetTLS.DataPort > 0 {
+		dataPort = r.NetherNetTLS.DataPort
+	}
+
+	// 数据端口独占检查：NetherNet 数据面是裸 UDP socket，两条规则抢同一个端口
+	// 时后启动的那条 bind 失败，而失败只表现为「该规则的玩家进不来」——先在这里
+	// 挡住，让保存/启动时就给出可读的原因。
+	if err := m.checkNetherNetDataPortConflict(dataPort, r.ID); err != nil {
+		return err
+	}
+
+	// Create multiplexer. 工厂让数据面能以玩家真实地址为源发包——这是 NetherNet
+	// 复用透明模式的前提；拿不到工厂时多路复用器会退化为中转机地址并告警。
+	dataAddr := fmt.Sprintf(":%d", dataPort)
+	mux := nethernet.NewMultiplexer(dataAddr, netherNetSocketFactory())
+	if err := mux.Start(); err != nil {
+		return fmt.Errorf("启动 NetherNet UDP 数据面失败（端口 %d 可能被占用）| failed to start NetherNet data plane on port %d: %w", dataPort, dataPort, err)
+	}
+
+	// Create gateway
+	gw, err := nethernet.NewGateway(r, mux, publicIP)
+	if err != nil {
+		mux.Stop()
+		return fmt.Errorf("创建 NetherNet 信令网关失败 | failed to create NetherNet gateway: %w", err)
+	}
+
+	if err := gw.Start(); err != nil {
+		mux.Stop()
+		return fmt.Errorf("启动 NetherNet 信令网关失败 | failed to start NetherNet gateway: %w", err)
+	}
+
+	e.netherGw = gw
+	e.netherMux = mux
+
+	logger.S.Infow("NetherNet mode started",
+		"rule", r.Name,
+		"signal_port", r.ListenPort,
+		"data_port", dataPort,
+		"public_ip", publicIP,
+	)
+
+	return nil
+}
+
+// checkNetherNetDataPortConflict rejects a NetherNet data port already used by
+// another enabled NetherNet rule.
+func (m *Manager) checkNetherNetDataPortConflict(dataPort int, excludeID string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, r := range m.rules {
+		if id == excludeID || !r.NetherNet || !r.Enabled {
+			continue
+		}
+		other := r.ListenPort + 1
+		if r.NetherNetTLS != nil && r.NetherNetTLS.DataPort > 0 {
+			other = r.NetherNetTLS.DataPort
+		}
+		if other == dataPort {
+			return fmt.Errorf("%w: NetherNet UDP 数据端口 %d 已被规则 %q 占用，请在 NetherNet 配置中填写其它数据端口 | NetherNet data port %d is already used by rule %q", ErrPortConflict, dataPort, r.Name, dataPort, r.Name)
+		}
+	}
+	return nil
+}
+
+// getPublicIP tries to detect the server's public IP
+func (m *Manager) getPublicIP() string {
+	// Use configured public IP if available
+	if m.cfg.PublicIP != "" {
+		return m.cfg.PublicIP
+	}
+
+	// Try to detect public IP from default route interface
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		logger.S.Warnw("failed to detect public IP", "err", err)
+		return ""
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
+}
+
 func (m *Manager) stopForwarders(id string) {
 	m.mu.Lock()
 	m.stopForwardersLocked(id)
@@ -929,6 +1061,12 @@ func (m *Manager) stopForwardersLocked(id string) {
 	}
 	if e.udp != nil {
 		e.udp.Stop()
+	}
+	if e.netherGw != nil {
+		e.netherGw.Stop()
+	}
+	if e.netherMux != nil {
+		e.netherMux.Stop()
 	}
 	delete(m.active, id)
 }
@@ -1091,6 +1229,15 @@ func applyUpdate(r *models.ForwardRule, req *models.UpdateRuleRequest) {
 	if req.Transparent != nil {
 		r.Transparent = *req.Transparent
 	}
+	if req.NetherNet != nil {
+		r.NetherNet = *req.NetherNet
+	}
+	// NetherNetTLS 是整体替换语义：nil=不碰，非 nil=整套换掉（含关闭时传
+	// 一个 enabled:false 的空结构）。逐字段合并会让「只换证书」和「只想关掉
+	// TLS」这两种意图在结构体上无法区分。
+	if req.NetherNetTLS != nil {
+		r.NetherNetTLS = req.NetherNetTLS.Normalize()
+	}
 	if req.Comment != nil {
 		r.Comment = *req.Comment
 	}
@@ -1106,12 +1253,33 @@ func requiresForwarderRestart(before, after *models.ForwardRule) bool {
 	// UserID 不在此列：归属只影响「谁能看到/改这条规则」与回程路由推送的
 	// 分组，转发器本身不读它。为一次纯元数据变更重启转发器会掐掉所有在线
 	// 玩家，代价与收益完全不成比例。
-	return before.Enabled != after.Enabled ||
+	if before.Enabled != after.Enabled ||
 		models.NormalizeListenAddr(before.ListenAddr) != models.NormalizeListenAddr(after.ListenAddr) ||
 		before.ListenPort != after.ListenPort ||
 		models.NormalizeProtocol(before.Protocol) != models.NormalizeProtocol(after.Protocol) ||
 		before.TargetAddr != after.TargetAddr ||
 		before.TargetPort != after.TargetPort ||
 		before.ProxyProtocol != after.ProxyProtocol ||
-		before.Transparent != after.Transparent
+		before.Transparent != after.Transparent {
+		return true
+	}
+	// NetherNet 开关与其 TLS 配置改变必须重启：Gateway/Multiplexer 各自持有
+	// 一份监听端口与证书，热更新会让新旧两套同时占用同一个端口。
+	if before.NetherNet != after.NetherNet {
+		return true
+	}
+	if !netherNetTLSEqual(before.NetherNetTLS, after.NetherNetTLS) {
+		return true
+	}
+	return false
+}
+
+// netherNetTLSEqual compares two NetherNet TLS configs treating nil as "unset".
+func netherNetTLSEqual(a, b *models.NetherNetTLS) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Enabled == b.Enabled && a.Dual == b.Dual &&
+		a.CertPEM == b.CertPEM && a.KeyPEM == b.KeyPEM &&
+		a.SignalPort == b.SignalPort && a.DataPort == b.DataPort
 }
