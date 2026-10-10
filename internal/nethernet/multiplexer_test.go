@@ -16,51 +16,51 @@ func init() {
 	logger.S = logger.L.Sugar()
 }
 
-func TestExtractUfragFromSTUN(t *testing.T) {
-	// Create a mock STUN Binding Request with USERNAME attribute
-	// STUN message format:
-	// 0-1: Message Type (0x0001 = Binding Request)
-	// 2-3: Message Length
-	// 4-7: Magic Cookie (0x2112A442)
-	// 8-19: Transaction ID
-	// 20+: Attributes
-
-	username := "test123:remote"
-	usernameLen := len(username)
-
-	// Calculate message length (excluding 20-byte header)
-	attrLen := 4 + usernameLen // Type(2) + Length(2) + Value
-	if pad := usernameLen % 4; pad != 0 {
+// buildSTUNBindingRequest 构造一个只带单个 USERNAME 属性的最小 STUN binding
+// request（RFC 5389/8445 头 + TLV），供 ufrag 提取测试复用。
+func buildSTUNBindingRequest(username string) []byte {
+	attrLen := 4 + len(username)
+	if pad := len(username) % 4; pad != 0 {
 		attrLen += 4 - pad
 	}
+	p := make([]byte, 20+attrLen)
+	binary.BigEndian.PutUint16(p[0:2], 0x0001)          // Binding Request
+	binary.BigEndian.PutUint16(p[2:4], uint16(attrLen)) // Message Length
+	binary.BigEndian.PutUint32(p[4:8], stunMagicCookie) // Magic Cookie
+	copy(p[8:20], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	binary.BigEndian.PutUint16(p[20:22], 0x0006) // USERNAME
+	binary.BigEndian.PutUint16(p[22:24], uint16(len(username)))
+	copy(p[24:], []byte(username))
+	return p
+}
 
-	packet := make([]byte, 20+attrLen)
-
-	// Message Type: Binding Request (0x0001)
-	binary.BigEndian.PutUint16(packet[0:2], 0x0001)
-
-	// Message Length
-	binary.BigEndian.PutUint16(packet[2:4], uint16(attrLen))
-
-	// Magic Cookie
-	binary.BigEndian.PutUint32(packet[4:8], 0x2112A442)
-
-	// Transaction ID (12 bytes, can be random)
-	copy(packet[8:20], []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C})
-
-	// USERNAME attribute (0x0006)
-	offset := 20
-	binary.BigEndian.PutUint16(packet[offset:offset+2], 0x0006)
-	binary.BigEndian.PutUint16(packet[offset+2:offset+4], uint16(usernameLen))
-	copy(packet[offset+4:], []byte(username))
-
+func TestExtractUfragFromSTUN(t *testing.T) {
 	m := &Multiplexer{}
-	ufrag := m.extractUfragFromSTUN(packet)
+	// USERNAME = "serverUfrag:clientUfrag"，路由键是冒号前的服务端 ufrag。
+	// 三个用例覆盖等长、服务端更长、服务端更短——旧的 len/2 切法只在等长时碰巧对。
+	cases := []struct {
+		username string
+		want     string
+	}{
+		{"test123:remote", "test123"},
+		{"abcdefghij:xy", "abcdefghij"},
+		{"ab:cdefghijklmnop", "ab"},
+	}
+	for _, c := range cases {
+		if got := m.extractUfragFromSTUN(buildSTUNBindingRequest(c.username)); got != c.want {
+			t.Errorf("username %q: got ufrag %q, want %q", c.username, got, c.want)
+		}
+	}
+}
 
-	// Should extract "test123" (first half of username)
-	expectedUfrag := "test123"
-	if ufrag != expectedUfrag {
-		t.Errorf("Expected ufrag '%s', got '%s'", expectedUfrag, ufrag)
+// 首字节 0x00/0x01 但不是 STUN 的数据报（魔数不对）必须被拒，否则会把 DTLS/SCTP
+// 误当 STUN、甚至污染 ufrag 路由。
+func TestExtractUfragFromSTUNRejectsNonSTUN(t *testing.T) {
+	m := &Multiplexer{}
+	p := buildSTUNBindingRequest("srv:cli")
+	binary.BigEndian.PutUint32(p[4:8], 0xDEADBEEF) // 破坏魔数
+	if got := m.extractUfragFromSTUN(p); got != "" {
+		t.Errorf("non-STUN packet: got ufrag %q, want empty", got)
 	}
 }
 

@@ -67,15 +67,17 @@ o=- 1234567890 1234567890 IN IP4 10.66.0.3
 s=-
 c=IN IP4 10.66.0.3
 t=0 0
+m=application 19137 UDP/DTLS/SCTP webrtc-datachannel
 a=ice-ufrag:test123
 a=ice-pwd:testpassword
-a=candidate:1 1 UDP 2130706431 10.66.0.3 19132 typ host`
+a=candidate:1 1 UDP 2130706431 10.66.0.3 19137 typ host`
 
 	expected := `v=0
 o=- 1234567890 1234567890 IN IP4 10.66.0.3
 s=-
 c=IN IP4 1.2.3.4
 t=0 0
+m=application 19131 UDP/DTLS/SCTP webrtc-datachannel
 a=ice-ufrag:test123
 a=ice-pwd:testpassword
 a=candidate:1 1 UDP 2130706431 1.2.3.4 19131 typ host`
@@ -283,6 +285,97 @@ func TestGatewayDualModeServesPlainHTTPToo(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "plain-ok") {
 		t.Fatalf("plain HTTP MOTD not passed through, got %q", body)
+	}
+}
+
+// backendDataPort 必须从 candidate 里读 BDS 数据面端口，而不是信令端口。
+func TestBackendDataPort(t *testing.T) {
+	g := &Gateway{targetPort: 19132} // 信令端口
+
+	// 非回环 host candidate → 用 candidate 端口 19137，不是信令端口 19132。
+	sdp := "v=0\n" +
+		"a=ice-ufrag:x\n" +
+		"a=candidate:1 1 UDP 2122260223 10.66.0.3 19137 typ host\n"
+	if got := g.backendDataPort(sdp); got != 19137 {
+		t.Errorf("backendDataPort = %d, want 19137 (candidate), not signaling port 19132", got)
+	}
+
+	// 只有回环 candidate（代理与 BDS 同机）也照样可用。
+	loop := "a=candidate:1 1 UDP 2122260223 127.0.0.1 19139 typ host\n"
+	if got := g.backendDataPort(loop); got != 19139 {
+		t.Errorf("backendDataPort loopback = %d, want 19139", got)
+	}
+
+	// 非 UDP / 非 host 的 candidate 应被忽略，回退到信令端口。
+	bad := "a=candidate:1 1 TCP 2122260223 10.66.0.3 19137 typ host\n" +
+		"a=candidate:2 1 UDP 2122260223 10.66.0.3 19138 typ srflx raddr 1.2.3.4 rport 9\n"
+	if got := g.backendDataPort(bad); got != 19132 {
+		t.Errorf("backendDataPort with no usable candidate = %d, want fallback 19132", got)
+	}
+}
+
+// 数据面必须注册成 BDS 在 candidate 里 advertises 的数据端口，而不是信令端口。
+// 这是打到 RegisterSession 调用点的回归测试：转发错端口时 BDS 的 ICE 栈收不到
+// STUN，玩家拿到 InitialConnection-115，而纯谓词单测探不到这种调用点回归。
+func TestHandleJoinRegistersBackendDataPort(t *testing.T) {
+	// 假 BDS：POST /v1/join/:id 返回 candidate 指向数据端口 19137 的 SDP answer。
+	bds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/sdp")
+		_, _ = w.Write([]byte("v=0\r\n" +
+			"o=- 0 0 IN IP4 10.66.0.3\r\n" +
+			"s=-\r\n" +
+			"c=IN IP4 10.66.0.3\r\n" +
+			"t=0 0\r\n" +
+			"m=application 19137 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
+			"a=ice-ufrag:srvfrag1234\r\n" +
+			"a=ice-pwd:abcdef0123456789\r\n" +
+			"a=candidate:1 1 UDP 2122260223 10.66.0.3 19137 typ host\r\n"))
+	}))
+	defer bds.Close()
+	bdsHost, bdsPortStr, _ := net.SplitHostPort(bds.Listener.Addr().String())
+	bdsPort, _ := strconv.Atoi(bdsPortStr)
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	rule := &models.ForwardRule{
+		Name: "nn-data", NetherNet: true, Transparent: true,
+		ListenAddr: "127.0.0.1", ListenPort: port,
+		TargetAddr: bdsHost, TargetPort: bdsPort,
+	}
+	mux := NewMultiplexer(":0", nil)
+	gw, err := NewGateway(rule, mux, "203.0.113.9")
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	if err := gw.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer gw.Stop()
+
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/join/net1", port),
+		"application/sdp", strings.NewReader("v=0\r\na=ice-ufrag:clifrag\r\n"))
+	if err != nil {
+		t.Fatalf("POST join: %v", err)
+	}
+	defer resp.Body.Close()
+
+	mux.mu.RLock()
+	sess, ok := mux.sessions["srvfrag1234"]
+	mux.mu.RUnlock()
+	if !ok {
+		t.Fatal("session not registered by ufrag")
+	}
+	if sess.targetPort != 19137 {
+		t.Fatalf("data-plane target port = %d, want 19137 (from SDP candidate), signaling port was %d",
+			sess.targetPort, bdsPort)
+	}
+	if !sess.targetIP.Equal(net.ParseIP(bdsHost)) {
+		t.Fatalf("target IP = %s, want %s (tunnel IP, not the candidate IP)", sess.targetIP, bdsHost)
 	}
 }
 

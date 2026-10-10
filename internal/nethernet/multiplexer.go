@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,9 +163,25 @@ func (m *Multiplexer) handlePacket(packet []byte, clientAddr *net.UDPAddr) {
 }
 
 
-// extractUfragFromSTUN extracts USERNAME attribute from STUN packet
+// stunMagicCookie 是每个 STUN 消息头里固定出现的魔数（RFC 5389），位于偏移 4。
+const stunMagicCookie = 0x2112A442
+
+// extractUfragFromSTUN 从 STUN 包的 USERNAME 属性提取**服务端 ice-ufrag**（路由键）。
+//
+// 按 RFC 8445 §7.2.1.2，客户端发给服务端的 binding request 的 USERNAME 是
+// "serverUfrag:clientUfrag"（对端片段在前）。路由键是**冒号前**那段，它等于
+// SDP answer 的 a=ice-ufrag，也正是 RegisterSession 存进的键。
+//
+// 之前按 "长度对半切"（username[:len/2]）是错的：只有两个 ufrag 等长时才碰巧
+// 切对。真实 ufrag 不等长时切出的键匹配不到任何会话，每个包都被当成 unknown
+// session 丢弃——玩家侧表现为 InitialConnection-115。
 func (m *Multiplexer) extractUfragFromSTUN(packet []byte) string {
 	if len(packet) < 20 {
+		return ""
+	}
+	// 校验 STUN 魔数（RFC 5389，偏移 4）。挡掉那些首字节恰好是 0x00/0x01 的
+	// DTLS/SCTP/其它 UDP 数据报被误当成 STUN 解析。
+	if binary.BigEndian.Uint32(packet[4:8]) != stunMagicCookie {
 		return ""
 	}
 
@@ -187,8 +204,9 @@ func (m *Multiplexer) extractUfragFromSTUN(packet []byte) string {
 		// USERNAME attribute (0x0006)
 		if attrType == 0x0006 {
 			username := string(packet[offset : offset+int(attrLen)])
-			// USERNAME format: "<local-ufrag>:<remote-ufrag>"
-			if idx := len(username) / 2; idx > 0 && idx < len(username) {
+			// USERNAME format: "serverUfrag:clientUfrag" — 取冒号前的服务端
+			// ufrag 作为路由键。
+			if idx := strings.IndexByte(username, ':'); idx > 0 {
 				return username[:idx]
 			}
 			return username

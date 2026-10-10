@@ -345,10 +345,16 @@ func (g *Gateway) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Register session with multiplexer
 	ufrag := extractIceUfrag(rewrittenAnswer)
 	if ufrag != "" {
-		g.mux.RegisterSession(ufrag, g.targetIP, g.targetPort)
+		// 数据面必须转发到 BDS 在 SDP candidate 里 advertises 的数据端口，而不是
+		// 我们转发 /v1/join 信令时用的 g.targetPort。BDS 的 WebRTC 数据面监听在
+		// 它按连接 advertises 的端口（19132–19139 池），与信令端口是两回事；转发到
+		// 信令端口会让 BDS 的 ICE 栈一个包都收不到，玩家拿到 InitialConnection-115。
+		forwardPort := g.backendDataPort(string(answerBody))
+		g.mux.RegisterSession(ufrag, g.targetIP, forwardPort)
 		logger.S.Debugw("registered NetherNet session",
 			"ufrag", ufrag,
 			"target", g.targetAddr,
+			"data_port", forwardPort,
 		)
 	}
 
@@ -374,6 +380,14 @@ func (g *Gateway) rewriteSDP(sdp string) string {
 			continue
 		}
 
+		// Rewrite m= line port. BDS puts its real data-plane port here (not the
+		// discard placeholder 9); keep it in sync with the rewritten candidate so
+		// the client's default candidate and explicit candidate agree on the port.
+		if strings.HasPrefix(line, "m=") {
+			result = append(result, rewriteMLinePort(line, g.dataPort))
+			continue
+		}
+
 		// Replace candidate line: a=candidate:... <internal_ip> <port> ...
 		if strings.HasPrefix(line, "a=candidate:") {
 			parts := strings.Fields(line)
@@ -390,6 +404,59 @@ func (g *Gateway) rewriteSDP(sdp string) string {
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// backendDataPort 返回 BDS WebRTC 数据面真正监听的 UDP 端口，取自 SDP answer 的
+// host candidate。找不到可用的 UDP host candidate 时退化为 g.targetPort（信令端口）。
+//
+// BDS 把数据面端口写进 candidate，且该端口取自一个池（19132–19139），与我们转发
+// /v1/join 信令用的端口不是一回事。从 candidate 读它——而不是想当然用信令端口——
+// 才能让多路复用器把玩家数据发到 BDS 上正确的 socket。
+func (g *Gateway) backendDataPort(sdp string) int {
+	fallback := 0
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "a=candidate:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		// a=candidate:{foundation} {component} {proto} {priority} {ip} {port} typ {type} ...
+		if len(fields) < 8 || !strings.EqualFold(fields[2], "udp") {
+			continue
+		}
+		if fields[6] != "typ" || !strings.EqualFold(fields[7], "host") {
+			continue
+		}
+		port, err := strconv.Atoi(fields[5])
+		if err != nil || port == 0 {
+			continue
+		}
+		// 优先非回环 host candidate；把首个回环 candidate 留作兜底（代理与 BDS
+		// 同机的场景只有回环候选）。
+		if ip := net.ParseIP(fields[4]); ip != nil && !ip.IsLoopback() {
+			return port
+		}
+		if fallback == 0 {
+			fallback = port
+		}
+	}
+	if fallback != 0 {
+		return fallback
+	}
+	logger.S.Warnw("BDS SDP answer 没有可用的 UDP host candidate，数据面退化为信令端口（玩家可能连不上）| no UDP host candidate in BDS answer; falling back to the signaling port for the data plane",
+		"target", g.targetAddr, "fallback_port", g.targetPort)
+	return g.targetPort
+}
+
+// rewriteMLinePort 重写 m= 行的端口字段，其余保持不变。
+// 行格式：m=application 19137 UDP/DTLS/SCTP webrtc-datachannel
+func rewriteMLinePort(line string, port int) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return line
+	}
+	fields[1] = strconv.Itoa(port)
+	return strings.Join(fields, " ")
 }
 
 // extractIceUfrag extracts ice-ufrag from SDP

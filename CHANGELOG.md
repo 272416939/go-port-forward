@@ -81,6 +81,12 @@ Device2 为零值，于是退化成 122B 的 v4 形态——而新服务端只�
 `Marshal` 依据它决定布局，**恒定发 154B**；零指纹只表示「没有第二指纹」，不再表示
 「退回旧协议」。
 
+**NetherNet 数据面：STUN ufrag 提取错误 + 转发到信令端口导致玩家进不来**（对照 66hh/NetherProxy 修复）
+
+信令通了之后玩家仍报 `InitialConnection-115`。数据面有两处问题：①`extractUfragFromSTUN` 用 `username[:len/2]` 猜服务端 ufrag，而 STUN USERNAME 是 `serverUfrag:clientUfrag`（RFC 8445 §7.2.1.2，对端片段在前），只有两段等长时才碰巧切对，否则切出的键匹配不到会话、DTLS/SCTP 包全被丢弃；改为取**冒号前**那段并校验 STUN 魔数。②`RegisterSession` 用了转发 `/v1/join` 的**信令端口**，而 BDS 的 WebRTC 数据面监听在它按连接 advertises 在 SDP candidate 里的端口（19132–19139 池）；新增 `backendDataPort` 从 answer 的 host candidate 取数据端口（优先非回环、回环兜底、缺失则告警并退回信令端口）。另补 `rewriteSDP` 对 `m=` 行端口的重写（BDS 在 m= 行放的是真实数据端口而非占位 9，需与 candidate 一致）。
+
+配套测试：`TestExtractUfragFromSTUN`（含等长/服务端更长/更短三种 ufrag 组合）、`TestExtractUfragFromSTUNRejectsNonSTUN`、`TestBackendDataPort`、`TestHandleJoinRegistersBackendDataPort`（打到 `RegisterSession` 调用点），均做过变异测试（破坏→红/恢复→绿）。**待真机部署验证。**
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added
