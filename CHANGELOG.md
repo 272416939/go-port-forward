@@ -124,6 +124,27 @@ answer 截断/挂起，客户端 `setRemoteDescription` 失败、**一个 STUN �
 `TestHandleJoinRegistersBackendDataPort` 增加"客户端拿到完整 answer"断言，并做变异测试
 确认（删掉 Del → 测试红）。
 
+**NetherNet 会话不回写会话注册表，回程路由推送恒为空、BDS 回包送不回玩家**
+
+数据面用透明 socket 以玩家真实地址为源转发，BDS 的 STUN 响应与 DTLS ClientHello 因此
+**直接发给玩家 IP**，这条回程必须经隧道回到中转机，依赖 Windows 客户端上的 /32 回程
+路由。回程路由的推送数据源是 `SessionIPsByCode`，而它只统计 TCP/UDP 转发器的会话
+注册表——NetherNet 会话从未登记，推送列表恒为空（日志「回程路由 IP 已推送
+`count:0`」，即便有玩家正在加入）。客户端装不上回程路由，BDS 回包就从后端机物理网卡
+漏出去（源地址变成后端自己的公网 IP），玩家 ICE/DTLS 永远等不到应答。症状：信令通、
+`registered`/`learned` 都有，约 15 秒后 `InitialConnection-83`。
+
+现多路复用器新增 `SessionSink`：learned 时登记、回收/被顶替/停止时注销，字节增量按
+5 秒周期上报。NetherNet 会话由此进入回程路由推送、Web 面板会话列表与连接日志。
+配套 `TestMultiplexerSessionSinkLifecycle`、
+`TestMultiplexerRegisterSessionReplacesPrevious`、
+`TestNetherSessionSinkFeedsReturnRoutePush`。
+
+顺带修掉同路径上的两个真实缺陷：同一 ufrag 重复登记（玩家重连 / 信令重放）时旧会话的
+透明 socket 无人 `Close`——内核层独占绑定与 reader goroutine 一起泄漏，同一玩家元组
+重连时工厂还会 `EADDRINUSE` 并静默退化成「BDS 看到中转机地址」；以及 `addrMap` 可能
+留下指向已死会话的条目，导致玩家包被转发到旧数据端口。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

@@ -977,6 +977,11 @@ func (m *Manager) startNetherNet(r *models.ForwardRule, e *entry) error {
 	// 复用透明模式的前提；拿不到工厂时多路复用器会退化为中转机地址并告警。
 	dataAddr := fmt.Sprintf(":%d", dataPort)
 	mux := nethernet.NewMultiplexer(dataAddr, netherNetSocketFactory())
+	// NetherNet 会话必须登记进 forward 的会话注册表：回程路由推送
+	// （SessionIPsByCode）、Web 面板与连接日志都只认这张表。不登记的后果是
+	// 活跃玩家 IP 推不出去（日志 count:0），Windows 客户端装不上 /32 回程路由，
+	// BDS 的回包从后端机物理网卡漏出去——玩家卡在 InitialConnection-83。
+	mux.SetSessionSink(newNetherSessionSink(m.svc, r))
 	if err := mux.Start(); err != nil {
 		return fmt.Errorf("启动 NetherNet UDP 数据面失败（端口 %d 可能被占用）| failed to start NetherNet data plane on port %d: %w", dataPort, dataPort, err)
 	}

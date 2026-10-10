@@ -2,7 +2,9 @@ package nethernet
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,6 +272,174 @@ func TestMultiplexerFallsBackWithoutFactory(t *testing.T) {
 	}
 	if !m.warnedNoTx.Load() {
 		t.Fatal("fallback must warn — silently losing the real player IP is the bug this guards")
+	}
+}
+
+// recordingSink 记录 sink 事件，供会话生命周期断言使用。
+type recordingSink struct {
+	mu     sync.Mutex
+	starts []string // "ufrag|client"
+	bytes  []string // "ufrag|in|out"
+	ends   []string // "ufrag|client"
+}
+
+func (s *recordingSink) NetherSessionStart(ufrag string, client *net.UDPAddr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.starts = append(s.starts, ufrag+"|"+client.String())
+}
+
+func (s *recordingSink) NetherSessionBytes(ufrag string, client *net.UDPAddr, in, out int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bytes = append(s.bytes, fmt.Sprintf("%s|%d|%d", ufrag, in, out))
+}
+
+func (s *recordingSink) NetherSessionEnd(ufrag string, client *net.UDPAddr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ends = append(s.ends, ufrag+"|"+client.String())
+}
+
+// waitFor 轮询到 cond 为真或超时。用于等 readBackend goroutine 把回程包写完。
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// 会话生命周期：learned → start（带上玩家真实地址）；转发/回程都要计字节；
+// 回收 → end；Stop 不得重复 end。
+//
+// start/end 是回程路由推送的唯一数据源（SessionIPsByCode 只认会话注册表），
+// 漏一个玩家就拿不到 /32 回程路由，BDS 回包送不回来。
+func TestMultiplexerSessionSinkLifecycle(t *testing.T) {
+	targetIP := net.ParseIP("10.66.0.3")
+	sock := newFakePlayerSocket()
+	factory := func(src *net.UDPAddr) (PlayerSocket, error) { return sock, nil }
+	sink := &recordingSink{}
+
+	m := NewMultiplexer(":0", factory)
+	m.SetSessionSink(sink)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+	m.RegisterSession("ufrag1", targetIP, 19132)
+
+	client := &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 5555}
+	// 走真实入口：带 USERNAME "ufrag1:cli" 的 STUN binding request。
+	m.handlePacket(buildSTUNBindingRequest("ufrag1:cli"), client)
+
+	sink.mu.Lock()
+	starts := append([]string(nil), sink.starts...)
+	sink.mu.Unlock()
+	if len(starts) != 1 || starts[0] != "ufrag1|203.0.113.9:5555" {
+		t.Fatalf("starts = %v, want exactly one ufrag1|203.0.113.9:5555", starts)
+	}
+	if len(sock.sent) != 1 {
+		t.Fatalf("forwarded %d packets through the player socket, want 1", len(sock.sent))
+	}
+
+	// 注入一条「BDS 回包」，readBackend 应经数据端口发回玩家并计入 bytesOut。
+	sock.replies <- []byte("bds-reply")
+	m.mu.RLock()
+	sess := m.sessions["ufrag1"]
+	m.mu.RUnlock()
+	waitFor(t, "backend reply relayed", func() bool { return sess.bytesOut.Load() > 0 })
+
+	m.reportBytes()
+	sink.mu.Lock()
+	bytes := append([]string(nil), sink.bytes...)
+	sink.mu.Unlock()
+	if len(bytes) != 1 || bytes[0] != fmt.Sprintf("ufrag1|%d|%d", len(sock.sent[0]), len("bds-reply")) {
+		t.Fatalf("bytes report = %v, want one ufrag1|<in>|<out> entry", bytes)
+	}
+
+	// 回收 → end，且 Stop 不得再补一个（重复 end 会让上层多删一次会话条目）。
+	m.mu.Lock()
+	m.sessions["ufrag1"].lastSeen = time.Now().Add(-time.Hour)
+	m.mu.Unlock()
+	m.cleanup()
+
+	sink.mu.Lock()
+	ends := append([]string(nil), sink.ends...)
+	sink.mu.Unlock()
+	if len(ends) != 1 || ends[0] != "ufrag1|203.0.113.9:5555" {
+		t.Fatalf("ends = %v, want exactly one ufrag1|203.0.113.9:5555", ends)
+	}
+
+	m.Stop()
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.ends) != 1 {
+		t.Fatalf("Stop fired a duplicate end: ends = %v", sink.ends)
+	}
+}
+
+// 同一 ufrag 重复登记（玩家重连 / 信令重放）必须收尾旧会话：
+// 旧透明 socket 要关（独占绑定 + reader goroutine 不泄漏）、旧会话要通知 end、
+// addrMap 不能留下指向已死会话的条目（否则玩家包被转发到旧端口）。
+func TestMultiplexerRegisterSessionReplacesPrevious(t *testing.T) {
+	targetIP := net.ParseIP("10.66.0.3")
+	first := newFakePlayerSocket()
+	second := newFakePlayerSocket()
+	socks := []*fakePlayerSocket{first, second}
+	next := 0
+	factory := func(src *net.UDPAddr) (PlayerSocket, error) {
+		s := socks[next]
+		next++
+		return s, nil
+	}
+	sink := &recordingSink{}
+
+	m := NewMultiplexer(":0", factory)
+	m.SetSessionSink(sink)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	m.RegisterSession("ufrag1", targetIP, 19132)
+	client := &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 5555}
+	m.handlePacket(buildSTUNBindingRequest("ufrag1:cli"), client)
+
+	// 同一 ufrag 再来一次（BDS 为这次连接分配了新数据端口）。
+	m.RegisterSession("ufrag1", targetIP, 19133)
+
+	select {
+	case <-first.closed:
+	default:
+		t.Fatal("re-registering the same ufrag leaked the previous player socket")
+	}
+	sink.mu.Lock()
+	ends := append([]string(nil), sink.ends...)
+	sink.mu.Unlock()
+	if len(ends) != 1 || ends[0] != "ufrag1|203.0.113.9:5555" {
+		t.Fatalf("ends = %v, want one end for the replaced session", ends)
+	}
+
+	// 死会话的 addrMap 条目必须被摘掉（新会话尚未 learn，所以应为空）。
+	m.mu.RLock()
+	_, stale := m.addrMap[client.String()]
+	m.mu.RUnlock()
+	if stale {
+		t.Fatal("addrMap still references the replaced (dead) session")
+	}
+
+	// 重连玩家再发一个 STUN，必须重新 learn 并拿到新端口。
+	m.handlePacket(buildSTUNBindingRequest("ufrag1:cli"), client)
+	m.mu.RLock()
+	cur, ok := m.addrMap[client.String()]
+	m.mu.RUnlock()
+	if !ok || cur.targetPort != 19133 {
+		t.Fatalf("re-learn after re-register failed: addrMap hit=%v port=%v", ok, cur)
 	}
 }
 
