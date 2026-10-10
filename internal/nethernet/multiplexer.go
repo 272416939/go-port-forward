@@ -65,6 +65,12 @@ type Multiplexer struct {
 	stopCh     chan struct{}
 	stopOnce   sync.Once
 	warnedNoTx atomic.Bool
+
+	// 规则级累计计数（不随会话回收归零，语义同 TCPForwarder/UDPForwarder 的
+	// bytesIn/bytesOut）：面板规则表与仪表盘的「流入/流出」读它们。
+	bytesIn  atomic.Int64 // 玩家 → BDS 累计
+	bytesOut atomic.Int64 // BDS → 玩家 累计
+	total    atomic.Int64 // 累计学习到的会话数（面板「累计连接数」）
 }
 
 // netherSession represents a NetherNet session
@@ -186,6 +192,7 @@ func (m *Multiplexer) handlePacket(packet []byte, clientAddr *net.UDPAddr) {
 				if m.sink != nil {
 					m.sink.NetherSessionStart(ufrag, clientAddr)
 				}
+				m.total.Add(1) // 规则级「累计连接数」
 				m.forwardToTarget(packet, sess)
 				m.mu.Unlock()
 				return
@@ -290,6 +297,7 @@ func (m *Multiplexer) forwardToTarget(packet []byte, sess *netherSession) {
 			logger.S.Warnw("failed to forward to target", "err", err, "target", targetAddr.String())
 		} else {
 			sess.bytesIn.Add(int64(len(packet)))
+			m.bytesIn.Add(int64(len(packet)))
 		}
 		return
 	}
@@ -302,6 +310,7 @@ func (m *Multiplexer) forwardToTarget(packet []byte, sess *netherSession) {
 		logger.S.Warnw("failed to forward to target", "err", err, "target", targetAddr.String())
 	} else {
 		sess.bytesIn.Add(int64(len(packet)))
+		m.bytesIn.Add(int64(len(packet)))
 	}
 }
 
@@ -345,7 +354,16 @@ func (m *Multiplexer) readBackend(sess *netherSession, sock PlayerSocket) {
 				"err", err, "client", dst.String())
 		} else {
 			sess.bytesOut.Add(int64(n))
+			m.bytesOut.Add(int64(n))
 		}
+
+		// 双向都算活跃：BDS 还在往下游发，说明这条会话没死。配合偏短的空闲
+		// 阈值（见 sessionIdleTimeout），只按上游刷新会把「上游安静但仍在收包」
+		// 的活会话误收割——NetherNet 会话被收割后没有重新学习的路径（没有新
+		// 信令就永远是 unknown session），玩家会直接掉线。
+		m.mu.Lock()
+		sess.lastSeen = time.Now()
+		m.mu.Unlock()
 	}
 }
 
@@ -393,7 +411,16 @@ func (m *Multiplexer) cleanupLoop() {
 
 // sessionIdleTimeout 是会话的本地空闲回收时限。信令完成后玩家可能一直不发
 // 数据面（例如卡在 ICE），回收只是放开条目与 socket，不影响已建立的连接语义。
-const sessionIdleTimeout = 5 * time.Minute
+//
+// 取 60s（对齐 NetherProxy 的 tuple_stale_timeout）：这个值同时决定**回程路由
+// 推送**什么时候停止把该玩家 IP 报活（见 SessionSink），报活一停，服务端才会
+// 下发结束事件、客户端摘掉 /32 回程路由。旧值 5 分钟的后果是玩家早就不在线了，
+// 路由还挂着——同一 CGNAT 出口下的其他玩家会被这条残留路由把回包吸进隧道。
+//
+// 不能再短：NetherNet 会话被收割后**没有重新学习的路径**（没有新信令就永远是
+// unknown session），误收割等于把在线玩家踢下线；双向流量都会刷新 lastSeen，
+// 只有真正两厢寂静 60s 才会走到回收。
+const sessionIdleTimeout = 60 * time.Second
 
 func (m *Multiplexer) cleanup() {
 	m.mu.Lock()
@@ -474,6 +501,24 @@ func (m *Multiplexer) reportBytes() {
 			m.sink.NetherSessionBytes(ufrag, sess.clientAddr, int(dIn), int(dOut))
 		}
 	}
+}
+
+// Stats 返回规则级流量与连接数，语义与 TCPForwarder/UDPForwarder.Stats 一致：
+// bytesIn/bytesOut 是进程启动以来的累计值（不随会话回收归零），active 是当前
+// 已学到地址（玩家真实在线）的会话数，total 是累计学到的会话数。
+//
+// 面板规则表与仪表盘的「流入/流出/连接数」读这里；漏接的后果是 NetherNet 规则
+// 恒显示 0 B，而会话明细里明明有流量——排查时两边数字对不上，最容易误判成
+// 「数据面没通」。
+func (m *Multiplexer) Stats() (bytesIn, bytesOut, active, total int64) {
+	m.mu.RLock()
+	for _, sess := range m.sessions {
+		if sess.learned {
+			active++
+		}
+	}
+	m.mu.RUnlock()
+	return m.bytesIn.Load(), m.bytesOut.Load(), active, m.total.Load()
 }
 
 // Stop stops the multiplexer

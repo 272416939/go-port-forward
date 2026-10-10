@@ -567,6 +567,12 @@ func (m *Manager) Diagnostics() (*models.ManagerDiagnostics, error) {
 			bi, bo, a, t := e.udp.Stats()
 			accumulateProtocolTraffic(&d.Protocols.UDP, bi, bo, a, t)
 		}
+		// NetherNet 的数据面就是 UDP：诊断页按协议分组时归到 UDP，否则
+		// 「UDP 有流量但加起来对不上总流入」。
+		if e.netherMux != nil {
+			bi, bo, a, t := e.netherMux.Stats()
+			accumulateProtocolTraffic(&d.Protocols.UDP, bi, bo, a, t)
+		}
 	}
 	m.mu.RUnlock()
 	hotRules := make([]models.RuleTrafficSummary, 0, len(rules))
@@ -1097,6 +1103,16 @@ func mergeStats(e *entry) (bytesIn, bytesOut, active, total int64) {
 	}
 	if e.udp != nil {
 		bi, bo, a, t := e.udp.Stats()
+		bytesIn += bi
+		bytesOut += bo
+		active += a
+		total += t
+	}
+	// NetherNet 规则没有 TCP/UDP 转发器（信令网关 + 数据多路复用器是另一套），
+	// 漏掉这一支的后果是规则行与仪表盘恒显示 0 B / 0 连接，而会话明细里明明
+	// 有流量——排查「数据面到底通没通」时两边数字互相打架。
+	if e.netherMux != nil {
+		bi, bo, a, t := e.netherMux.Stats()
 		bytesIn += bi
 		bytesOut += bo
 		active += a

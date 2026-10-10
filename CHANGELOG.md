@@ -145,6 +145,22 @@ answer 截断/挂起，客户端 `setRemoteDescription` 失败、**一个 STUN �
 重连时工厂还会 `EADDRINUSE` 并静默退化成「BDS 看到中转机地址」；以及 `addrMap` 可能
 留下指向已死会话的条目，导致玩家包被转发到旧数据端口。
 
+**NetherNet 规则流量统计恒为 0，且离线玩家 IP 要 5 分钟才回收**
+
+两个都是真机验证时暴露的观测/生命周期问题：
+
+- `mergeStats` 只汇总 `tcp`/`udp` 转发器，NetherNet 规则（信令网关 + 数据多路复用器
+  是另一套）因此恒报 0 B / 0 连接，而「活跃会话」明细里明明有上下行——两边数字打架，
+  排查「数据面到底通没通」时最容易误判。现多路复用器新增 `Stats()`（双向累计字节 +
+  活跃/累计会话数，语义同 TCP/UDP 转发器），并接进 `mergeStats` 与诊断页的按协议汇总。
+- 会话空闲回收阈值 5 分钟 → 60 秒（对齐 NetherProxy 的 `tuple_stale_timeout`）。这个
+  值同时决定回程路由推送什么时候停止把该玩家 IP 报活：旧值下玩家早就不在线了，/32
+  回程路由还挂着，同一 CGNAT 出口下的其他玩家会被残留路由把回包吸进隧道。双向流量
+  都会刷新 `lastSeen`——NetherNet 会话被回收后没有重新学习的路径，误收割等于把在线
+  玩家踢下线，因此不能再短。
+
+配套 `TestMultiplexerStatsCountsBothDirections`、`TestMergeStatsIncludesNetherNetMultiplexer`。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

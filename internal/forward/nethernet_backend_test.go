@@ -1,12 +1,17 @@
 package forward
 
 import (
+	"encoding/binary"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/logger"
 	"go-port-forward/internal/models"
+	"go-port-forward/internal/nethernet"
 	"go.uber.org/zap"
 )
 
@@ -87,5 +92,111 @@ func TestNetherSessionSinkEndIsIdempotent(t *testing.T) {
 
 	if n := len(svc.sessions.snapshot()); n != 0 {
 		t.Fatalf("registry has %d entries after duplicate end, want 0", n)
+	}
+}
+
+// fakeNetherPlayerSocket 是实现 nethernet.PlayerSocket 的最小替身：记录出站包，
+// Read 阻塞到 Close（readBackend goroutine 因此不会空转退出）。
+type fakeNetherPlayerSocket struct {
+	mu   sync.Mutex
+	sent [][]byte
+	done chan struct{}
+}
+
+func newFakeNetherPlayerSocket() *fakeNetherPlayerSocket {
+	return &fakeNetherPlayerSocket{done: make(chan struct{})}
+}
+
+func (s *fakeNetherPlayerSocket) SendTo(packet []byte, dst *net.UDPAddr) error {
+	s.mu.Lock()
+	s.sent = append(s.sent, append([]byte(nil), packet...))
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *fakeNetherPlayerSocket) Read(buf []byte) (int, error) {
+	<-s.done
+	return 0, net.ErrClosed
+}
+
+func (s *fakeNetherPlayerSocket) Close() error {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+	return nil
+}
+
+// buildSTUNBindingRequest 构造只带单个 USERNAME 属性的最小 STUN binding request。
+func buildSTUNBindingRequest(username string) []byte {
+	attrLen := 4 + len(username)
+	if pad := len(username) % 4; pad != 0 {
+		attrLen += 4 - pad
+	}
+	p := make([]byte, 20+attrLen)
+	binary.BigEndian.PutUint16(p[0:2], 0x0001)          // Binding Request
+	binary.BigEndian.PutUint16(p[2:4], uint16(attrLen)) // Message Length
+	binary.BigEndian.PutUint32(p[4:8], 0x2112A442)      // Magic Cookie
+	copy(p[8:20], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	binary.BigEndian.PutUint16(p[20:22], 0x0006) // USERNAME
+	binary.BigEndian.PutUint16(p[22:24], uint16(len(username)))
+	copy(p[24:], []byte(username))
+	return p
+}
+
+// 回归测试（真机症状：玩家已能进服，但面板规则行与仪表盘的流入/流出/连接数恒为
+// 0 B）：NetherNet 规则的流量必须经 mergeStats 汇总进规则视图。
+//
+// 用真实 UDP socket 驱过多路复用器（只走公开 API）：RegisterSession + 一个带
+// USERNAME 的 STUN binding request，足以让会话学到地址并计数。
+func TestMergeStatsIncludesNetherNetMultiplexer(t *testing.T) {
+	logger.L = zap.NewNop()
+	logger.S = logger.L.Sugar()
+
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("probe port: %v", err)
+	}
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	_ = probe.Close()
+
+	sock := newFakeNetherPlayerSocket()
+	mux := nethernet.NewMultiplexer(fmt.Sprintf("127.0.0.1:%d", port),
+		func(src *net.UDPAddr) (nethernet.PlayerSocket, error) { return sock, nil })
+	if err := mux.Start(); err != nil {
+		t.Fatalf("mux start: %v", err)
+	}
+	defer mux.Stop()
+	mux.RegisterSession("chJs", net.ParseIP("10.66.0.3"), 39042)
+
+	pc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	if err != nil {
+		t.Fatalf("dial mux: %v", err)
+	}
+	stun := buildSTUNBindingRequest("chJs:cli")
+	if _, err := pc.Write(stun); err != nil {
+		t.Fatalf("send stun: %v", err)
+	}
+	_ = pc.Close()
+
+	waitFor(t, 2*time.Second, func() bool {
+		_, _, active, _ := mux.Stats()
+		return active == 1
+	})
+
+	sock.mu.Lock()
+	sent := len(sock.sent)
+	sock.mu.Unlock()
+	if sent != 1 {
+		t.Fatalf("forwarded %d packets through the player socket, want 1", sent)
+	}
+
+	bi, bo, a, tot := mergeStats(&entry{netherMux: mux})
+	if bi != int64(len(stun)) || bo != 0 {
+		t.Fatalf("mergeStats bytes = %d/%d, want %d/0", bi, bo, len(stun))
+	}
+	if a != 1 || tot != 1 {
+		t.Fatalf("mergeStats conns = %d/%d, want 1/1", a, tot)
 	}
 }

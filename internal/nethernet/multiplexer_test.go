@@ -443,3 +443,58 @@ func TestMultiplexerRegisterSessionReplacesPrevious(t *testing.T) {
 	}
 }
 
+// 规则级统计必须两个方向都算，且 active/total 语义与 TCP/UDP 转发器一致：
+// 面板规则表与仪表盘的「流入/流出/连接数」读它。曾因 Manager 漏接这一支，
+// NetherNet 规则恒显示 0 B 而会话明细里有流量——排查时两边数字打架。
+func TestMultiplexerStatsCountsBothDirections(t *testing.T) {
+	targetIP := net.ParseIP("10.66.0.3")
+	sock := newFakePlayerSocket()
+	m := NewMultiplexer(":0", func(src *net.UDPAddr) (PlayerSocket, error) { return sock, nil })
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+	m.RegisterSession("ufrag1", targetIP, 19132)
+
+	if bi, bo, a, tot := m.Stats(); bi != 0 || bo != 0 || a != 0 || tot != 0 {
+		t.Fatalf("fresh mux stats = %d/%d/%d/%d, want all zero", bi, bo, a, tot)
+	}
+
+	client := &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 5555}
+	stun := buildSTUNBindingRequest("ufrag1:cli")
+	m.handlePacket(stun, client)
+
+	// BDS 回程一包：readBackend 经数据端口发回玩家并计入流出。
+	sock.replies <- []byte("bds-reply")
+	m.mu.RLock()
+	sess := m.sessions["ufrag1"]
+	m.mu.RUnlock()
+	waitFor(t, "backend reply relayed", func() bool { return sess.bytesOut.Load() > 0 })
+
+	bi, bo, a, tot := m.Stats()
+	if bi != int64(len(stun)) {
+		t.Fatalf("bytesIn = %d, want %d", bi, len(stun))
+	}
+	if bo != int64(len("bds-reply")) {
+		t.Fatalf("bytesOut = %d, want %d", bo, len("bds-reply"))
+	}
+	if a != 1 || tot != 1 {
+		t.Fatalf("active/total = %d/%d, want 1/1", a, tot)
+	}
+
+	// 回收后累计流量不清零（同 TCP/UDP 转发器语义），active 归零、total 保留。
+	m.mu.Lock()
+	m.sessions["ufrag1"].lastSeen = time.Now().Add(-time.Hour)
+	m.mu.Unlock()
+	m.cleanup()
+
+	bi, bo, a, tot = m.Stats()
+	if bi == 0 || bo == 0 {
+		t.Fatalf("cumulative bytes zeroed by cleanup: %d/%d", bi, bo)
+	}
+	if a != 0 || tot != 1 {
+		t.Fatalf("after cleanup active/total = %d/%d, want 0/1", a, tot)
+	}
+}
+
+
