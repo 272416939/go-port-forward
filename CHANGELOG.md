@@ -114,6 +114,16 @@ IPv4 的畸形候选，Bedrock 客户端 ICE 解析混乱、静默不发 STUN（
 candidate 做模板重写成公网地址，其余候选全部丢弃。配套
 `TestRewriteSDPCollapsesCandidatesToOne`。
 
+**NetherNet SDP answer 透传 BDS 的 Content-Length，客户端解析失败、静默不进 ICE**
+
+`handleJoin` 把 BDS 响应头连同 `Content-Length` 一起照抄，再写改写后的 answer——两者
+长度对不上（折叠 candidate、重写 IP 都改变 body 长度）。Go 按错误的 Content-Length 把
+answer 截断/挂起，客户端 `setRemoteDescription` 失败、**一个 STUN 都不发**，报
+`InitialConnection-115`，而服务端只有 registered、数据面零日志（抓包客户端零 UDP）。
+现回写前删掉 `Content-Length`，由 Go 按实际长度重算（NetherProxy 同样处理）。
+`TestHandleJoinRegistersBackendDataPort` 增加"客户端拿到完整 answer"断言，并做变异测试
+确认（删掉 Del → 测试红）。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

@@ -374,6 +374,11 @@ func (g *Gateway) handleJoin(w http.ResponseWriter, r *http.Request) {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
+	// 我们改写了 body（折叠 candidate、重写 IP:端口），BDS 的 Content-Length 不再
+	// 匹配。不删的话客户端按旧长度读取：answer 被截断或连接挂起，setRemoteDescription
+	// 失败、静默不进 ICE（症状=信令通、registered 有、数据面零 STUN、InitialConnection-115）。
+	// 删掉后由 Go 按实际长度重写（NetherProxy 同样这么处理）。
+	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	w.Write([]byte(rewrittenAnswer))
 }

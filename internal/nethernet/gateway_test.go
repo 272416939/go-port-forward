@@ -439,5 +439,19 @@ func TestHandleJoinRegistersBackendDataPort(t *testing.T) {
 	if !sess.targetIP.Equal(net.ParseIP(bdsHost)) {
 		t.Fatalf("target IP = %s, want %s (tunnel IP, not the candidate IP)", sess.targetIP, bdsHost)
 	}
+
+	// 客户端必须拿到完整、未被 Content-Length 截断的重写 answer。改写后 body 长度与
+	// BDS 原始不一致，必须删掉透传的 Content-Length，否则客户端按旧长度读、answer 被
+	// 截断/挂起，setRemoteDescription 失败、静默不进 ICE（数据面零 STUN）。
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "203.0.113.9") {
+		t.Fatalf("重写未生效（answer 里没有公网 IP 203.0.113.9）：\n%s", bodyStr)
+	}
+	// candidate 是 answer 的最后一行；若 Content-Length 未删导致 body 被截断，结尾的
+	// "typ host" 会被切掉。
+	if !strings.HasSuffix(strings.TrimRight(bodyStr, "\r\n"), "typ host") {
+		t.Fatalf("客户端拿到的 answer 不完整（疑似 Content-Length 未删导致截断）：\n%s", bodyStr)
+	}
 }
 
