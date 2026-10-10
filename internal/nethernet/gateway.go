@@ -390,7 +390,45 @@ func (g *Gateway) rewriteSDP(sdp string) string {
 		sep = "\r\n"
 	}
 	lines := strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n")
+
+	// 第一遍：挑选模板 candidate——第一个非回环的 UDP host candidate。BDS 的 answer
+	// 常带多条 host candidate（回环 / 内网网卡 / IPv6）。旧实现把每一条都重写成同一个
+	// 公网地址，客户端于是收到多条重复候选、以及把 IPv6 地址硬换成 IPv4 的畸形候选，
+	// Bedrock 客户端的 ICE 会被搞乱、静默不发 STUN（信令通但数据面零包）。参照
+	// NetherProxy：只保留一条干净候选。
+	var templateLine, loopbackLine string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "a=candidate:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 8 || !strings.EqualFold(fields[2], "udp") {
+			continue
+		}
+		if fields[6] != "typ" || !strings.EqualFold(fields[7], "host") {
+			continue
+		}
+		ip := net.ParseIP(fields[4])
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() {
+			if loopbackLine == "" {
+				loopbackLine = line
+			}
+			continue
+		}
+		if templateLine == "" {
+			templateLine = line
+		}
+	}
+	if templateLine == "" {
+		templateLine = loopbackLine
+	}
+
 	var result []string
+	candidateInserted := false
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -409,11 +447,21 @@ func (g *Gateway) rewriteSDP(sdp string) string {
 			continue
 		}
 
-		// Replace candidate line: a=candidate:... <internal_ip> <port> ...
+		// 折叠 candidate：只在第一个位置插一条重写后的模板，其余全丢弃。
 		if strings.HasPrefix(line, "a=candidate:") {
+			if templateLine != "" {
+				if !candidateInserted {
+					tf := strings.Fields(templateLine)
+					tf[4] = g.publicIP
+					tf[5] = fmt.Sprintf("%d", g.dataPort)
+					result = append(result, strings.Join(tf, " "))
+					candidateInserted = true
+				}
+				continue
+			}
+			// 没有可用模板（极端情况）：退回逐条重写，至少不丢 candidate。
 			parts := strings.Fields(line)
 			if len(parts) >= 6 {
-				// parts[4] is IP, parts[5] is port
 				parts[4] = g.publicIP
 				parts[5] = fmt.Sprintf("%d", g.dataPort)
 				result = append(result, strings.Join(parts, " "))

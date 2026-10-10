@@ -105,6 +105,15 @@ BDS 的 SDP answer 按 RFC 4566 用 CRLF 分行；`rewriteSDP` 旧实现 `Split(
 输入行尾、按同一种行尾重组；另在 `handleJoin` 加 debug 日志，同时落盘 BDS 原始 answer
 与重写后的 answer 便于核对。配套 `TestRewriteSDPPreservesCRLF`。
 
+**NetherNet SDP 重写把多条 candidate 全改成公网地址，客户端 ICE 被搞乱**
+
+BDS 的 SDP answer 带多条 host candidate（隧道 IP / 内网网卡 / 多个 IPv6）。旧实现把
+**每一条**都重写成同一个公网地址，客户端于是收到多条重复候选、以及把 IPv6 地址硬换成
+IPv4 的畸形候选，Bedrock 客户端 ICE 解析混乱、静默不发 STUN（信令通、`registered` 有、
+数据面零 STUN）。现参照 NetherProxy 折叠成**一条**干净候选：取第一个非回环 UDP host
+candidate 做模板重写成公网地址，其余候选全部丢弃。配套
+`TestRewriteSDPCollapsesCandidatesToOne`。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

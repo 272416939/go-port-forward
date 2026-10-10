@@ -121,6 +121,36 @@ func TestRewriteSDPPreservesCRLF(t *testing.T) {
 	}
 }
 
+// BDS answer 常带多条 host candidate（回环/内网/IPv6）。重写必须折叠成一条公网候选：
+// 多条重复候选、以及把 IPv6 候选改成 IPv4 地址的畸形候选会让 Bedrock 客户端 ICE 解析
+// 混乱、静默不发 STUN。锁住：只保留一条、指向公网地址，内网/IPv6 地址不残留。
+func TestRewriteSDPCollapsesCandidatesToOne(t *testing.T) {
+	g := &Gateway{publicIP: "120.25.168.24", dataPort: 39042}
+
+	answer := "v=0\r\n" +
+		"m=application 39042 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
+		"c=IN IP4 10.66.0.3\r\n" +
+		"a=candidate:435801835 1 udp 2122260223 10.66.0.3 39042 typ host generation 0 network-id 1 network-cost 50\r\n" +
+		"a=candidate:855127124 1 udp 2121998079 172.16.0.88 39042 typ host generation 0 network-id 2\r\n" +
+		"a=candidate:4033773935 1 udp 2122197247 2408:8360:e601:e581:9b5c:96bc:af5d:6b25 39042 typ host generation 0 network-id 3\r\n" +
+		"a=ice-ufrag:bDQt\r\n"
+
+	out := g.rewriteSDP(answer)
+
+	if n := strings.Count(out, "a=candidate:"); n != 1 {
+		t.Fatalf("candidate 数量 = %d, want 1（折叠成一条公网候选）:\n%s", n, out)
+	}
+	for _, bad := range []string{"10.66.0.3", "172.16.0.88", "2408:8360"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("重写后仍残留内网/IPv6 地址 %q:\n%s", bad, out)
+		}
+	}
+	want := "a=candidate:435801835 1 udp 2122260223 120.25.168.24 39042 typ host generation 0 network-id 1 network-cost 50\r\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("保留的候选不是模板候选重写成公网地址:\nwant %q\ngot:\n%s", want, out)
+	}
+}
+
 func TestExtractIceUfrag(t *testing.T) {
 	sdp := `v=0
 a=ice-ufrag:test123
