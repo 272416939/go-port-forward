@@ -47,12 +47,18 @@ v6（0x06，域标签 `pfapp-hello-v6`）。**存量 v1.1.x 客户端连不上�
 
 **NetherNet 信令请求经隧道全部超时**（玩家走中转拿到 `Service unavailable`，直连 BDS 正常）
 
-NetherNet 信令网关用普通 `http.Client` 访问后端 BDS 的信令端口，内核给它的源地址
-就是中转机在 TUN 上的地址（`10.66.0.1`）；而出向隔离检查原本对隧道内源地址零例外，
-于是 SDP/MOTD 请求全被丢弃，服务端只留下一行「丢弃隧道内互访的包（用户隔离）」，
-指不到真正原因。现在出向源检查豁免 `src == s.gateway`——该地址客户端拿不到（握手
-时直接拒绝占用）也伪造不了（入向包必须 `src == 自己的 tunIP`），只可能由中转机自身
-产生。**入向检查没有跟着放宽**：客户端仍然到不了网关、也到不到别的客户端。
+NetherNet 信令网关用普通 `http.Client` 访问后端 BDS 的信令端口，**出向包的源、回向包的目的都落在中转机在 TUN 上的地址**（`10.66.0.1`）；而用户隔离检查对隧道内地址零例外，SDP/MOTD 请求与 BDS 的应答全被丢弃，TCP 握手永远完不成。服务端日志只有一行「丢弃隧道内互访的包（用户隔离）」——同一个告警在出向和入向各出现一次，仅 `direction` 字段不同，极易看成同一个问题而排查错方向。
+
+现在出向源检查与入向目的检查**成对豁免** `s.gateway`：
+- 该地址客户端拿不到（握手时直接拒绝占用）也伪造不了（入向包必须 `src == 自己的 tunIP`，TUN 读侧只收内核路由进来的包），只可能由中转机自身产生
+- 入向侧额外收窄：只放行回包形态，TCP 新建连接（SYN 且无 ACK）在用户态就拒，比收紧前「完全豁免、只靠内核 INPUT 一层」更严
+- **客户端之间（A→B）完全没放宽**：非网关的隧道内地址，入向出向一律仍拒
+
+配套测试成对且打到调用点：`TestForwardOutboundSourceIsolation`、
+`TestAllowReturnToGatewayOnlyLetsRepliesThrough`（纯谓词）+
+`TestDeliverInboundGatewayWiring`（真会话封 Data 包打进 `deliverInbound`，验证哪些包真进
+TUN 批）。最后一个是关键——纯函数单测探不到「调用点被改回零例外」，而那正是线上故障
+的形态。`deliverInbound` 为此把 `*tunnet.Batch` 换成了 `tunBatch` 接口。
 
 **公网 IP 探测拿到 Docker 网桥地址时静默失败**
 

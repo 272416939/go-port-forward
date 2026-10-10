@@ -28,7 +28,7 @@ func (w *fakeTunWriter) add(pkt []byte, to netip.AddrPort) bool {
 	return true
 }
 func (w *fakeTunWriter) flush() (int, error) { return w.n, nil }
-func (w *fakeTunWriter) pending() int       { return w.n }
+func (w *fakeTunWriter) pending() int        { return w.n }
 
 // ipv4Pkt 造一个 20 字节的 IPv4 头，只填源/目的地址——srcIP4/dstIP4 只读这两处。
 func ipv4Pkt(src, dst string) []byte {
@@ -74,8 +74,8 @@ func TestForwardOutboundSourceIsolation(t *testing.T) {
 	s.peers.upsert(ps)
 
 	cases := []struct {
-		name    string
-		src     string
+		name     string
+		src      string
 		wantDrop bool
 	}{
 		{"网关地址放行——NetherNet 信令经隧道访问 BDS 的唯一通路", "10.66.0.1", false},
@@ -115,6 +115,234 @@ func TestHandleDataStillBlocksTunnelDestination(t *testing.T) {
 	}
 	if s.isTunnelInternal(netip.MustParseAddr("203.0.113.9")) {
 		t.Fatal("玩家公网 IP 不应判为隧道内地址")
+	}
+}
+
+// tcpPkt 造一个带 TCP 头的 IPv4 包，flags 写进 TCP 头偏移 13。
+// ihlOpts 让用例能覆盖「带 IP 选项头」的形态——flags 偏移必须跟着 IHL 走。
+func tcpPkt(src, dst string, flags byte, ihlOpts int) []byte {
+	ihl := 5 + ihlOpts/4
+	p := make([]byte, ihl*4+20)
+	p[0] = byte(0x40 | ihl)
+	p[9] = 6 // IPPROTO_TCP
+	s := netip.MustParseAddr(src).As4()
+	d := netip.MustParseAddr(dst).As4()
+	copy(p[12:16], s[:])
+	copy(p[16:20], d[:])
+	p[ihl*4+13] = flags
+	return p
+}
+
+// 入向网关豁免必须收窄成「只放行回包」：TCP 新建连接（SYN 且无 ACK）在
+// 用户态就拒，不让客户端借网关地址摸中转机服务；SYN-ACK / ACK / FIN-ACK /
+// RST 等回包形态放行，交给内核 conntrack 做最终裁决。
+//
+// 这是 7237a82 那次收紧没有的部分——当时网关是完全豁免、只靠内核 INPUT
+// 一层兜底；现在用户态先挡一道，内核降为兜底。
+func TestAllowReturnToGatewayOnlyLetsRepliesThrough(t *testing.T) {
+	nopLogging()
+	pool, gw, err := parseTunAddr("10.66.0.1/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{tunPool: pool, gateway: gw}
+	gateway := "10.66.0.1"
+	other := "10.66.0.8" // 别人的隧道地址——任何形态都不放行
+
+	const (
+		syn    = 0x02
+		synAck = 0x12
+		ack    = 0x10
+		pshAck = 0x18
+		finAck = 0x11
+		rst    = 0x04
+		ecnSyn = 0xc2 // SYN + ECE + CWR，仍是新建连接
+	)
+	cases := []struct {
+		name    string
+		dst     string
+		flags   byte
+		ihlOpts int
+		wantLet bool
+	}{
+		{"SYN-ACK 回包放行", gateway, synAck, 0, true},
+		{"纯 ACK 回包放行", gateway, ack, 0, true},
+		{"PSH+ACK 数据回包放行", gateway, pshAck, 0, true},
+		{"FIN+ACK 回包放行", gateway, finAck, 0, true},
+		{"RST 回包放行", gateway, rst, 0, true},
+		{"带 IP 选项头的 ACK 也放行（偏移必须跟 IHL 走）", gateway, ack, 4, true},
+		{"TCP 新建连接拒绝", gateway, syn, 0, false},
+		{"ECN SYN 新建连接也拒绝", gateway, ecnSyn, 0, false},
+		{"别人的隧道地址：SYN-ACK 也不放行", other, synAck, 0, false},
+		{"别人的隧道地址：ACK 也不放行", other, ack, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pkt := tcpPkt("10.66.0.3", tc.dst, tc.flags, tc.ihlOpts)
+			got := s.allowReturnToGateway(pkt, netip.MustParseAddr(tc.dst))
+			if got != tc.wantLet {
+				t.Fatalf("allowReturnToGateway(dst=%s, flags=%#x, ihlOpts=%d) = %v, 期望 %v",
+					tc.dst, tc.flags, tc.ihlOpts, got, tc.wantLet)
+			}
+		})
+	}
+}
+
+// 非 TCP 没有「新建连接」可判，交给内核 conntrack（没有对应流一律 INVALID）。
+// 畸形/过短的包不得panic——解析失败按「不是 TCP 新建连接」处理，最终仍由内核裁决。
+func TestIsTCPConnectAttemptNonTCPAndMalformed(t *testing.T) {
+	cases := []struct {
+		name string
+		pkt  []byte
+		want bool
+	}{
+		{"空包", nil, false},
+		{"不足 20 字节", []byte{0x45, 0, 0, 0}, false},
+		{"IPv6 包", func() []byte { p := make([]byte, 40); p[0] = 0x60; return p }(), false},
+		{"UDP 包（协议 17）", func() []byte {
+			p := make([]byte, 28)
+			p[0] = 0x45
+			p[9] = 17
+			return p
+		}(), false},
+		{"ICMP 包（协议 1）", func() []byte {
+			p := make([]byte, 28)
+			p[0] = 0x45
+			p[9] = 1
+			return p
+		}(), false},
+		{"TCP 但长度不够放 flags", func() []byte {
+			p := make([]byte, 24) // IHL=5 需要至少 20+14=34
+			p[0] = 0x45
+			p[9] = 6
+			return p
+		}(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTCPConnectAttempt(tc.pkt); got != tc.want {
+				t.Fatalf("isTCPConnectAttempt() = %v, 期望 %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeTunBatch 记录有多少个包被 Commit 进了 TUN 写批。
+//
+// Next 必须返回**带容量的非 nil 缓冲**：deliverInbound 拿 nil 会当成「批满」
+// 去 Flush 再重取，仍为 nil 就整体 return——那样测的就不是隔离逻辑了。
+type fakeTunBatch struct {
+	commits  int
+	lastSize int
+	flushes  int
+}
+
+func (b *fakeTunBatch) Next() []byte { return make([]byte, 0, 4096) }
+func (b *fakeTunBatch) Commit(size int) {
+	if size <= 0 {
+		return
+	}
+	b.commits++
+	b.lastSize = size
+}
+func (b *fakeTunBatch) Flush() error { b.flushes++; return nil }
+
+// sessionPairForInbound 走完整握手派生两端方向密钥，返回一对会话。
+// 客户端会话用来封包（模拟后端 BDS 的回包），服务端会话装进 peerSession。
+func sessionPairForInbound(t *testing.T) (client, server *tunnel.Session) {
+	t.Helper()
+	secret := []byte("per-code-secret")
+	uid, err := tunnel.ParseUID("3f2b1c4d-5e6f-4071-8293-a4b5c6d7e8f9")
+	if err != nil {
+		t.Fatalf("ParseUID: %v", err)
+	}
+	var dev, dev2 [32]byte
+	for i := range dev {
+		dev[i] = byte(i)
+		dev2[i] = byte(200 - i)
+	}
+	hello, clientPriv, err := tunnel.NewClientHelloV6(secret, uid, dev, dev2)
+	if err != nil {
+		t.Fatalf("NewClientHelloV6: %v", err)
+	}
+	parsed, err := tunnel.ParseClientHello(secret, hello.Marshal())
+	if err != nil {
+		t.Fatalf("ParseClientHello: %v", err)
+	}
+	accept, serverPriv, err := tunnel.NewServerAccept(secret, parsed.Eph,
+		netip.MustParseAddr("10.66.0.3"), netip.MustParseAddr("10.66.0.1"), 24, tunnel.MaxTunMTU, 0)
+	if err != nil {
+		t.Fatalf("NewServerAccept: %v", err)
+	}
+	acceptBack, err := tunnel.ParseServerAccept(secret, accept.Marshal(), hello.Eph)
+	if err != nil {
+		t.Fatalf("ParseServerAccept: %v", err)
+	}
+	cC2S, cS2C, err := tunnel.DeriveSessionKeys(tunnel.ECDHShared(&acceptBack.Eph, clientPriv), secret, hello.Eph, acceptBack.Eph)
+	if err != nil {
+		t.Fatalf("DeriveSessionKeys(client): %v", err)
+	}
+	sC2S, sS2C, err := tunnel.DeriveSessionKeys(tunnel.ECDHShared(&parsed.Eph, serverPriv), secret, parsed.Eph, accept.Eph)
+	if err != nil {
+		t.Fatalf("DeriveSessionKeys(server): %v", err)
+	}
+	client, err = tunnel.NewClientSession(cC2S, cS2C, 0, tunnel.MaxTunMTU)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	server, err = tunnel.NewServerSession(sC2S, sS2C, 0, tunnel.MaxTunMTU)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	return client, server
+}
+
+// 入向隔离的**接线**测试：用真会话封一个 Data 包打进 deliverInbound，验证
+// 「哪些包真的进了 TUN 批」。
+//
+// 纯函数 allowReturnToGateway 的单测探不到调用点——把调用点改回零例外时那些
+// 单测照样全绿，而线上表现是「请求发出去了、回程被丢、HTTP 超时」，服务端
+// 日志只有一行隔离丢弃。这个用例就是堵那个缺口。
+func TestDeliverInboundGatewayWiring(t *testing.T) {
+	nopLogging()
+	pool, gw, err := parseTunAddr("10.66.0.1/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, server := sessionPairForInbound(t)
+	ps := newPeerSession(
+		Identity{CodeID: "c1", CodeName: "222", UserName: "tester",
+			TunIP: netip.MustParseAddr("10.66.0.3")},
+		server, &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 5000}, tunnel.MaxTunMTU)
+	// binder 必须给：deliverInbound 会 markActive，首包 shouldPersistTouch 为真，
+	// 于是 goroutine 里调 TouchCode——nil binder 直接 panic。
+	s := &Server{tunPool: pool, gateway: gw, binder: &fakeBinder{}}
+
+	cases := []struct {
+		name    string
+		dst     string
+		flags   byte
+		ihlOpts int
+		wantIn  bool // true = 应写进 TUN 批（递送给中转机）
+	}{
+		{"发往网关的 ACK 回包必须进 TUN（信令回程）", "10.66.0.1", 0x10, 0, true},
+		{"发往网关的 PSH+ACK 数据回包必须进 TUN", "10.66.0.1", 0x18, 0, true},
+		{"发往网关的 TCP SYN 不得进 TUN", "10.66.0.1", 0x02, 0, false},
+		{"发往别人隧道地址不得进 TUN", "10.66.0.8", 0x10, 0, false},
+		{"发往公网地址照常进 TUN", "203.0.113.9", 0x10, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := client.SealData(nil, tcpPkt("10.66.0.3", tc.dst, tc.flags, tc.ihlOpts))
+			b := &fakeTunBatch{}
+			s.deliverInbound(ps, wire, b)
+			if tc.wantIn && b.commits == 0 {
+				t.Fatalf("dst=%s flags=%#x 应写进 TUN 批，却被隔离丢弃", tc.dst, tc.flags)
+			}
+			if !tc.wantIn && b.commits != 0 {
+				t.Fatalf("dst=%s flags=%#x 应被隔离丢弃，却写进了 TUN 批（%d 个）", tc.dst, tc.flags, b.commits)
+			}
+		})
 	}
 }
 

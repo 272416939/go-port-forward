@@ -632,11 +632,24 @@ func (s *Server) handleSessionPacket(ps *peerSession, pkt []byte, batch *tunnet.
 	}
 }
 
+// tunBatch 是 deliverInbound 需要的批量写能力，*tunnet.Batch 满足它。
+//
+// 抽成接口（与 udpWriter / cmdRunner 同一套做法）是为了让**入向用户隔离的
+// 接线可测**：纯函数 allowReturnToGateway 的单测探不到调用点有没有真的用它，
+// 而接错线的表现是「请求发出去了、回程被丢、HTTP 超时」，服务端日志只有
+// 一行隔离丢弃，极难定位。有接口就能用真会话封一个 Data 包打进去，端到端
+// 验证「哪些包进了 TUN 批、哪些被隔离丢掉」。
+type tunBatch interface {
+	Next() []byte
+	Commit(size int)
+	Flush() error
+}
+
 // deliverInbound 把一个 Data 包解密、校验并写进 TUN 批。
 //
 // 明文直接解进 TUN 写批的槽位（tunnet.Batch.Next），所以整条入向路径上既没有
 // 明文分配也没有二次拷贝。
-func (s *Server) deliverInbound(ps *peerSession, pkt []byte, batch *tunnet.Batch) {
+func (s *Server) deliverInbound(ps *peerSession, pkt []byte, batch tunBatch) {
 	dst := batch.Next()
 	if dst == nil {
 		// 批满：先冲刷再取槽位。
@@ -667,13 +680,22 @@ func (s *Server) deliverInbound(ps *peerSession, pkt []byte, batch *tunnet.Batch
 		s.logSpoof(ps, src)
 		return
 	}
-	// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内（零例外，
-	// 网关也不行——通用模式目标填隧道地址已整体禁用，网关上没有任何
-	// 服务需要被隧道访问）。客户端掩码是 /16，整个网段在每台客户端
-	// 机器上都是直连网段，不拦的话 A 可以直接访问 B 后端所有绑
-	// 0.0.0.0 的服务。
+	// 用户隔离的第二条执行语句：目的地址不得落在隧道网段内。客户端掩码是
+	// /16，整个网段在每台客户端机器上上都是直连网段，不拦的话 A 可以直接
+	// 访问 B 后端所有绑 0.0.0.0 的服务。
+	//
+	// 唯一例外是网关地址 s.gateway，且只放行回包形态——它是出向侧
+	// 「src == s.gateway 豁免」的对称面：中转机主动发起的连接（NetherNet
+	// 信令网关经隧道访问后端 BDS）的回包，目的地址就是网关地址。**只开
+	// 一半的表现是「请求发出去了、回程被丢、HTTP 超时」**——玩家拿到
+	// Service unavailable，而服务端日志只有这行丢弃，指不到真正原因。
+	//
+	// 安全性不依赖信任：客户端拿不到网关地址（握手时 ident.TunIP ==
+	// s.gateway 直接拒绝），也不可能借它摸中转机服务——TCP 新建连接在用户态
+	// 就挡住（见 allowReturnToGateway），其余包交由内核 INPUT 的 conntrack
+	// ESTABLISHED,RELATED 裁决，没有对应流的伪造包内核照样丢。双保险。
 	dstIP, ok := dstIP4(plain)
-	if ok && s.isTunnelInternal(dstIP) {
+	if ok && s.isTunnelInternal(dstIP) && !s.allowReturnToGateway(plain, dstIP) {
 		s.logTunnelInternal(ps, dstIP, "目的")
 		return
 	}
@@ -986,6 +1008,44 @@ func (s *Server) logSpoof(ps *peerSession, src netip.Addr) {
 // 包先进内核再被丢。
 func (s *Server) isTunnelInternal(ip netip.Addr) bool {
 	return ip.IsValid() && s.tunPool.Contains(ip)
+}
+
+// allowReturnToGateway 报告一个目的地址落在隧道网段内的包是否可以放行。
+//
+// 只对网关地址成立，且只放行「回包形态」：它是出向侧 src == s.gateway 豁免
+// 的对称面（见 forwardOutbound 的说明）——中转机主动发起的连接的回包，目的
+// 地址就是网关地址。别的隧道内地址一律不放行：那才是「A 访问 B」。
+//
+// 收窄到回包形态是为了不把 7237a82 堵上的口子整个掀开：当时网关是完全豁免
+// 的，只靠内核 INPUT 兜底；现在 TCP 新建连接（SYN 且无 ACK）在用户态就拒，
+// 内核那层降为兜底而非唯一防线。UDP/ICMP 没有「新建连接」可判，仍交给内核
+// conntrack——没有对应流的一律 INVALID 丢弃。
+func (s *Server) allowReturnToGateway(pkt []byte, dst netip.Addr) bool {
+	return dst == s.gateway && !isTCPConnectAttempt(pkt)
+}
+
+// isTCPConnectAttempt 报告一个 IPv4 包是否是 TCP 的新建连接请求：协议为
+// TCP、SYN 置位且 ACK 未置位。回包（SYN-ACK / ACK / PSH-ACK / FIN-ACK /
+// RST）都不满足这个组合，因此可以继续走内核 conntrack 裁决。
+//
+// 纯函数、逐字节解析，便于把「畸形包 / 非 TCP / 带选项头的 TCP」都纳入测试。
+func isTCPConnectAttempt(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return false
+	}
+	if pkt[9] != 6 { // IPPROTO_TCP
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < 20 || len(pkt) < ihl+14 { // TCP  flags 在 TCP 头偏移 13
+		return false
+	}
+	const (
+		tcpFlagACK = 0x10
+		tcpFlagSYN = 0x02
+	)
+	flags := pkt[ihl+13]
+	return flags&tcpFlagSYN != 0 && flags&tcpFlagACK == 0
 }
 
 // subnetBroadcast 返回 IPv4 前缀的子网广播地址（主机位全 1）。前缀无效或 /32
