@@ -87,6 +87,14 @@ Device2 为零值，于是退化成 122B 的 v4 形态——而新服务端只�
 
 配套测试：`TestExtractUfragFromSTUN`（含等长/服务端更长/更短三种 ufrag 组合）、`TestExtractUfragFromSTUNRejectsNonSTUN`、`TestBackendDataPort`、`TestHandleJoinRegistersBackendDataPort`（打到 `RegisterSession` 调用点），均做过变异测试（破坏→红/恢复→绿）。**待真机部署验证。**
 
+**NetherNet 数据面日志从 debug 提到 info（便于真机定位）**
+
+数据面三个关键事件（`registered`/`learned`/`dropped`）原先都是 debug 级，`log.level`
+默认 info 下玩家加入过程完全静默，真机排障时无法判断 STUN 有没有到中转机。现将
+`registered`（带 data_port）、`learned` 提到 info、`dropped` 提到 warn——加入时看日志即可
+区分「信令到了但数据面没通」是 UDP 数据端口没放行 / candidate 公网 IP 指错，还是 ufrag 没
+匹配。仅为可观测性调整，不改逻辑。
+
 ## [v1.2.0] - 2026-10-10
 
 ### Added

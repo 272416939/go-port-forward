@@ -351,7 +351,9 @@ func (g *Gateway) handleJoin(w http.ResponseWriter, r *http.Request) {
 		// 信令端口会让 BDS 的 ICE 栈一个包都收不到，玩家拿到 InitialConnection-115。
 		forwardPort := g.backendDataPort(string(answerBody))
 		g.mux.RegisterSession(ufrag, g.targetIP, forwardPort)
-		logger.S.Debugw("registered NetherNet session",
+		// 打到 info：数据面其余事件都是 debug，info 级下玩家加入完全不落日志，
+		// 排障时无法判断 STUN 有没有到中转机。按连接（低频）记录，留下 data_port。
+		logger.S.Infow("registered NetherNet session",
 			"ufrag", ufrag,
 			"target", g.targetAddr,
 			"data_port", forwardPort,

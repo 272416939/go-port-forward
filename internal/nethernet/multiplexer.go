@@ -149,7 +149,7 @@ func (m *Multiplexer) handlePacket(packet []byte, clientAddr *net.UDPAddr) {
 				sess.learned = true
 				sess.lastSeen = time.Now()
 				m.addrMap[addrKey] = sess
-				logger.S.Debugw("learned NetherNet client address",
+				logger.S.Infow("learned NetherNet client address",
 					"ufrag", ufrag, "client", clientAddr.String())
 				m.forwardToTarget(packet, sess)
 				m.mu.Unlock()
@@ -159,7 +159,9 @@ func (m *Multiplexer) handlePacket(packet []byte, clientAddr *net.UDPAddr) {
 	}
 	m.mu.Unlock()
 
-	logger.S.Debugw("dropped packet from unknown session", "client", clientAddr.String())
+	// warn：包到了中转机却匹配不到会话——要么 ufrag 没对上（路由键错），要么是
+	// 扫端口/杂散 UDP。用 warn 让"失败case"从 info 的成功序列里跳出来。
+	logger.S.Warnw("dropped packet from unknown session", "client", clientAddr.String())
 }
 
 
@@ -321,7 +323,7 @@ func (m *Multiplexer) RegisterSession(ufrag string, targetIP net.IP, targetPort 
 		lastSeen:   time.Now(),
 		learned:    false,
 	}
-	logger.S.Debugw("registered NetherNet session",
+	logger.S.Infow("registered NetherNet session",
 		"ufrag", ufrag,
 		"target", fmt.Sprintf("%s:%d", targetIP, targetPort),
 	)
