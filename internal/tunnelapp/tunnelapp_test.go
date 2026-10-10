@@ -20,6 +20,104 @@ func nopLogging() {
 	logger.S = logger.L.Sugar()
 }
 
+// fakeTunWriter 收下出向批里的包，只计数——测试只关心「有没有递送」。
+type fakeTunWriter struct{ n int }
+
+func (w *fakeTunWriter) add(pkt []byte, to netip.AddrPort) bool {
+	w.n++
+	return true
+}
+func (w *fakeTunWriter) flush() (int, error) { return w.n, nil }
+func (w *fakeTunWriter) pending() int       { return w.n }
+
+// ipv4Pkt 造一个 20 字节的 IPv4 头，只填源/目的地址——srcIP4/dstIP4 只读这两处。
+func ipv4Pkt(src, dst string) []byte {
+	p := make([]byte, 20)
+	p[0] = 0x45 // version 4 + IHL 5
+	s := netip.MustParseAddr(src).As4()
+	d := netip.MustParseAddr(dst).As4()
+	copy(p[12:16], s[:])
+	copy(p[16:20], d[:])
+	return p
+}
+
+// 出向源地址隔离：隧道内地址一律拒绝，唯一例外是网关地址。
+//
+// 这条例外是 NetherNet 信令网关经隧道访问后端 BDS 的唯一通路——网关是普通
+// http.Client，内核给它的源地址就是 pftun0 自身的地址。零例外时 SDP/MOTD
+// 请求全被丢，玩家拿到的是 "Service unavailable"，而服务端只留下一行
+// 「丢弃隧道内互访的包（用户隔离）」，指不到真正原因。
+//
+// 同时锁死安全属性没有跟着回退：入向 dst 检查（isTunnelInternal 零例外）
+// 未随本例外放宽，客户端仍然到不了网关、也到不了别的客户端。
+func TestForwardOutboundSourceIsolation(t *testing.T) {
+	nopLogging()
+	pool, gw, err := parseTunAddr("10.66.0.1/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c2s, s2c [32]byte
+	for i := range c2s {
+		c2s[i] = byte(i)
+		s2c[i] = byte(255 - i)
+	}
+	sess, err := tunnel.NewServerSession(&c2s, &s2c, 0, tunnel.MaxTunMTU)
+	if err != nil {
+		t.Fatalf("建会话失败: %v", err)
+	}
+	ps := newPeerSession(
+		Identity{CodeID: "c1", CodeName: "222", UserName: "tester",
+			TunIP: netip.MustParseAddr("10.66.0.7")},
+		sess, &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 5000}, tunnel.MaxTunMTU)
+
+	s := &Server{tunPool: pool, gateway: gw, peers: newRegistry()}
+	s.peers.upsert(ps)
+
+	cases := []struct {
+		name    string
+		src     string
+		wantDrop bool
+	}{
+		{"网关地址放行——NetherNet 信令经隧道访问 BDS 的唯一通路", "10.66.0.1", false},
+		{"玩家公网 IP 放行——正常数据面", "203.0.113.9", false},
+		{"别的客户端隧道地址仍然拒绝", "10.66.0.8", true},
+		{"本客户端自己的隧道地址也拒绝（不能拿它当互访目标）", "10.66.0.7", true},
+		{"网段内未分配地址拒绝", "10.66.0.250", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &fakeTunWriter{}
+			s.forwardOutbound(w, make([]byte, 0, 64), ipv4Pkt(tc.src, "10.66.0.7"))
+			if tc.wantDrop && w.n != 0 {
+				t.Fatalf("源 %s 应被隔离丢弃，却递送了 %d 个包", tc.src, w.n)
+			}
+			if !tc.wantDrop && w.n == 0 {
+				t.Fatalf("源 %s 应被递送", tc.src)
+			}
+		})
+	}
+}
+
+// 入向方向不受出向例外影响：客户端发往隧道内地址（含网关）的包一律丢弃。
+// 与 TestForwardOutboundSourceIsolation 配对——「用户间隔离」每条边都要有
+// 独立的执行语句，只放开一半不成立。
+func TestHandleDataStillBlocksTunnelDestination(t *testing.T) {
+	nopLogging()
+	pool, gw, err := parseTunAddr("10.66.0.1/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{tunPool: pool, gateway: gw}
+	for _, dst := range []string{"10.66.0.1", "10.66.0.8", "10.66.0.250"} {
+		if !s.isTunnelInternal(netip.MustParseAddr(dst)) {
+			t.Fatalf("入向 dst 检查必须把 %s 判为隧道内地址（零例外，含网关）", dst)
+		}
+	}
+	if s.isTunnelInternal(netip.MustParseAddr("203.0.113.9")) {
+		t.Fatal("玩家公网 IP 不应判为隧道内地址")
+	}
+}
+
 // Stop 必须在没有任何流量时也能立即返回。
 //
 // 两个泵 goroutine 阻塞在 ReadFromUDP / ReadPacket 上，只有拿到包才会回头看

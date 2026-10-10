@@ -1088,9 +1088,23 @@ func (s *Server) forwardOutbound(writer udpWriter, out, pkt []byte) {
 		return
 	}
 	// 用户隔离的对称执行语句：发往客户端的包，源地址不得是隧道网段内的
-	// 地址（零例外，含网关）。合法来源只有玩家公网 IP；出现隧道内地址
-	// 说明有人正在隧道里访问别人，不能替他递送。
-	if src, sok := srcIP4(pkt); sok && s.isTunnelInternal(src) {
+	// 地址。合法来源只有玩家公网 IP；出现隧道内地址说明有人正在隧道里
+	// 访问别人，不能替他递送。
+	//
+	// 唯一例外是网关地址 s.gateway（隧道自身的地址，10.66.0.1）。它不可能
+	// 被任何客户端持有——握手时 ident.TunIP == s.gateway 直接拒绝；也不可能
+	// 被客户端伪造——入向包的源地址必须等于自己的 tunIP（见 handleData 的
+	// logSpoof 分支），而 TUN 读侧只收内核路由进来的包。两条合起来意味着
+	// src == s.gateway 的包**只可能由中转机自身产生**。
+	//
+	// 真实场景：NetherNet 信令网关经隧道访问后端 BDS 的 HTTP 信令端口。网关
+	// 是普通 http.Client，内核给它的源地址就是 pftun0 自身的地址；没有这条例
+	// 外，SDP/MOTD 请求全部被丢，玩家拿到的是 "Service unavailable"。
+	//
+	// 回程不需要配套改动：dst == s.gateway 的包本就是本机投递，走 INPUT 的
+	// conntrack ESTABLISHED 放行，与透明 UDP 那条 fwmark 策略路由（只标
+	// -p udp）无关——这正是网关用网关地址而非伪造公网 IP 作源的额外好处。
+	if src, sok := srcIP4(pkt); sok && s.isTunnelInternal(src) && src != s.gateway {
 		s.logTunnelInternal(ps, src, "源")
 		return
 	}

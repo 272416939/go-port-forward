@@ -1041,8 +1041,19 @@ func (m *Manager) getPublicIP() string {
 	}
 	defer conn.Close()
 
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+	ip := conn.LocalAddr().(*net.UDPAddr).IP
+	// 探测只回答「出网走哪张网卡」，不保证那是公网地址：Docker 默认桥接
+	// （172.17.x.x）、云主机私网网卡、单臂路由都会让这里拿到私网地址。它会
+	// 被原样写进 SDP candidate 发给玩家——私网 candidate 对公网玩家毫无用处，
+	// 症状是「信令握手成功、WebRTC 永远连不上」，而日志里没有任何痕迹。
+	// 这里显式告警并给出修复路径，但不阻断：先让规则跑起来，用户改完配置
+	// 重启即生效。
+	if IsForbiddenTargetIP(ip) {
+		logger.S.Warnw("探测到的出口地址不是公网 IP，NetherNet 的 SDP 重写会写出玩家无法连接的 candidate",
+			"detected", ip.String(),
+			"fix", "在 config.yaml 的 forward.public_ip 显式指定公网地址（面板全局设置亦可）")
+	}
+	return ip.String()
 }
 
 func (m *Manager) stopForwarders(id string) {
