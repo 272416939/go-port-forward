@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go-port-forward/internal/auth"
+	"go-port-forward/internal/certmanager"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/logger"
@@ -88,8 +89,10 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 		}
 		return u
 	}
+	certSvc := certmanager.New(store)
+	mgr.SetCertResolver(certSvc.GetTLSCertificate)
 	f := &tenantFixture{
-		h: &handler{mgr: mgr, users: svc, sessions: sessions,
+		h: &handler{mgr: mgr, users: svc, certs: certSvc, sessions: sessions,
 			loginIPFail:   users.NewRateLimiter(1000, 15*time.Minute),
 			loginUserFail: users.NewRateLimiter(1000, 15*time.Minute),
 			emailCodeIP:   users.NewRateLimiter(1000, time.Hour),

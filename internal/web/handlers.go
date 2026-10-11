@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"go-port-forward/internal/auth"
+	"go-port-forward/internal/certmanager"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
 	"go-port-forward/internal/logger"
@@ -24,6 +25,7 @@ type handler struct {
 	mgr      *forward.Manager
 	fw       firewall.Manager
 	users    *users.Service
+	certs    *certmanager.Service
 	sessions *auth.Store
 	tunnel   TunnelStatus
 
@@ -422,6 +424,16 @@ func applyUpdateForGuard(r *models.ForwardRule, req *models.UpdateRuleRequest) {
 	}
 	if req.UserID != nil {
 		r.UserID = *req.UserID
+	}
+	if req.Transparent != nil {
+		r.Transparent = *req.Transparent
+	}
+	if req.NetherNet != nil {
+		r.NetherNet = *req.NetherNet
+	}
+	if req.NetherNetTLS != nil {
+		cp := *req.NetherNetTLS
+		r.NetherNetTLS = &cp
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -454,4 +455,105 @@ func TestHandleJoinRegistersBackendDataPort(t *testing.T) {
 		t.Fatalf("客户端拿到的 answer 不完整（疑似 Content-Length 未删导致截断）：\n%s", bodyStr)
 	}
 }
+
+// TestGatewayCertResolverHotReload 锁证书管理的核心收益：规则只引用 cert_id，
+// 证书续签/更新后**不需要重启网关**——下一个进来的 TLS 连接立即拿到新证书。
+// 这是 certmanager.Service 续签后热重载的数据面落点。
+func TestGatewayCertResolverHotReload(t *testing.T) {
+	certPEM1, keyPEM1 := testKeyPair(t)
+	certPEM2, keyPEM2 := testKeyPair(t)
+
+	pair1, err := tls.X509KeyPair([]byte(certPEM1), []byte(keyPEM1))
+	if err != nil {
+		t.Fatalf("X509KeyPair v1: %v", err)
+	}
+	pair2, err := tls.X509KeyPair([]byte(certPEM2), []byte(keyPEM2))
+	if err != nil {
+		t.Fatalf("X509KeyPair v2: %v", err)
+	}
+	leaf1, _ := x509.ParseCertificate(pair1.Certificate[0])
+	leaf2, _ := x509.ParseCertificate(pair2.Certificate[0])
+	// testKeyPair 的序列号是固定的 1，改用公钥指纹区分两张证书
+	if leaf1.PublicKey.(*ecdsa.PublicKey).Equal(leaf2.PublicKey.(*ecdsa.PublicKey)) {
+		t.Fatal("两张测试证书公钥相同，无法区分")
+	}
+
+	// 可变的解析器：模拟 certmanager 续签后缓存被替换（同一 certID → 不同证书）
+	var current atomic.Value // holds tls.Certificate
+	current.Store(pair1)
+	resolve := func(certID string) (*tls.Certificate, error) {
+		if certID != "cert-x" {
+			return nil, fmt.Errorf("unknown cert id %q", certID)
+		}
+		c := current.Load().(tls.Certificate)
+		return &c, nil
+	}
+
+	rule := &models.ForwardRule{
+		Name: "nn-cert", NetherNet: true, Transparent: true,
+		ListenAddr: "127.0.0.1", ListenPort: 0,
+		TargetAddr: "127.0.0.1", TargetPort: 19132,
+		NetherNetTLS: &models.NetherNetTLS{
+			Enabled: true, Dual: true, CertID: "cert-x",
+			CertPEM: certPEM1, KeyPEM: keyPEM1,
+		},
+	}
+	mux := NewMultiplexer(":0", nil)
+	gw, err := NewGatewayWithResolver(rule, mux, "203.0.113.9", resolve)
+	if err != nil {
+		t.Fatalf("NewGatewayWithResolver: %v", err)
+	}
+	// 手动监听以拿到真实端口（Start 用的是 g.listenAddr，这里换成探测端口）
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	rule.ListenPort = port
+	gw.listenAddr = fmt.Sprintf("127.0.0.1:%d", port)
+	if err := gw.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer gw.Stop()
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			// 每次请求都必须新建连接做完整 TLS 握手，否则第二次会复用 keep-alive
+			// 连接、根本不会触发 GetCertificate 回调（测不出热重载）。
+			DisableKeepAlives: true,
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	fetchLeaf := func() *x509.Certificate {
+		t.Helper()
+		resp, rerr := client.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/join", port))
+		if rerr != nil {
+			t.Fatalf("GET https: %v", rerr)
+		}
+		defer resp.Body.Close()
+		if len(resp.TLS.PeerCertificates) == 0 {
+			t.Fatal("no peer certificates in TLS handshake")
+		}
+		return resp.TLS.PeerCertificates[0]
+	}
+
+	// 1. 首个连接拿到的是初始证书（CertID 对应的解析结果，而非内联 PEM）
+	got1 := fetchLeaf()
+	if !got1.PublicKey.(*ecdsa.PublicKey).Equal(leaf1.PublicKey.(*ecdsa.PublicKey)) {
+		t.Fatal("first handshake served the wrong certificate (expected v1)")
+	}
+
+	// 2. 证书续签：替换解析器返回值，**不重启网关**
+	current.Store(pair2)
+
+	// 3. 下一个连接立即拿到新证书（GetCertificate 回调路径，非 Certificates 静态切片）
+	got2 := fetchLeaf()
+	if !got2.PublicKey.(*ecdsa.PublicKey).Equal(leaf2.PublicKey.(*ecdsa.PublicKey)) {
+		t.Fatal("hot reload failed: second handshake still served the old certificate")
+	}
+}
+
 

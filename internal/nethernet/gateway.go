@@ -39,10 +39,18 @@ type Gateway struct {
 	stopOnce     sync.Once
 }
 
+// CertResolver 根据证书 ID 动态解析 *tls.Certificate（支持证书续签热重载）。
+type CertResolver func(certID string) (*tls.Certificate, error)
+
 // NewGateway creates a NetherNet gateway for the given rule.
 //
 // publicIP 是写进 SDP candidate 的公网地址（玩家连这个地址）。
 func NewGateway(rule *models.ForwardRule, mux *Multiplexer, publicIP string) (*Gateway, error) {
+	return NewGatewayWithResolver(rule, mux, publicIP, nil)
+}
+
+// NewGatewayWithResolver creates a NetherNet gateway with an optional dynamic certificate resolver.
+func NewGatewayWithResolver(rule *models.ForwardRule, mux *Multiplexer, publicIP string, resolveCert CertResolver) (*Gateway, error) {
 	if !rule.NetherNet {
 		return nil, fmt.Errorf("rule is not NetherNet mode")
 	}
@@ -81,17 +89,28 @@ func NewGateway(rule *models.ForwardRule, mux *Multiplexer, publicIP string) (*G
 		mux:        mux,
 	}
 
-	// Setup TLS if enabled. 证书是用户粘贴的 PEM 内容（每人一套），不是服务器
-	// 路径——这里直接 X509KeyPair 解析内容。
+	// Setup TLS if enabled. 支持证书管理引用（CertID，自动续签热重载）与直接粘贴 PEM 两种模式。
 	if rule.NetherNetTLS != nil && rule.NetherNetTLS.Enabled {
-		cert, err := tls.X509KeyPair([]byte(rule.NetherNetTLS.CertPEM), []byte(rule.NetherNetTLS.KeyPEM))
-		if err != nil {
-			return nil, fmt.Errorf("证书与私钥无法配对（请检查粘贴内容）| certificate/key pair invalid: %w", err)
-		}
-		
-		g.tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+		certID := strings.TrimSpace(rule.NetherNetTLS.CertID)
+		if certID != "" && resolveCert != nil {
+			if _, err := resolveCert(certID); err != nil {
+				return nil, fmt.Errorf("无法加载关联的证书 (%s)：%w | failed to load referenced certificate: %w", certID, err, err)
+			}
+			g.tlsConfig = &tls.Config{
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return resolveCert(certID)
+				},
+				MinVersion: tls.VersionTLS12,
+			}
+		} else {
+			cert, err := tls.X509KeyPair([]byte(rule.NetherNetTLS.CertPEM), []byte(rule.NetherNetTLS.KeyPEM))
+			if err != nil {
+				return nil, fmt.Errorf("证书与私钥无法配对（请检查粘贴内容）| certificate/key pair invalid: %w", err)
+			}
+			g.tlsConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
 		}
 	}
 

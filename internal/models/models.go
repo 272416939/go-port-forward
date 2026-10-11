@@ -72,10 +72,12 @@ type ForwardRule struct {
 type NetherNetTLS struct {
 	Enabled bool `json:"enabled"` // Enable TLS
 	Dual    bool `json:"dual"`    // Dual mode: same port for HTTP (Android) + HTTPS (iOS)
+	// CertID 引用证书管理中的证书 ID；为空时使用手动粘贴的 CertPEM 与 KeyPEM。
+	CertID string `json:"cert_id,omitempty"`
 	// CertPEM 是证书内容（PEM；含中间证书时贴整条链）。用户从面板粘贴。
-	CertPEM string `json:"cert_pem"`
+	CertPEM string `json:"cert_pem,omitempty"`
 	// KeyPEM 是配套私钥内容（PEM）。
-	KeyPEM string `json:"key_pem"`
+	KeyPEM string `json:"key_pem,omitempty"`
 	// SignalPort 留 0 表示用规则的监听端口。
 	SignalPort int `json:"signal_port"`
 	// DataPort 留 0 表示用规则的监听端口 + 1。
@@ -119,8 +121,11 @@ func (t *NetherNetTLS) Validate() error {
 	if !t.Enabled {
 		return nil
 	}
+	if strings.TrimSpace(t.CertID) != "" {
+		return nil
+	}
 	if strings.TrimSpace(t.CertPEM) == "" || strings.TrimSpace(t.KeyPEM) == "" {
-		return fmt.Errorf("已启用 NetherNet TLS：请粘贴证书内容与私钥内容 | NetherNet TLS enabled: paste both the certificate and the private key")
+		return fmt.Errorf("已启用 NetherNet TLS：请选择证书或粘贴证书内容与私钥内容 | NetherNet TLS enabled: select a certificate or paste both the certificate and the private key")
 	}
 	if len(t.CertPEM) > MaxNetherNetPEMBytes || len(t.KeyPEM) > MaxNetherNetPEMBytes {
 		return fmt.Errorf("证书或私钥内容过大（上限 %d KB）| certificate or key content too large (limit %d KB)", MaxNetherNetPEMBytes>>10, MaxNetherNetPEMBytes>>10)
@@ -139,6 +144,7 @@ func (t *NetherNetTLS) Normalize() *NetherNetTLS {
 		return nil
 	}
 	out := *t
+	out.CertID = strings.TrimSpace(out.CertID)
 	out.CertPEM = strings.TrimSpace(out.CertPEM)
 	out.KeyPEM = strings.TrimSpace(out.KeyPEM)
 	return &out

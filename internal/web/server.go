@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"go-port-forward/internal/auth"
+	"go-port-forward/internal/certmanager"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/firewall"
 	"go-port-forward/internal/forward"
@@ -207,6 +208,7 @@ type Server struct {
 	fw       firewall.Manager
 	manager  *forward.Manager
 	users    *users.Service
+	certs    *certmanager.Service
 	sessions *auth.Store
 	tunnel   TunnelStatus
 	httpSrv  *http.Server
@@ -268,6 +270,11 @@ func New(cfg config.WebConfig, mgr *forward.Manager, fw firewall.Manager,
 	return &Server{cfg: cfg, manager: mgr, fw: fw, users: usrs, sessions: sessions, tunnel: tun}
 }
 
+// SetCertManager 设置证书管理服务实例。
+func (s *Server) SetCertManager(cs *certmanager.Service) {
+	s.certs = cs
+}
+
 // Start begins listening on the configured address (non-blocking).
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
@@ -308,6 +315,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mgr:     s.manager,
 		fw:      s.fw,
 		users:   s.users,
+		certs:   s.certs,
 		sessions: s.sessions,
 		tunnel:  s.tunnel,
 		// 登录防爆破：IP 维度放宽些（办公室 NAT 后多人共用），用户名维度收紧；
@@ -375,6 +383,23 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/access-codes/{id}/code", s.authed(h.accessCodeText))
 	mux.HandleFunc("POST /api/access-codes/{id}/regenerate", s.authed(h.regenerateAccessCode))
 	mux.HandleFunc("POST /api/access-codes/{id}/unbind", s.authed(h.unbindAccessCode))
+
+	// 证书管理：登录即可，作用域默认为自己；管理员可查改他人
+	mux.HandleFunc("GET /api/certificates", s.authed(h.listCertificates))
+	mux.HandleFunc("POST /api/certificates", s.authed(h.uploadCertificate))
+	mux.HandleFunc("POST /api/certificates/acme", s.authed(h.applyACMECertificate))
+	mux.HandleFunc("GET /api/certificates/{id}", s.authed(h.getCertificate))
+	mux.HandleFunc("PUT /api/certificates/{id}", s.authed(h.updateCertificate))
+	mux.HandleFunc("DELETE /api/certificates/{id}", s.authed(h.deleteCertificate))
+	mux.HandleFunc("POST /api/certificates/{id}/renew", s.authed(h.renewCertificate))
+
+	// HTTP-01 ACME 挑战验证公开端点
+	mux.HandleFunc("GET /.well-known/acme-challenge/{token}", func(w http.ResponseWriter, r *http.Request) {
+		if s.certs != nil && s.certs.HTTP01Handler(w, r) {
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	// 用户组与全局设置（仅管理员）
 	mux.HandleFunc("GET /api/groups", s.adminOnly(h.listGroups))

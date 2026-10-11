@@ -75,6 +75,10 @@
         <i class="bi bi-key sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('我的访问码','My Access Codes')"></span>
       </a>
+      <a href="#" class="sidebar__link" @click.prevent="showCertsModal()">
+        <i class="bi bi-shield-check sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('证书管理','Certificates')"></span>
+      </a>
       <a href="#" class="sidebar__link" style="display:none" x-show="isAdmin" @click.prevent="showUsersModal()">
         <i class="bi bi-people sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('用户管理','Users')"></span>
@@ -483,26 +487,66 @@
                     <div class="form-text" x-text="t('推荐开启：安卓使用 HTTP，iOS 使用 HTTPS，无需分端口','Recommended: Android uses HTTP, iOS uses HTTPS, no separate ports')"></div>
                   </div>
 
-                  <!-- 证书/私钥是「粘贴内容」而不是服务器路径：每个用户有自己的域名
-                       与自己申请的证书，服务端只负责把内容加载成 keypair。 -->
+                  <!-- 证书来源：优先从「证书管理」下拉框选择（支持跨规则复用与 ACME 自动续签热重载），
+                       同時兼容手动直接粘贴 PEM。 -->
                   <div class="col-12" style="display:none" x-show="form.nethernet_tls_enabled">
-                    <label class="form-label">
-                      <span x-text="t('证书内容（PEM）','Certificate (PEM)')"></span>
-                      <span class="text-danger">*</span>
-                    </label>
-                    <textarea class="form-control font-monospace" rows="4" x-model="form.nethernet_cert_pem"
-                              :placeholder="t('-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----','-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----')"></textarea>
-                    <div class="form-text" x-text="t('粘贴 fullchain（含中间证书）。用你自己的域名申请，例如 Let\u2019s Encrypt。','Paste the fullchain (including intermediates). Issued for your own domain, e.g. Let\u2019s Encrypt.')"></div>
-                  </div>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label mb-0">
+                        <span x-text="t('SSL 证书','SSL Certificate')"></span>
+                        <span class="text-danger">*</span>
+                      </label>
+                      <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-xs"
+                                :class="form.nethernet_cert_mode !== 'paste' ? 'btn-primary' : 'btn-outline-secondary'"
+                                @click="form.nethernet_cert_mode = 'select'"
+                                x-text="t('从证书管理选择','Select Managed Cert')"></button>
+                        <button type="button" class="btn btn-xs"
+                                :class="form.nethernet_cert_mode === 'paste' ? 'btn-primary' : 'btn-outline-secondary'"
+                                @click="form.nethernet_cert_mode = 'paste'"
+                                x-text="t('手动粘贴 PEM','Paste PEM Manually')"></button>
+                      </div>
+                    </div>
 
-                  <div class="col-12" style="display:none" x-show="form.nethernet_tls_enabled">
-                    <label class="form-label">
-                      <span x-text="t('私钥内容（PEM）','Private Key (PEM)')"></span>
-                      <span class="text-danger">*</span>
-                    </label>
-                    <textarea class="form-control font-monospace" rows="4" x-model="form.nethernet_key_pem"
-                              :placeholder="t('-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----','-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----')"></textarea>
-                    <div class="form-text" x-text="t('与上面证书配对的私钥。加密过的私钥不被支持。','The private key matching the certificate above. Encrypted keys are not supported.')"></div>
+                    <!-- 模式 1：从证书管理下拉选择 -->
+                    <div x-show="form.nethernet_cert_mode !== 'paste'">
+                      <div class="input-group">
+                        <select class="form-select" x-model="form.nethernet_cert_id">
+                          <option value="" x-text="t('-- 请选择已上传或自动签发的证书 --','-- Select a managed certificate --')"></option>
+                          <template x-for="c in certOptionsForRule()" :key="c.id">
+                            <option :value="c.id" :selected="c.id === form.nethernet_cert_id"
+                                    x-text="formatCertOptionLabel(c)"></option>
+                          </template>
+                        </select>
+                        <button class="btn btn-outline-primary" type="button" @click="openCertsFromRule()"
+                                :title="t('打开证书管理上传或申请新证书','Open Certificate Manager')">
+                          <i class="bi bi-shield-plus me-1"></i><span x-text="t('证书管理','Manage')"></span>
+                        </button>
+                      </div>
+                      <div class="form-text text-warning" x-show="certOptionsForRule().length === 0" x-cloak
+                           x-text="t('当前还没有可用证书，请先点击右侧「证书管理」上传证书或配置 ACME 自动续签。','No certificates found. Click Manage to upload or issue an ACME certificate first.')"></div>
+                      <div class="form-text" x-show="certOptionsForRule().length > 0"
+                           x-text="t('使用证书管理中的证书：当证书自动续签或更新后，所有关联规则将自动零中断热生效。','Managed certificates hot-reload automatically across all linked rules upon renewal.')"></div>
+                    </div>
+
+                    <!-- 模式 2：兼容手动直接粘贴 PEM -->
+                    <div class="row g-2 mt-1" style="display:none" x-show="form.nethernet_cert_mode === 'paste'">
+                      <div class="col-12">
+                        <label class="form-label small mb-1">
+                          <span x-text="t('证书内容（PEM）','Certificate (PEM)')"></span>
+                          <span class="text-danger">*</span>
+                        </label>
+                        <textarea class="form-control font-monospace" rows="3" x-model="form.nethernet_cert_pem"
+                                  :placeholder="t('-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----','-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----')"></textarea>
+                      </div>
+                      <div class="col-12">
+                        <label class="form-label small mb-1">
+                          <span x-text="t('私钥内容（PEM）','Private Key (PEM)')"></span>
+                          <span class="text-danger">*</span>
+                        </label>
+                        <textarea class="form-control font-monospace" rows="3" x-model="form.nethernet_key_pem"
+                                  :placeholder="t('-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----','-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----')"></textarea>
+                      </div>
+                    </div>
                   </div>
 
                   <div class="col-md-6" style="display:none" x-show="form.nethernet_tls_enabled">
@@ -1313,6 +1357,235 @@
 </div>
 
 <!-- ============================================================
+     Certificates Modal（SSL 证书管理与 ACME 自动续签）
+     ============================================================ -->
+<div class="modal fade" id="certsModal" tabindex="-1" aria-labelledby="certsModalLabel">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="certsModalLabel">
+          <i class="bi bi-shield-check me-2"></i><span x-text="t('SSL 证书管理与自动续签','SSL Certificates & Auto-Renewal')"></span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-text mb-3" x-text="t('集中管理 SSL/TLS 证书：可手动上传 PEM 证书，或通过 Let\u2019s Encrypt (ACME) 自动申请并开启到期自动续签。在转发规则中直接通过下拉框选用，证书续签后所有关联规则零中断自动热生效。','Centrally manage SSL/TLS certificates: upload PEM files manually or automatically issue and renew via Let\u2019s Encrypt (ACME). Select them directly from the rule dropdown for zero-downtime hot reload.')"></div>
+
+        <!-- 错误提示 -->
+        <div class="alert alert-danger py-2 small mb-3" x-show="certError" x-text="certError"></div>
+
+        <!-- 添加/申请切换卡片 -->
+        <div class="card mb-3">
+          <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <ul class="nav nav-pills card-header-pills">
+              <li class="nav-item">
+                <a class="nav-link py-1 px-3 small" href="#" :class="certTab === 'upload' ? 'active' : ''"
+                   @click.prevent="certTab = 'upload'; resetCertForm()">
+                  <i class="bi bi-upload me-1"></i><span x-text="certForm.id ? t('更新上传证书','Update Certificate') : t('手动上传证书','Upload Certificate')"></span>
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link py-1 px-3 small" href="#" :class="certTab === 'acme' ? 'active' : ''"
+                   @click.prevent="certTab = 'acme'; resetCertForm()">
+                  <i class="bi bi-magic me-1"></i><span x-text="t('ACME 自动申请与续签','ACME Auto Issue & Renew')"></span>
+                </a>
+              </li>
+            </ul>
+            <button type="button" class="btn btn-xs btn-outline-secondary" x-show="certForm.id"
+                    @click="resetCertForm()" x-text="t('取消编辑','Cancel Edit')"></button>
+          </div>
+          <div class="card-body py-3">
+            <!-- Tab 1: 手动上传 PEM 证书 -->
+            <form x-show="certTab === 'upload'" @submit.prevent="submitUploadCert()">
+              <div class="row g-2">
+                <div class="col-md-6">
+                  <label class="form-label small mb-1"><span x-text="t('证书名称','Certificate Name')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm" x-model="certForm.name" :placeholder="t('如：mc.example.com 证书','e.g. mc.example.com cert')"/>
+                </div>
+                <div class="col-md-6" style="display:none" x-show="isAdmin">
+                  <label class="form-label small mb-1" x-text="t('归属用户（留空为全局共享）','Owner (empty = shared)')"></label>
+                  <select class="form-select form-select-sm" x-model="certForm.user_id">
+                    <option value="" x-text="t('全局共享 / 管理员','Shared / Admin')"></option>
+                    <template x-for="u in users" :key="u.id">
+                      <option :value="u.id" x-text="u.username"></option>
+                    </template>
+                  </select>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <label class="form-label small mb-0"><span x-text="t('证书内容 (Fullchain PEM)','Certificate (Fullchain PEM)')"></span> <span class="text-danger">*</span></label>
+                    <label class="btn btn-xs btn-outline-secondary mb-0">
+                      <i class="bi bi-folder2-open me-1"></i><span x-text="t('从文件导入','Import File')"></span>
+                      <input type="file" accept=".pem,.crt,.cer,.txt" class="d-none" @change="readCertFile($event, 'cert_pem')"/>
+                    </label>
+                  </div>
+                  <textarea class="form-control form-control-sm font-monospace" rows="4" x-model="certForm.cert_pem"
+                            placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+                </div>
+                <div class="col-md-6">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <label class="form-label small mb-0"><span x-text="t('私钥内容 (Private Key PEM)','Private Key (PEM)')"></span> <span class="text-danger">*</span></label>
+                    <label class="btn btn-xs btn-outline-secondary mb-0">
+                      <i class="bi bi-folder2-open me-1"></i><span x-text="t('从文件导入','Import File')"></span>
+                      <input type="file" accept=".key,.pem,.txt" class="d-none" @change="readCertFile($event, 'key_pem')"/>
+                    </label>
+                  </div>
+                  <textarea class="form-control form-control-sm font-monospace" rows="4" x-model="certForm.key_pem"
+                            placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+                </div>
+                <div class="col-12 text-end">
+                  <button type="submit" class="btn btn-primary btn-sm px-4" :disabled="certBusy">
+                    <span x-show="certBusy" class="spinner-border spinner-border-sm me-1"></span>
+                    <span x-text="certForm.id ? t('保存证书更新','Save Update') : t('上传并保存证书','Upload & Save')"></span>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <!-- Tab 2: ACME 自动申请与续签 -->
+            <form style="display:none" x-show="certTab === 'acme'" @submit.prevent="submitACMECert()">
+              <div class="row g-2">
+                <div class="col-md-4">
+                  <label class="form-label small mb-1"><span x-text="t('证书名称','Certificate Name')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm" x-model="certForm.name" :placeholder="t('如：泛域名自动续签','e.g. wildcard auto-renew')"/>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label small mb-1"><span x-text="t('申请域名（支持泛域名，多个用逗号分隔）','Domains (comma separated, wildcard ok)')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" x-model="certForm.domains" placeholder="mc.example.com, *.mc.example.com"/>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label small mb-1"><span x-text="t('通知邮箱 (ACME 注册)','Email (for ACME account)')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm" type="email" x-model="certForm.email" placeholder="admin@example.com"/>
+                </div>
+
+                <div class="col-md-4">
+                  <label class="form-label small mb-1"><span x-text="t('验证方式','Validation Provider')"></span> <span class="text-danger">*</span></label>
+                  <select class="form-select form-select-sm" x-model="certForm.provider">
+                    <option value="cloudflare" x-text="t('Cloudflare DNS-01（推荐 · 免端口）','Cloudflare DNS-01 (Recommended)')"></option>
+                    <option value="aliyun" x-text="t('阿里云 DNS-01（免端口）','Aliyun DNS-01')"></option>
+                    <option value="dnspod" x-text="t('腾讯云 DNSPod DNS-01（免端口）','Tencent DNSPod DNS-01')"></option>
+                    <option value="http01" x-text="t('HTTP-01（需中转机 80 端口公网可达）','HTTP-01 (Requires Port 80)')"></option>
+                  </select>
+                </div>
+
+                <!-- Cloudflare API Token -->
+                <div class="col-md-8" x-show="certForm.provider === 'cloudflare'">
+                  <label class="form-label small mb-1"><span x-text="t('Cloudflare API Token（需具备 Zone.DNS 编辑权限）','Cloudflare API Token (Zone.DNS Edit)')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.cf_token" placeholder="粘贴 Cloudflare API Token"/>
+                </div>
+
+                <!-- 阿里云 AccessKey -->
+                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'aliyun'">
+                  <label class="form-label small mb-1">AccessKey ID <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" x-model="certForm.ali_ak"/>
+                </div>
+                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'aliyun'">
+                  <label class="form-label small mb-1">AccessKey Secret <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.ali_sk"/>
+                </div>
+
+                <!-- 腾讯云 SecretId / SecretKey -->
+                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'dnspod'">
+                  <label class="form-label small mb-1">SecretId <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" x-model="certForm.tc_id"/>
+                </div>
+                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'dnspod'">
+                  <label class="form-label small mb-1">SecretKey <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.tc_key"/>
+                </div>
+
+                <div class="col-12 d-flex justify-content-between align-items-center mt-2">
+                  <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="chkCertAutoRenew" x-model="certForm.auto_renew"/>
+                    <label class="form-check-label small" for="chkCertAutoRenew"
+                           x-text="t('开启到期自动续签（剩余有效期 ≤ 30 天时后台自动续期并热重载）','Enable Auto-Renewal (renews automatically when ≤ 30 days left)')"></label>
+                  </div>
+                  <button type="submit" class="btn btn-success btn-sm px-4" :disabled="certBusy">
+                    <span x-show="certBusy" class="spinner-border spinner-border-sm me-1"></span>
+                    <span x-text="certBusy ? t('正在验证域名并签发证书…','Validating & Issuing…') : t('立即申请并保存','Issue & Save')"></span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+        <!-- 证书列表表格 -->
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead>
+              <tr>
+                <th x-text="t('名称','Name')"></th>
+                <th style="display:none" x-show="isAdmin" x-text="t('归属','Owner')"></th>
+                <th x-text="t('绑定域名','Domains')"></th>
+                <th x-text="t('类型','Source')"></th>
+                <th x-text="t('颁发机构','Issuer')"></th>
+                <th x-text="t('有效期与状态','Validity & Status')"></th>
+                <th x-text="t('自动续签','Auto-Renew')"></th>
+                <th x-text="t('关联规则','Used By')"></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in certificates" :key="c.id">
+                <tr>
+                  <td class="small fw-semibold" x-text="c.name"></td>
+                  <td class="small" style="display:none" x-show="isAdmin" x-text="c.user_name || (c.user_id ? c.user_id : t('共享','Shared'))"></td>
+                  <td class="small font-monospace" x-text="(c.domains || []).join(', ') || c.subject_cn || '-'"></td>
+                  <td>
+                    <span class="badge" :class="c.source_type === 'acme' ? 'text-bg-info' : 'text-bg-secondary'"
+                          x-text="c.source_type === 'acme' ? ('ACME · ' + (c.provider || '')) : t('手动上传','Manual')"></span>
+                  </td>
+                  <td class="small text-muted" x-text="c.issuer || '-'"></td>
+                  <td>
+                    <span class="badge" :class="certStatusBadgeClass(c)" x-text="certStatusText(c)"></span>
+                    <div class="small text-muted" style="font-size:0.75rem" x-text="fmtCertDate(c.not_after)"></div>
+                    <div class="small text-danger" style="font-size:0.75rem" x-show="c.last_error" x-text="c.last_error"></div>
+                  </td>
+                  <td>
+                    <template x-if="c.source_type === 'acme'">
+                      <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" :checked="c.auto_renew" @change="toggleCertAutoRenew(c)"/>
+                      </div>
+                    </template>
+                    <template x-if="c.source_type !== 'acme'">
+                      <span class="text-muted small">-</span>
+                    </template>
+                  </td>
+                  <td>
+                    <span class="badge rounded-pill" :class="c.used_count > 0 ? 'text-bg-primary' : 'text-bg-light text-muted'"
+                          x-text="(c.used_count || 0) + ' ' + t('条','rules')"></span>
+                  </td>
+                  <td class="text-end">
+                    <div class="btn-group btn-group-sm">
+                      <button class="btn btn-xs btn-outline-success" x-show="c.source_type === 'acme'"
+                              :disabled="certBusy" @click="renewCert(c)" :title="t('立即续签','Renew Now')">
+                        <i class="bi bi-arrow-repeat"></i>
+                      </button>
+                      <button class="btn btn-xs btn-outline-secondary" @click="editCert(c)" :title="t('替换/更新证书','Replace / Edit')">
+                        <i class="bi bi-pencil"></i>
+                      </button>
+                      <button class="btn btn-xs btn-outline-danger" @click="deleteCert(c)" :title="t('删除','Delete')">
+                        <i class="bi bi-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="certificates.length === 0">
+                <td colspan="9" class="text-center text-muted py-3 small"
+                    x-text="t('暂无 SSL 证书，请在上方手动上传或通过 ACME 自动申请。','No SSL certificates yet. Upload one manually or issue via ACME above.')"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+
+<!-- ============================================================
      Groups Modal（配额载体；全局设置为天花板）
      ============================================================ -->
 <div class="modal fade" id="groupsModal" tabindex="-1" aria-labelledby="groupsModalLabel">
@@ -1950,9 +2223,22 @@ function portForwardApp() {
 	    pwSaving: false,
 	    _usersModal: null,
 	    _codesModal: null,
+	    _certsModal: null,
 	    _groupsModal: null,
 	    _settingsModal: null,
 	    _accountModal: null,
+
+	    // SSL 证书管理与 ACME 自动续签
+	    certificates: [],
+	    certTab: 'upload',
+	    certBusy: false,
+	    certError: '',
+	    certForm: {
+	      id: '', name: '', user_id: '', cert_pem: '', key_pem: '',
+	      domains: '', email: '', provider: 'cloudflare',
+	      cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
+	      auto_renew: true
+	    },
 
     get filteredRules() {
       const q = this.search.trim().toLowerCase()
@@ -1985,6 +2271,7 @@ function portForwardApp() {
       this._aclModal = new bootstrap.Modal(document.getElementById('aclModal'))
       this._usersModal = new bootstrap.Modal(document.getElementById('usersModal'))
       this._codesModal = new bootstrap.Modal(document.getElementById('codesModal'))
+      this._certsModal = new bootstrap.Modal(document.getElementById('certsModal'))
       this._groupsModal = new bootstrap.Modal(document.getElementById('groupsModal'))
       this._settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'))
       this._smtpModal = new bootstrap.Modal(document.getElementById('smtpModal'))
@@ -2269,6 +2556,263 @@ function portForwardApp() {
         }
       })
     },
+
+
+    // --- SSL 证书管理与 ACME 自动续签 ---
+
+    showCertsModal() {
+      this.certError = ''
+      this.resetCertForm()
+      if (this.isAdmin && this.users.length === 0) this.loadUsers()
+      this.loadCertificates()
+      this._certsModal.show()
+    },
+
+    openCertsFromRule() {
+      if (this._ruleModal) this._ruleModal.hide()
+      window.setTimeout(() => this.showCertsModal(), 200)
+    },
+
+    resetCertForm() {
+      this.certError = ''
+      this.certForm = {
+        id: '', name: '', user_id: this.isAdmin ? '' : this.me.id,
+        cert_pem: '', key_pem: '',
+        domains: '', email: this.me.email || '', provider: 'cloudflare',
+        cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
+        auto_renew: true
+      }
+    },
+
+    async loadCertificates() {
+      try {
+        const res = await fetch('/api/certificates')
+        const d = await res.json()
+        if (d.success) this.certificates = d.data || []
+      } catch { /* 静默 */ }
+    },
+
+    certOptionsForRule() {
+      if (!this.isAdmin) return this.certificates
+      const ownerId = this.form.user_id || ''
+      if (!ownerId) return this.certificates
+      return this.certificates.filter(c => !c.user_id || c.user_id === ownerId)
+    },
+
+    certDaysLeft(c) {
+      if (!c || !c.not_after) return null
+      const ms = new Date(c.not_after).getTime() - Date.now()
+      return Math.ceil(ms / (1000 * 60 * 60 * 24))
+    },
+
+    formatCertOptionLabel(c) {
+      const domains = (c.domains && c.domains.length) ? c.domains.join(', ') : (c.subject_cn || '-')
+      const days = this.certDaysLeft(c)
+      const dayStr = days === null ? '' : (days <= 0 ? _t(' · 已过期', ' · Expired') : _t(' · 剩余 ' + days + ' 天', ' · ' + days + 'd left'))
+      return c.name + ' [' + domains + ']' + dayStr
+    },
+
+    certStatusBadgeClass(c) {
+      const days = this.certDaysLeft(c)
+      if (days === null) return 'text-bg-secondary'
+      if (days <= 0) return 'text-bg-danger'
+      if (days <= 30) return 'text-bg-warning'
+      return 'text-bg-success'
+    },
+
+    certStatusText(c) {
+      const days = this.certDaysLeft(c)
+      if (days === null) return _t('未知', 'Unknown')
+      if (days <= 0) return _t('已过期', 'Expired')
+      if (days <= 30) return _t('即将到期 (剩 ' + days + ' 天)', 'Expiring (' + days + 'd)')
+      return _t('有效 (剩 ' + days + ' 天)', 'Valid (' + days + 'd)')
+    },
+
+    fmtCertDate(iso) {
+      if (!iso) return ''
+      const d = new Date(iso)
+      if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return ''
+      return _t('到期: ', 'Expires: ') + d.toISOString().slice(0, 10)
+    },
+
+    readCertFile(ev, field) {
+      const file = ev.target.files && ev.target.files[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        this.certForm[field] = String(e.target.result || '').trim()
+      }
+      reader.readAsText(file)
+      ev.target.value = ''
+    },
+
+    async submitUploadCert() {
+      this.certError = ''
+      if (!this.certForm.name.trim()) {
+        this.certError = _t('请填写证书名称', 'Certificate name is required')
+        return
+      }
+      if (!this.certForm.cert_pem.trim() || !this.certForm.key_pem.trim()) {
+        this.certError = _t('请粘贴或导入证书内容 (PEM) 与私钥内容 (PEM)', 'Both certificate PEM and private key PEM are required')
+        return
+      }
+      this.certBusy = true
+      try {
+        const isEdit = !!this.certForm.id
+        const url = isEdit ? '/api/certificates/' + this.certForm.id : '/api/certificates'
+        const method = isEdit ? 'PUT' : 'POST'
+        const payload = isEdit
+          ? { name: this.certForm.name.trim(), cert_pem: this.certForm.cert_pem.trim(), key_pem: this.certForm.key_pem.trim() }
+          : { name: this.certForm.name.trim(), user_id: this.certForm.user_id || '', cert_pem: this.certForm.cert_pem.trim(), key_pem: this.certForm.key_pem.trim() }
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('证书已保存', 'Certificate saved'))
+          this.resetCertForm()
+          await this.loadCertificates()
+        } else {
+          this.certError = d.message || _t('保存证书失败', 'Failed to save certificate')
+        }
+      } catch (e) {
+        this.certError = _t('网络错误: ', 'Network error: ') + e.message
+      } finally {
+        this.certBusy = false
+      }
+    },
+
+    async submitACMECert() {
+      this.certError = ''
+      if (!this.certForm.name.trim()) {
+        this.certError = _t('请填写证书名称', 'Certificate name is required')
+        return
+      }
+      const domains = (this.certForm.domains || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean)
+      if (domains.length === 0) {
+        this.certError = _t('请填写至少一个域名', 'At least one domain is required')
+        return
+      }
+      if (!this.certForm.email.trim()) {
+        this.certError = _t('请填写通知邮箱', 'Email is required')
+        return
+      }
+      const creds = {}
+      if (this.certForm.provider === 'cloudflare') {
+        creds.api_token = this.certForm.cf_token.trim()
+      } else if (this.certForm.provider === 'aliyun') {
+        creds.access_key_id = this.certForm.ali_ak.trim()
+        creds.access_key_secret = this.certForm.ali_sk.trim()
+      } else if (this.certForm.provider === 'dnspod') {
+        creds.secret_id = this.certForm.tc_id.trim()
+        creds.secret_key = this.certForm.tc_key.trim()
+      }
+      this.certBusy = true
+      try {
+        const res = await fetch('/api/certificates/acme', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: this.certForm.name.trim(),
+            user_id: this.certForm.user_id || '',
+            domains,
+            email: this.certForm.email.trim(),
+            provider: this.certForm.provider,
+            credentials: creds,
+            auto_renew: !!this.certForm.auto_renew
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('证书申请并保存成功', 'Certificate issued and saved'))
+          this.resetCertForm()
+          await this.loadCertificates()
+        } else {
+          this.certError = d.message || _t('ACME 申请失败', 'ACME issuance failed')
+        }
+      } catch (e) {
+        this.certError = _t('网络错误: ', 'Network error: ') + e.message
+      } finally {
+        this.certBusy = false
+      }
+    },
+
+    async renewCert(c) {
+      this.certError = ''
+      this.certBusy = true
+      try {
+        const res = await fetch('/api/certificates/' + c.id + '/renew', { method: 'POST' })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('证书续签成功', 'Certificate renewed'))
+          await this.loadCertificates()
+        } else {
+          this.certError = d.message || _t('续签失败', 'Renewal failed')
+        }
+      } catch (e) {
+        this.certError = _t('网络错误: ', 'Network error: ') + e.message
+      } finally {
+        this.certBusy = false
+      }
+    },
+
+    async toggleCertAutoRenew(c) {
+      try {
+        const res = await fetch('/api/certificates/' + c.id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ auto_renew: !c.auto_renew })
+        })
+        const d = await res.json()
+        if (d.success) {
+          c.auto_renew = !c.auto_renew
+          showToast('success', d.message || _t('已更新自动续签状态', 'Auto-renew updated'))
+        } else {
+          showToast('danger', d.message || _t('更新失败', 'Update failed'))
+          await this.loadCertificates()
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ', 'Network error: ') + e.message)
+      }
+    },
+
+    editCert(c) {
+      this.certTab = 'upload'
+      this.certError = ''
+      this.certForm = {
+        id: c.id,
+        name: c.name || '',
+        user_id: c.user_id || '',
+        cert_pem: c.cert_pem || '',
+        key_pem: '',
+        domains: (c.domains || []).join(', '),
+        email: c.email || '',
+        provider: c.provider || 'cloudflare',
+        cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
+        auto_renew: !!c.auto_renew
+      }
+    },
+
+    deleteCert(c) {
+      showConfirm(_t('确定删除证书「' + c.name + '」吗？', 'Delete certificate "' + c.name + '"?'), async () => {
+        try {
+          const res = await fetch('/api/certificates/' + c.id, { method: 'DELETE' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('证书已删除', 'Certificate deleted'))
+            await this.loadCertificates()
+          } else {
+            showToast('danger', d.message || _t('删除失败', 'Delete failed'))
+          }
+        } catch (e) {
+          showToast('danger', _t('网络错误: ', 'Network error: ') + e.message)
+        }
+      })
+    },
+
+
 
     // --- 访问码（自助；管理员可代管他人）---
 
@@ -2864,6 +3408,7 @@ function portForwardApp() {
 	      this.form = this.newRuleForm()
 	      // 通用模式拦截「目标填了隧道地址」需要访问码的 tun_ip 列表做比对。
 	      if (this.isAdmin) this.loadAllCodes()
+	      this.loadCertificates()
 	      this._ruleModal.show()
 	    },
 
@@ -2874,6 +3419,7 @@ function portForwardApp() {
 	      this.checkedPort = null
 	      this.form = this.editableRuleForm(r)
 	      if (this.isAdmin) this.loadAllCodes()
+	      this.loadCertificates()
 	      this._ruleModal.show()
 	    },
 
@@ -2897,6 +3443,8 @@ function portForwardApp() {
 	        nethernet: false,
 	        nethernet_tls_enabled: false,
 	        nethernet_tls_dual: true,
+	        nethernet_cert_mode: 'select',
+	        nethernet_cert_id: '',
 	        nethernet_cert_pem: '',
 	        nethernet_key_pem: '',
 	        nethernet_data_port: null,
@@ -2904,6 +3452,8 @@ function portForwardApp() {
 	    },
 
 	    editableRuleForm(rule = {}) {
+	      const hasCertId = !!(rule.nethernet_tls?.cert_id)
+	      const hasInlinePem = !hasCertId && !!(rule.nethernet_tls?.cert_pem)
 	      return {
 	        id: rule.id || '',
 	        mode: rule.transparent ? 'transparent' : 'general', // 存量规则按 transparent 自动归类，零迁移
@@ -2923,6 +3473,8 @@ function portForwardApp() {
 	        nethernet: rule.nethernet ?? false,
 	        nethernet_tls_enabled: rule.nethernet_tls?.enabled ?? false,
 	        nethernet_tls_dual: rule.nethernet_tls?.dual ?? true,
+	        nethernet_cert_mode: hasInlinePem ? 'paste' : 'select',
+	        nethernet_cert_id: rule.nethernet_tls?.cert_id ?? '',
 	        nethernet_cert_pem: rule.nethernet_tls?.cert_pem ?? '',
 	        nethernet_key_pem: rule.nethernet_tls?.key_pem ?? '',
 	        nethernet_data_port: rule.nethernet_tls?.data_port ?? null,
@@ -2956,8 +3508,12 @@ function portForwardApp() {
 	          data_port: this.form.nethernet_data_port ? Number(this.form.nethernet_data_port) : 0,
 	        }
 	        if (tls.enabled) {
-	          tls.cert_pem = (this.form.nethernet_cert_pem || '').trim()
-	          tls.key_pem  = (this.form.nethernet_key_pem || '').trim()
+	          if (this.form.nethernet_cert_mode !== 'paste') {
+	            tls.cert_id = (this.form.nethernet_cert_id || '').trim()
+	          } else {
+	            tls.cert_pem = (this.form.nethernet_cert_pem || '').trim()
+	            tls.key_pem  = (this.form.nethernet_key_pem || '').trim()
+	          }
 	        }
 	        payload.nethernet_tls = tls
 	      }
@@ -3021,10 +3577,15 @@ function portForwardApp() {
         return
       }
 
-      // NetherNet 校验：开启 NetherNet 时 TLS 若启用则证书/私钥内容必填。
-      // 只做「非空」检查；能不能配成一对由服务端在保存时解析并回报。
+      // NetherNet 校验：开启 NetherNet 时 TLS 若启用则必须选证书或粘贴 PEM。
       if (this.form.mode === 'transparent' && this.form.nethernet && this.form.nethernet_tls_enabled) {
-        if (!this.form.nethernet_cert_pem || !this.form.nethernet_key_pem) {
+        if (this.form.nethernet_cert_mode !== 'paste') {
+          if (!this.form.nethernet_cert_id) {
+            this.formError = _t('已启用 NetherNet TLS：请在下拉框中选择证书（如尚未上传请先打开「证书管理」上传或申请）。',
+                               'NetherNet TLS is enabled: please select a certificate from the dropdown (upload or issue one in Certificate Manager first).')
+            return
+          }
+        } else if (!this.form.nethernet_cert_pem || !this.form.nethernet_key_pem) {
           this.formError = _t('已启用 NetherNet TLS：请粘贴证书内容与私钥内容（PEM）。iOS 玩家需要 HTTPS。',
                              'NetherNet TLS is enabled: paste both the certificate and private key (PEM). iOS requires HTTPS.')
           return

@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -46,6 +47,7 @@ type Manager struct {
 	statusChangedAt map[string]time.Time
 	cfg             config.ForwardConfig
 	svc             *forwardServices // ACL/嗅探/玩家/日志 旁路服务集合
+	certResolver    nethernet.CertResolver
 	opsMu           sync.Mutex
 	mu              sync.RWMutex
 }
@@ -257,6 +259,64 @@ func (m *Manager) CountRulesByUser(userID string) int {
 	return n
 }
 
+// SetCertResolver 注入证书管理器的动态 TLS 证书解析器。
+func (m *Manager) SetCertResolver(fn nethernet.CertResolver) {
+	m.mu.Lock()
+	m.certResolver = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) resolveCertificate(certID string) (*tls.Certificate, error) {
+	m.mu.RLock()
+	fn := m.certResolver
+	m.mu.RUnlock()
+	if fn != nil {
+		return fn(certID)
+	}
+	c, err := m.store.GetCertificate(certID)
+	if err != nil {
+		return nil, err
+	}
+	pair, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM))
+	if err != nil {
+		return nil, err
+	}
+	return &pair, nil
+}
+
+// CountRulesByCert 返回正在引用指定证书 ID 的规则数。
+func (m *Manager) CountRulesByCert(certID string) int {
+	if certID == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, r := range m.rules {
+		if r.NetherNetTLS != nil && r.NetherNetTLS.CertID == certID {
+			n++
+		}
+	}
+	return n
+}
+
+// RuleNamesByCert 返回正在引用指定证书 ID 的规则名称列表。
+func (m *Manager) RuleNamesByCert(certID string) []string {
+	if certID == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var names []string
+	for _, r := range m.rules {
+		if r.NetherNetTLS != nil && r.NetherNetTLS.CertID == certID {
+			names = append(names, r.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // CountRulesByTarget 返回目标地址等于 addr 的规则数。
 //
 // 删访问码前用它确认没有规则还指着那条隧道：规则的 target_addr 就是「这条规则
@@ -316,11 +376,24 @@ func (m *Manager) ValidateCreateRequest(req *models.CreateRuleRequest) error {
 	if err := models.ValidateCreateRuleRequest(req); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRule, err)
 	}
+	if err := m.checkNetherNetCertRef(req.NetherNet, req.NetherNetTLS); err != nil {
+		return err
+	}
 	if err := m.checkPortConflictEx(req.ListenAddr, req.ListenPort, req.Protocol, req.NetherNet, req.NetherNetTLS, ""); err != nil {
 		return err
 	}
 	if err := m.checkTransparentTargetDuplicate(req.Transparent, req.TargetAddr, req.TargetPort, ""); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (m *Manager) checkNetherNetCertRef(nethernet bool, tlsCfg *models.NetherNetTLS) error {
+	if !nethernet || tlsCfg == nil || !tlsCfg.Enabled || tlsCfg.CertID == "" {
+		return nil
+	}
+	if _, err := m.resolveCertificate(tlsCfg.CertID); err != nil {
+		return fmt.Errorf("%w: 所选 SSL 证书不存在或无效，请在证书管理中确认后重试 | selected SSL certificate not found or invalid", ErrInvalidRule)
 	}
 	return nil
 }
@@ -394,6 +467,9 @@ func (m *Manager) UpdateRule(id string, req *models.UpdateRuleRequest) (*models.
 
 	if err := models.ValidateForwardRule(next); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRule, err)
+	}
+	if err := m.checkNetherNetCertRef(next.NetherNet, next.NetherNetTLS); err != nil {
+		return nil, err
 	}
 
 	// Port conflict detection (exclude self)
@@ -1076,7 +1152,7 @@ func (m *Manager) startNetherNet(r *models.ForwardRule, e *entry) error {
 	}
 
 	// Create gateway
-	gw, err := nethernet.NewGateway(r, mux, publicIP)
+	gw, err := nethernet.NewGatewayWithResolver(r, mux, publicIP, m.resolveCertificate)
 	if err != nil {
 		mux.Stop()
 		return fmt.Errorf("创建 NetherNet 信令网关失败 | failed to create NetherNet gateway: %w", err)
@@ -1395,6 +1471,7 @@ func netherNetTLSEqual(a, b *models.NetherNetTLS) bool {
 		return a == b
 	}
 	return a.Enabled == b.Enabled && a.Dual == b.Dual &&
+		a.CertID == b.CertID &&
 		a.CertPEM == b.CertPEM && a.KeyPEM == b.KeyPEM &&
 		a.SignalPort == b.SignalPort && a.DataPort == b.DataPort
 }

@@ -50,6 +50,9 @@ func (h *handler) guardCreate(me *models.User, req *models.CreateRuleRequest) er
 	if err := h.checkTargetRule(me, req.Transparent, req.TargetAddr); err != nil {
 		return err
 	}
+	if err := h.checkCertScope(me, req.NetherNetTLS); err != nil {
+		return err
+	}
 	return h.checkRuleQuota(me, quota)
 }
 
@@ -80,7 +83,24 @@ func (h *handler) guardUpdate(me *models.User, ownerID string, req *models.Updat
 	if err := checkPortQuota(quota, next.ListenPort); err != nil {
 		return err
 	}
+	if err := h.checkCertScope(me, next.NetherNetTLS); err != nil {
+		return err
+	}
 	return h.checkTargetRule(me, next.Transparent, next.TargetAddr)
+}
+
+func (h *handler) checkCertScope(me *models.User, tlsCfg *models.NetherNetTLS) error {
+	if tlsCfg == nil || tlsCfg.CertID == "" || me == nil || me.IsAdmin() || h.certs == nil {
+		return nil
+	}
+	c, err := h.certs.Get(tlsCfg.CertID)
+	if err != nil {
+		return fmt.Errorf("所选择的 SSL 证书不存在 | selected SSL certificate not found")
+	}
+	if c.UserID != "" && c.UserID != me.ID {
+		return fmt.Errorf("无权使用该 SSL 证书 | not permitted to use this SSL certificate")
+	}
+	return nil
 }
 
 // checkPortQuota 校验监听端口是否在有效配额区间内。

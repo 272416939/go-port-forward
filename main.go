@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go-port-forward/internal/auth"
+	"go-port-forward/internal/certmanager"
 	"go-port-forward/internal/config"
 	"go-port-forward/internal/email"
 	"go-port-forward/internal/firewall"
@@ -120,6 +121,7 @@ type application struct {
 	gcSvc       *gc.Service
 	tunnelSrv   *tunnelapp.Server
 	users       *users.Service
+	certs       *certmanager.Service
 	sessions    *auth.Store
 	sessionStop chan struct{}
 	configPath  string
@@ -185,6 +187,11 @@ func (a *application) Start() error {
 		return fmt.Errorf("forward manager: %w", err)
 	}
 	a.mgr = mgr
+
+	// 证书管理与 ACME 自动续签调度器
+	a.certs = certmanager.New(store)
+	mgr.SetCertResolver(a.certs.GetTLSCertificate)
+	a.certs.StartScheduler()
 
 	// 用户与会话（Web 账号 == 隧道身份）
 	a.sessions = auth.NewStore(cfg.Web.SecureCookie)
@@ -312,6 +319,7 @@ func (a *application) Start() error {
 		tunStatus = tunnelStatusAdapter{srv: a.tunnelSrv}
 	}
 	srv := web.New(cfg.Web, mgr, fw, a.users, a.sessions, tunStatus)
+	srv.SetCertManager(a.certs)
 	if err := srv.Start(); err != nil {
 		return fmt.Errorf("web server: %w", err)
 	}
@@ -328,6 +336,9 @@ func (a *application) Stop() error {
 
 	if a.webSrv != nil {
 		_ = a.webSrv.Shutdown(ctx)
+	}
+	if a.certs != nil {
+		a.certs.StopScheduler()
 	}
 	if a.mgr != nil {
 		a.mgr.Shutdown()

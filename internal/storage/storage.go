@@ -13,6 +13,7 @@ import (
 )
 
 var rulesBucket = []byte("rules")
+var certificatesBucket = []byte("certificates")
 
 // ErrRuleNotFound indicates the requested rule does not exist in storage.
 var ErrRuleNotFound = errors.New("rule not found")
@@ -84,6 +85,13 @@ type Store interface {
 	MigrateAccessCodeDevice(id, fromFP, toFP, label string, at time.Time, addr string) (bool, error)
 	TouchAccessCode(id string, at time.Time, addr string) error
 
+	// Certificates (SSL/TLS 管理与自动续签)
+	ListCertificates() ([]*models.Certificate, error)
+	ListCertificatesByUser(userID string) ([]*models.Certificate, error)
+	GetCertificate(id string) (*models.Certificate, error)
+	SaveCertificate(cert *models.Certificate) error
+	DeleteCertificate(id string) error
+
 	Close() error
 }
 
@@ -101,7 +109,7 @@ func Open(path string) (Store, error) {
 	if err = db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{
 			rulesBucket, aclBucket, connLogsBucket, usersBucket,
-			settingsBucket, groupsBucket, codesBucket,
+			settingsBucket, groupsBucket, codesBucket, certificatesBucket,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

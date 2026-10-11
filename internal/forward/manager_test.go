@@ -506,6 +506,17 @@ func (s *countingStore) TouchAccessCode(id string, at time.Time, addr string) er
 	return nil
 }
 
+func (s *countingStore) ListCertificates() ([]*models.Certificate, error) { return nil, nil }
+func (s *countingStore) ListCertificatesByUser(userID string) ([]*models.Certificate, error) {
+	return nil, nil
+}
+func (s *countingStore) GetCertificate(id string) (*models.Certificate, error) {
+	return nil, storage.ErrCertNotFound
+}
+func (s *countingStore) SaveCertificate(cert *models.Certificate) error { return nil }
+func (s *countingStore) DeleteCertificate(id string) error              { return nil }
+
+
 func (s *countingStore) listCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
