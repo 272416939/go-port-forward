@@ -262,9 +262,9 @@ func (s *Service) ApplyACME(ctx context.Context, owner *models.User, req *models
 	}
 
 	var dnsProv DNSProvider
-	if req.Provider != models.ACMEProviderHTTP01 {
+	if !req.Provider.IsHTTP01() {
 		var err error
-		dnsProv, err = newDNSProvider(req.Provider, req.Credentials, s.httpClient)
+		dnsProv, err = newDNSProvider(req.Provider.DNSProvider(), req.Credentials, s.httpClient)
 		if err != nil {
 			return nil, err
 		}
@@ -273,7 +273,8 @@ func (s *Service) ApplyACME(ctx context.Context, owner *models.User, req *models
 		defer stopHTTP80()
 	}
 
-	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, "", req.Email, req.Domains, dnsProv)
+	eab := eabFromCredentials(req.Provider, req.Credentials)
+	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, req.DirectoryURL, "", req.Email, req.Domains, dnsProv, eab)
 	if err != nil {
 		return nil, err
 	}
@@ -293,6 +294,7 @@ func (s *Service) ApplyACME(ctx context.Context, owner *models.User, req *models
 		AutoRenew:      req.AutoRenew,
 		Provider:       req.Provider,
 		Email:          req.Email,
+		DirectoryURL:   req.DirectoryURL,
 		ACMEAccountKey: acctKeyPEM,
 		Credentials:    creds,
 		HasCredentials: len(creds) > 0,
@@ -324,8 +326,8 @@ func (s *Service) Renew(ctx context.Context, id string) (*models.Certificate, er
 	}
 
 	var dnsProv DNSProvider
-	if cert.Provider != models.ACMEProviderHTTP01 {
-		dnsProv, err = newDNSProvider(cert.Provider, cert.Credentials, s.httpClient)
+	if !cert.Provider.IsHTTP01() {
+		dnsProv, err = newDNSProvider(cert.Provider.DNSProvider(), cert.Credentials, s.httpClient)
 		if err != nil {
 			cert.LastError = err.Error()
 			_ = s.store.SaveCertificate(cert)
@@ -336,7 +338,8 @@ func (s *Service) Renew(ctx context.Context, id string) (*models.Certificate, er
 		defer stopHTTP80()
 	}
 
-	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, cert.ACMEAccountKey, cert.Email, cert.Domains, dnsProv)
+	eab := eabFromCredentials(cert.Provider, cert.Credentials)
+	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, cert.DirectoryURL, cert.ACMEAccountKey, cert.Email, cert.Domains, dnsProv, eab)
 	now := time.Now()
 	cert.UpdatedAt = now
 	if err != nil {
@@ -362,6 +365,20 @@ func (s *Service) Renew(ctx context.Context, id string) (*models.Certificate, er
 	return cert, nil
 }
 
+// eabFromCredentials 在 provider 走 LiteSSL 时构造 EAB 凭据；其余 CA 返回 nil。
+// 非 LiteSSL 的 provider 即使误带 eab_* 字段也忽略——EAB 是 LiteSSL 专属路径。
+func eabFromCredentials(provider models.ACMEProvider, creds map[string]string) *EABCredentials {
+	if !provider.IsLiteSSL() {
+		return nil
+	}
+	kid := strings.TrimSpace(creds["eab_kid"])
+	hmacKey := strings.TrimSpace(creds["eab_hmac_key"])
+	if kid == "" || hmacKey == "" {
+		return nil
+	}
+	return &EABCredentials{KID: kid, HMACKey: hmacKey}
+}
+
 // Update 更新证书名称、手动替换 PEM 或更新自动续签配置。
 func (s *Service) Update(id string, req *models.UpdateCertificateRequest) (*models.Certificate, error) {
 	if req == nil {
@@ -385,6 +402,29 @@ func (s *Service) Update(id string, req *models.UpdateCertificateRequest) (*mode
 	}
 	if req.Provider != nil {
 		cert.Provider = *req.Provider
+	}
+	if req.DirectoryURL != nil && strings.TrimSpace(*req.DirectoryURL) != "" {
+		cert.DirectoryURL = strings.TrimSpace(*req.DirectoryURL)
+	}
+	// provider 被改成 LiteSSL 时，必须有目录地址与 EAB 凭据，否则续签必然失败；
+	// 这里提前拦下，避免用户保存后等到续签周期才发现。
+	if req.Provider != nil && req.Provider.IsLiteSSL() {
+		if cert.DirectoryURL == "" {
+			return nil, fmt.Errorf("LiteSSL 需要填写 ACME 目录地址（FreeSSL 控制台「ACME 账号管理」获取）| LiteSSL requires an ACME directory URL")
+		}
+		kid := strings.TrimSpace(cert.Credentials["eab_kid"])
+		hmacKey := strings.TrimSpace(cert.Credentials["eab_hmac_key"])
+		if req.Credentials != nil {
+			if v := strings.TrimSpace(req.Credentials["eab_kid"]); v != "" {
+				kid = v
+			}
+			if v := strings.TrimSpace(req.Credentials["eab_hmac_key"]); v != "" {
+				hmacKey = v
+			}
+		}
+		if kid == "" || hmacKey == "" {
+			return nil, fmt.Errorf("LiteSSL 需要 EAB 凭据（KID 与 HMAC Key）| LiteSSL requires EAB credentials (KID and HMAC Key)")
+		}
 	}
 	if req.Credentials != nil {
 		if cert.Credentials == nil {

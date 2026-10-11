@@ -1453,42 +1453,79 @@
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.domains" placeholder="mc.example.com, *.mc.example.com"/>
                 </div>
                 <div class="col-md-4">
+                  <label class="form-label small mb-1"><span x-text="t('证书颁发机构 (CA)','Certificate Authority')"></span> <span class="text-danger">*</span></label>
+                  <select class="form-select form-select-sm" x-model="certForm.ca">
+                    <option value="litessl" x-text="t('LiteSSL（TrustAsia · 国内节点 · 免邮箱）','LiteSSL (TrustAsia · CN nodes · no email)')"></option>
+                    <option value="letsencrypt" x-text="t('Let\'s Encrypt（国际 · 需邮箱）','Let\'s Encrypt (international · email required)')"></option>
+                  </select>
+                  <div class="form-text" x-show="certForm.ca === 'litessl'" x-cloak
+                       x-text="t('LiteSSL 是 TrustAsia 运营的免费 CA，经 FreeSSL 控制台获取 ACME 目录与 EAB 凭据，无需邮箱、国内验证节点更快。','LiteSSL is a free CA by TrustAsia. Get the ACME directory and EAB credentials from the FreeSSL console — no email needed, faster CN validation nodes.')"></div>
+                </div>
+
+                <!-- 通知邮箱：仅 Let's Encrypt 需要 -->
+                <div class="col-md-4" x-show="certForm.ca === 'letsencrypt'">
                   <label class="form-label small mb-1"><span x-text="t('通知邮箱 (ACME 注册)','Email (for ACME account)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm" type="email" x-model="certForm.email" placeholder="admin@example.com"/>
                 </div>
 
+                <!-- LiteSSL：ACME 目录地址 -->
+                <div class="col-md-8" x-show="certForm.ca === 'litessl'">
+                  <label class="form-label small mb-1"><span x-text="t('ACME 目录地址','ACME Directory URL')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" x-model="certForm.directory_url"
+                         placeholder="https://acme.example.com/directory"/>
+                  <div class="form-text" x-text="t('在 FreeSSL 控制台「ACME 账号管理」中获取（创建后仅显示一次，请妥善保存）。','Get it from the FreeSSL console under ACME Account Management (shown only once — keep it safe).')"></div>
+                </div>
+
+                <!-- LiteSSL：EAB 凭据 -->
+                <div class="col-md-4" x-show="certForm.ca === 'litessl'">
+                  <label class="form-label small mb-1"><span x-text="t('EAB KID','EAB KID')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" x-model="certForm.eab_kid"/>
+                </div>
+                <div class="col-md-4" x-show="certForm.ca === 'litessl'">
+                  <label class="form-label small mb-1"><span x-text="t('EAB HMAC Key','EAB HMAC Key')"></span> <span class="text-danger">*</span></label>
+                  <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.eab_hmac_key"/>
+                </div>
+
                 <div class="col-md-4">
-                  <label class="form-label small mb-1"><span x-text="t('验证方式','Validation Provider')"></span> <span class="text-danger">*</span></label>
-                  <select class="form-select form-select-sm" x-model="certForm.provider">
-                    <option value="cloudflare" x-text="t('Cloudflare DNS-01（推荐 · 免端口）','Cloudflare DNS-01 (Recommended)')"></option>
-                    <option value="aliyun" x-text="t('阿里云 DNS-01（免端口）','Aliyun DNS-01')"></option>
-                    <option value="dnspod" x-text="t('腾讯云 DNSPod DNS-01（免端口）','Tencent DNSPod DNS-01')"></option>
-                    <option value="http01" x-text="t('HTTP-01（需中转机 80 端口公网可达）','HTTP-01 (Requires Port 80)')"></option>
+                  <label class="form-label small mb-1"><span x-text="t('验证方式','Challenge Type')"></span> <span class="text-danger">*</span></label>
+                  <select class="form-select form-select-sm" x-model="certForm.challenge">
+                    <option value="dns01" x-text="t('DNS-01（支持泛域名 · 免端口）','DNS-01 (wildcard ok · no port needed)')"></option>
+                    <option value="http01" x-text="t('HTTP-01（仅单域名 · 需 80 端口公网可达）','HTTP-01 (single domain · needs port 80)')"></option>
+                  </select>
+                </div>
+
+                <!-- DNS-01 服务商选择 -->
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01'">
+                  <label class="form-label small mb-1"><span x-text="t('DNS 服务商','DNS Provider')"></span> <span class="text-danger">*</span></label>
+                  <select class="form-select form-select-sm" x-model="certForm.dns_provider">
+                    <option value="cloudflare" x-text="t('Cloudflare','Cloudflare')"></option>
+                    <option value="aliyun" x-text="t('阿里云','Aliyun')"></option>
+                    <option value="dnspod" x-text="t('腾讯云 DNSPod','Tencent DNSPod')"></option>
                   </select>
                 </div>
 
                 <!-- Cloudflare API Token -->
-                <div class="col-md-8" x-show="certForm.provider === 'cloudflare'">
+                <div class="col-md-8" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'cloudflare'">
                   <label class="form-label small mb-1"><span x-text="t('Cloudflare API Token（需具备 Zone.DNS 编辑权限）','Cloudflare API Token (Zone.DNS Edit)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.cf_token" placeholder="粘贴 Cloudflare API Token"/>
                 </div>
 
                 <!-- 阿里云 AccessKey -->
-                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'aliyun'">
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'aliyun'">
                   <label class="form-label small mb-1">AccessKey ID <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.ali_ak"/>
                 </div>
-                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'aliyun'">
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'aliyun'">
                   <label class="form-label small mb-1">AccessKey Secret <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.ali_sk"/>
                 </div>
 
                 <!-- 腾讯云 SecretId / SecretKey -->
-                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'dnspod'">
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'dnspod'">
                   <label class="form-label small mb-1">SecretId <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.tc_id"/>
                 </div>
-                <div class="col-md-4" style="display:none" x-show="certForm.provider === 'dnspod'">
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'dnspod'">
                   <label class="form-label small mb-1">SecretKey <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.tc_key"/>
                 </div>
@@ -1532,7 +1569,8 @@
                   <td class="small font-monospace" x-text="(c.domains || []).join(', ') || c.subject_cn || '-'"></td>
                   <td>
                     <span class="badge" :class="c.source_type === 'acme' ? 'text-bg-info' : 'text-bg-secondary'"
-                          x-text="c.source_type === 'acme' ? ('ACME · ' + (c.provider || '')) : t('手动上传','Manual')"></span>
+                          x-text="c.source_type === 'acme' ? certProviderLabel(c) : t('手动上传','Manual')"></span>
+                    <div class="small text-muted" style="font-size:0.75rem" x-show="c.source_type === 'acme' && c.directory_url" x-text="c.directory_url"></div>
                   </td>
                   <td class="small text-muted" x-text="c.issuer || '-'"></td>
                   <td>
@@ -2235,7 +2273,13 @@ function portForwardApp() {
 	    certError: '',
 	    certForm: {
 	      id: '', name: '', user_id: '', cert_pem: '', key_pem: '',
-	      domains: '', email: '', provider: 'cloudflare',
+	      domains: '',
+	      ca: 'litessl',            // litessl | letsencrypt
+	      email: '',                // 仅 Let's Encrypt 需要
+	      directory_url: '',        // 仅 LiteSSL 需要（FreeSSL 控制台获取）
+	      eab_kid: '', eab_hmac_key: '',
+	      challenge: 'dns01',       // dns01 | http01
+	      dns_provider: 'cloudflare',
 	      cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
 	      auto_renew: true
 	    },
@@ -2578,10 +2622,27 @@ function portForwardApp() {
       this.certForm = {
         id: '', name: '', user_id: this.isAdmin ? '' : this.me.id,
         cert_pem: '', key_pem: '',
-        domains: '', email: this.me.email || '', provider: 'cloudflare',
+        domains: '',
+        ca: 'litessl',
+        email: this.me.email || '',
+        directory_url: '',
+        eab_kid: '', eab_hmac_key: '',
+        challenge: 'dns01',
+        dns_provider: 'cloudflare',
         cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
         auto_renew: true
       }
+    },
+
+    // 把「CA + 验证方式」拼成后端 provider 复合值，与 models.BuildProvider 一致。
+    buildCertProvider() {
+      const ca = this.certForm.ca === 'litessl' ? 'litessl' : 'letsencrypt'
+      const challenge = this.certForm.challenge === 'http01' ? 'http01' : this.certForm.dns_provider
+      if (ca === 'litessl') {
+        if (challenge === 'http01') return 'litessl_http01'
+        return 'litessl_' + challenge
+      }
+      return challenge
     },
 
     async loadCertificates() {
@@ -2695,19 +2756,44 @@ function portForwardApp() {
         this.certError = _t('请填写至少一个域名', 'At least one domain is required')
         return
       }
-      if (!this.certForm.email.trim()) {
-        this.certError = _t('请填写通知邮箱', 'Email is required')
+      const isLiteSSL = this.certForm.ca === 'litessl'
+      // LiteSSL 走 EAB 免邮箱；Let's Encrypt 必须留邮箱。
+      if (!isLiteSSL && !this.certForm.email.trim()) {
+        this.certError = _t("Let's Encrypt 需要填写通知邮箱", "Let's Encrypt requires an email address")
         return
       }
+      if (isLiteSSL) {
+        if (!this.certForm.directory_url.trim()) {
+          this.certError = _t('请填写 LiteSSL 的 ACME 目录地址（FreeSSL 控制台「ACME 账号管理」获取）',
+                              'LiteSSL ACME directory URL is required (from the FreeSSL console)')
+          return
+        }
+        if (!this.certForm.eab_kid.trim() || !this.certForm.eab_hmac_key.trim()) {
+          this.certError = _t('请填写 LiteSSL 的 EAB KID 与 HMAC Key',
+                              'LiteSSL EAB KID and HMAC Key are required')
+          return
+        }
+      }
+      const isDNS01 = this.certForm.challenge !== 'http01'
       const creds = {}
-      if (this.certForm.provider === 'cloudflare') {
-        creds.api_token = this.certForm.cf_token.trim()
-      } else if (this.certForm.provider === 'aliyun') {
-        creds.access_key_id = this.certForm.ali_ak.trim()
-        creds.access_key_secret = this.certForm.ali_sk.trim()
-      } else if (this.certForm.provider === 'dnspod') {
-        creds.secret_id = this.certForm.tc_id.trim()
-        creds.secret_key = this.certForm.tc_key.trim()
+      if (isDNS01) {
+        if (this.certForm.dns_provider === 'cloudflare') {
+          creds.api_token = this.certForm.cf_token.trim()
+        } else if (this.certForm.dns_provider === 'aliyun') {
+          creds.access_key_id = this.certForm.ali_ak.trim()
+          creds.access_key_secret = this.certForm.ali_sk.trim()
+        } else if (this.certForm.dns_provider === 'dnspod') {
+          creds.secret_id = this.certForm.tc_id.trim()
+          creds.secret_key = this.certForm.tc_key.trim()
+        }
+      } else if (domains.some(d => d.startsWith('*.'))) {
+        this.certError = _t('HTTP-01 验证不支持泛域名，泛域名请改用 DNS-01 验证',
+                            'HTTP-01 does not support wildcard domains; use DNS-01 instead')
+        return
+      }
+      if (isLiteSSL) {
+        creds.eab_kid = this.certForm.eab_kid.trim()
+        creds.eab_hmac_key = this.certForm.eab_hmac_key.trim()
       }
       this.certBusy = true
       try {
@@ -2718,8 +2804,9 @@ function portForwardApp() {
             name: this.certForm.name.trim(),
             user_id: this.certForm.user_id || '',
             domains,
-            email: this.certForm.email.trim(),
-            provider: this.certForm.provider,
+            email: isLiteSSL ? '' : this.certForm.email.trim(),
+            provider: this.buildCertProvider(),
+            directory_url: isLiteSSL ? this.certForm.directory_url.trim() : '',
             credentials: creds,
             auto_renew: !!this.certForm.auto_renew
           })
@@ -2779,8 +2866,16 @@ function portForwardApp() {
     },
 
     editCert(c) {
-      this.certTab = 'upload'
+      this.certTab = 'acme'
       this.certError = ''
+      const p = (c.provider || '')
+      const isLiteSSL = p.startsWith('litessl')
+      const isHTTP01 = p.endsWith('http01')
+      let dnsProvider = 'cloudflare'
+      if (!isHTTP01) {
+        if (p.endsWith('aliyun')) dnsProvider = 'aliyun'
+        else if (p.endsWith('dnspod')) dnsProvider = 'dnspod'
+      }
       this.certForm = {
         id: c.id,
         name: c.name || '',
@@ -2788,11 +2883,30 @@ function portForwardApp() {
         cert_pem: c.cert_pem || '',
         key_pem: '',
         domains: (c.domains || []).join(', '),
+        ca: isLiteSSL ? 'litessl' : 'letsencrypt',
         email: c.email || '',
-        provider: c.provider || 'cloudflare',
+        directory_url: c.directory_url || '',
+        eab_kid: '', eab_hmac_key: '',
+        challenge: isHTTP01 ? 'http01' : 'dns01',
+        dns_provider: dnsProvider,
         cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
         auto_renew: !!c.auto_renew
       }
+    },
+
+    // 证书列表的「类型」徽标文案：CA 名 + 验证方式。
+    certProviderLabel(c) {
+      const p = (c.provider || '')
+      if (!p) return _t('ACME', 'ACME')
+      const isLiteSSL = p.startsWith('litessl')
+      const ca = isLiteSSL ? 'LiteSSL' : "Let's Encrypt"
+      let ch
+      if (p.endsWith('http01')) ch = 'HTTP-01'
+      else if (p.endsWith('cloudflare')) ch = 'DNS-01 · Cloudflare'
+      else if (p.endsWith('aliyun')) ch = 'DNS-01 · 阿里云'
+      else if (p.endsWith('dnspod')) ch = 'DNS-01 · DNSPod'
+      else ch = 'DNS-01'
+      return ca + ' · ' + ch
     },
 
     deleteCert(c) {

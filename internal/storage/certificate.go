@@ -34,6 +34,7 @@ type certRecord struct {
 	AutoRenew      bool                  `json:"auto_renew"`
 	Provider       models.ACMEProvider   `json:"provider"`
 	Email          string                `json:"email"`
+	DirectoryURL   string                `json:"directory_url"`
 	ACMEAccountKey string                `json:"acme_account_key"`
 	Credentials    map[string]string     `json:"credentials"`
 	LastRenewAt    time.Time             `json:"last_renew_at"`
@@ -62,6 +63,7 @@ func toCertRecord(c *models.Certificate) *certRecord {
 		AutoRenew:      c.AutoRenew,
 		Provider:       c.Provider,
 		Email:          c.Email,
+		DirectoryURL:   c.DirectoryURL,
 		ACMEAccountKey: c.ACMEAccountKey,
 		Credentials:    creds,
 		LastRenewAt:    c.LastRenewAt,
@@ -91,6 +93,7 @@ func (r *certRecord) toModel() *models.Certificate {
 		AutoRenew:      r.AutoRenew,
 		Provider:       r.Provider,
 		Email:          r.Email,
+		DirectoryURL:   r.DirectoryURL,
 		ACMEAccountKey: r.ACMEAccountKey,
 		Credentials:    creds,
 		HasCredentials: len(creds) > 0,

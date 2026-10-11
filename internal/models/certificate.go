@@ -16,7 +16,15 @@ const (
 	CertSourceACME   CertSourceType = "acme"
 )
 
-// ACMEProvider 标识 ACME 验证方式/服务商。
+// ACMEProvider 标识 ACME 的 CA 与验证方式组合。
+//
+// 取值分两族：
+//   - Let's Encrypt（国际，需注册邮箱）：cloudflare / aliyun / dnspod / http01
+//   - LiteSSL（TrustAsia 运营，经 FreeSSL 控制台获取 ACME 目录 + EAB 凭据，
+//     免邮箱、国内 DCV 节点）：litessl_http01 / litessl_cloudflare /
+//     litessl_aliyun / litessl_dnspod
+//
+// 前缀 litessl_ 之后的部分即 DNS-01 所用服务商；http01 表示 HTTP-01 验证。
 type ACMEProvider string
 
 const (
@@ -24,7 +32,72 @@ const (
 	ACMEProviderAliyun     ACMEProvider = "aliyun"
 	ACMEProviderDNSPod     ACMEProvider = "dnspod"
 	ACMEProviderHTTP01     ACMEProvider = "http01"
+
+	// LiteSSL（TrustAsia · 国内节点 · 免邮箱 · 需 EAB 凭据）
+	ACMEProviderLiteSSLHTTP01     ACMEProvider = "litessl_http01"
+	ACMEProviderLiteSSLCloudflare ACMEProvider = "litessl_cloudflare"
+	ACMEProviderLiteSSLAliyun     ACMEProvider = "litessl_aliyun"
+	ACMEProviderLiteSSLDNSPod     ACMEProvider = "litessl_dnspod"
 )
+
+// litesslPrefix 是 LiteSSL 族 provider 取值的前缀。
+const litesslPrefix = "litessl"
+
+// IsLiteSSL 报告该 provider 是否走 LiteSSL（TrustAsia）CA。
+func (p ACMEProvider) IsLiteSSL() bool {
+	return strings.HasPrefix(strings.ToLower(string(p)), litesslPrefix)
+}
+
+// IsHTTP01 报告该 provider 是否用 HTTP-01 验证（无 DNS 服务商）。
+func (p ACMEProvider) IsHTTP01() bool {
+	return strings.HasSuffix(strings.ToLower(string(p)), "http01")
+}
+
+// DNSProvider 返回该 provider 使用的 DNS-01 服务商；HTTP-01 返回空串。
+func (p ACMEProvider) DNSProvider() ACMEProvider {
+	if p.IsHTTP01() {
+		return ""
+	}
+	s := strings.ToLower(string(p))
+	switch {
+	case strings.HasSuffix(s, "cloudflare"):
+		return ACMEProviderCloudflare
+	case strings.HasSuffix(s, "aliyun"):
+		return ACMEProviderAliyun
+	case strings.HasSuffix(s, "dnspod"):
+		return ACMEProviderDNSPod
+	}
+	return ""
+}
+
+// CAProvider 把 provider 归一到「面向用户的 CA 选项」：
+// litessl_* 一律折叠为 litessl（其余保持原值）。
+func (p ACMEProvider) CAProvider() ACMEProvider {
+	if p.IsLiteSSL() {
+		return ACMEProvider(litesslPrefix)
+	}
+	return p
+}
+
+// BuildProvider 由「CA + 验证方式/DNS 服务商」拼出内部 provider 取值。
+// ca 为 litessl 时走 LiteSSL 族；challenge 为空表示默认 DNS-01。
+func BuildProvider(ca ACMEProvider, challenge ACMEProvider) ACMEProvider {
+	ch := ACMEProvider(strings.ToLower(strings.TrimSpace(string(challenge))))
+	ca = ACMEProvider(strings.ToLower(strings.TrimSpace(string(ca))))
+	if ca.IsLiteSSL() {
+		if ch == "" {
+			return ACMEProviderLiteSSLCloudflare
+		}
+		if ch == ACMEProviderHTTP01 {
+			return ACMEProviderLiteSSLHTTP01
+		}
+		return ACMEProvider(litesslPrefix + "_" + string(ch))
+	}
+	if ch == "" {
+		return ACMEProviderCloudflare
+	}
+	return ch
+}
 
 // Certificate 表示证书管理中的一条 SSL/TLS 证书记录。
 //
@@ -52,6 +125,8 @@ type Certificate struct {
 	AutoRenew      bool              `json:"auto_renew"`
 	Provider       ACMEProvider      `json:"provider,omitempty"`
 	Email          string            `json:"email,omitempty"`
+	// DirectoryURL 是 ACME 目录地址（LiteSSL 由 FreeSSL 控制台按账号下发）。
+	DirectoryURL   string            `json:"directory_url,omitempty"`
 	ACMEAccountKey string            `json:"-"`
 	Credentials    map[string]string `json:"-"`
 	HasCredentials bool              `json:"has_credentials"`
@@ -80,8 +155,10 @@ type ApplyACMERequest struct {
 	Domains     []string          `json:"domains"`
 	Email       string            `json:"email"`
 	Provider    ACMEProvider      `json:"provider"`
-	Credentials map[string]string `json:"credentials"`
-	AutoRenew   bool              `json:"auto_renew"`
+	// DirectoryURL 仅 LiteSSL 需要：FreeSSL 控制台「ACME 账号管理」下发的目录地址。
+	DirectoryURL string            `json:"directory_url"`
+	Credentials  map[string]string `json:"credentials"`
+	AutoRenew    bool              `json:"auto_renew"`
 }
 
 // UpdateCertificateRequest 是更新已有证书的请求载荷。
@@ -92,6 +169,7 @@ type UpdateCertificateRequest struct {
 	AutoRenew   *bool             `json:"auto_renew"`
 	Email       *string           `json:"email"`
 	Provider    *ACMEProvider     `json:"provider"`
+	DirectoryURL *string          `json:"directory_url"`
 	Credentials map[string]string `json:"credentials"`
 }
 
@@ -206,24 +284,36 @@ func ValidateApplyACMERequest(req *ApplyACMERequest) error {
 	}
 	req.Domains = cleaned
 
-	if req.Email == "" || !strings.Contains(req.Email, "@") {
-		return fmt.Errorf("请填写有效的通知邮箱（用于 Let's Encrypt 账户注册）| a valid email address is required")
+	// LiteSSL 走 EAB（外部账户绑定）替代邮箱注册；Let's Encrypt 仍要求邮箱。
+	if !req.Provider.IsLiteSSL() {
+		if req.Email == "" || !strings.Contains(req.Email, "@") {
+			return fmt.Errorf("请填写有效的通知邮箱（用于 Let's Encrypt 账户注册）| a valid email address is required")
+		}
+	} else {
+		req.DirectoryURL = strings.TrimSpace(req.DirectoryURL)
+		if req.DirectoryURL == "" || !strings.HasPrefix(strings.ToLower(req.DirectoryURL), "http") {
+			return fmt.Errorf("请填写 LiteSSL 的 ACME 目录地址（FreeSSL 控制台「ACME 账号管理」获取）| LiteSSL ACME directory URL is required")
+		}
+		if strings.TrimSpace(req.Credentials["eab_kid"]) == "" || strings.TrimSpace(req.Credentials["eab_hmac_key"]) == "" {
+			return fmt.Errorf("请填写 LiteSSL 的 EAB 凭据（KID 与 HMAC Key，FreeSSL 控制台获取，密钥仅显示一次）| LiteSSL EAB credentials (KID and HMAC Key) are required")
+		}
 	}
 
-	switch req.Provider {
-	case ACMEProviderCloudflare:
+	dnsProv := req.Provider.DNSProvider()
+	switch {
+	case dnsProv == ACMEProviderCloudflare:
 		if strings.TrimSpace(req.Credentials["api_token"]) == "" {
 			return fmt.Errorf("Cloudflare DNS 验证需要填写 API Token | Cloudflare API Token is required")
 		}
-	case ACMEProviderAliyun:
+	case dnsProv == ACMEProviderAliyun:
 		if strings.TrimSpace(req.Credentials["access_key_id"]) == "" || strings.TrimSpace(req.Credentials["access_key_secret"]) == "" {
 			return fmt.Errorf("阿里云 DNS 验证需要填写 AccessKey ID 与 AccessKey Secret | Aliyun AccessKey ID and Secret are required")
 		}
-	case ACMEProviderDNSPod:
+	case dnsProv == ACMEProviderDNSPod:
 		if strings.TrimSpace(req.Credentials["secret_id"]) == "" || strings.TrimSpace(req.Credentials["secret_key"]) == "" {
 			return fmt.Errorf("腾讯云 DNSPod 验证需要填写 SecretId 与 SecretKey | Tencent Cloud SecretId and SecretKey are required")
 		}
-	case ACMEProviderHTTP01:
+	case req.Provider.IsHTTP01():
 		for _, d := range req.Domains {
 			if strings.HasPrefix(d, "*.") {
 				return fmt.Errorf("HTTP-01 验证不支持泛域名 (%s)，泛域名请使用 DNS-01 验证 | wildcard domain requires DNS-01 validation", d)

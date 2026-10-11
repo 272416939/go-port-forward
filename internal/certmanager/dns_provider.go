@@ -30,6 +30,8 @@ func newDNSProvider(provider models.ACMEProvider, creds map[string]string, httpC
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
+	// provider 可能是复合值（如 litessl_cloudflare），归一化到 DNS 服务商本身。
+	provider = provider.DNSProvider()
 	switch provider {
 	case models.ACMEProviderCloudflare:
 		token := strings.TrimSpace(creds["api_token"])

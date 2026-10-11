@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -94,19 +95,69 @@ func encodeCertificates(derList [][]byte) string {
 	return buf.String()
 }
 
+// EABCredentials 是 ACME 外部账户绑定（RFC 8555 §7.3.4）凭据。
+//
+// LiteSSL（TrustAsia 运营，经 FreeSSL 控制台签发）在注册阶段用 EAB 绑定外部
+// 账号，从而替代 Let's Encrypt 的邮箱注册——这是「免邮箱」的真正来源。
+type EABCredentials struct {
+	KID string
+	// HMACKey 是控制台下发的对称密钥。多数控制台给的是 Base64 编码串，
+	// DecodeEABHMACKey 会尝试多种 Base64 变体解码，全部失败时按原样字节使用。
+	HMACKey string
+}
+
+// DecodeEABHMACKey 把控制台下发的 HMAC Key 字符串解成原始字节。
+//
+// 各 CA/控制台的编码习惯不一（base64url 无填充 / 带填充 / 标准 base64），按常见
+// 变体逐个尝试；都解不了时退回原始字符串字节——密钥用错的表现是 CA 拒绝注册
+// （报 malformed），不会静默通过。
+func DecodeEABHMACKey(raw string) ([]byte, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, errors.New("empty EAB HMAC key")
+	}
+	encodings := []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	}
+	for _, enc := range encodings {
+		if b, err := enc.DecodeString(s); err == nil && len(b) > 0 {
+			return b, nil
+		}
+	}
+	return []byte(s), nil
+}
+
 // ObtainCertificate 执行完整的 ACME 申请流程：
-// 1. 生成/加载 ACME 账户密钥并在 CA 注册；
+// 1. 生成/加载 ACME 账户密钥并在 CA 注册（有 EAB 时走外部账户绑定，无需邮箱）；
 // 2. 针对全部指定域名完成 DNS-01 或 HTTP-01 挑战；
 // 3. 生成新的证书私钥与 CSR，提交签发并下载完整证书链。
 func (m *ACMEManager) ObtainCertificate(
 	ctx context.Context,
+	directoryURL string,
 	accountKeyPEM string,
 	email string,
 	domains []string,
 	dnsProvider DNSProvider,
+	eab *EABCredentials,
 ) (certPEM, keyPEM, newAccountKeyPEM string, err error) {
 	if len(domains) == 0 {
 		return "", "", "", errors.New("domains list cannot be empty")
+	}
+	// 每条证书可以来自不同 CA（LiteSSL 的目录地址按账号下发），目录地址优先取
+	// 调用方传入值；为空时回落到服务级默认（Let's Encrypt）。
+	dirURL := strings.TrimSpace(directoryURL)
+	if dirURL == "" {
+		dirURL = m.cfg.DirectoryURL
+	}
+	if eab != nil {
+		eab.KID = strings.TrimSpace(eab.KID)
+		eab.HMACKey = strings.TrimSpace(eab.HMACKey)
+		if eab.KID == "" || eab.HMACKey == "" {
+			return "", "", "", errors.New("EAB 凭据不完整（KID 与 HMAC Key 均必填）| incomplete EAB credentials")
+		}
 	}
 
 	var acctKey *ecdsa.PrivateKey
@@ -128,21 +179,32 @@ func (m *ACMEManager) ObtainCertificate(
 
 	client := &acme.Client{
 		Key:          acctKey,
-		DirectoryURL: m.cfg.DirectoryURL,
+		DirectoryURL: dirURL,
 		HTTPClient:   m.cfg.HTTPClient,
 	}
 
-	// 注册 ACME 账户
+	// 注册 ACME 账户。有 EAB 时 contact 留空——外部账户绑定本身就是账号身份，
+	// 这也是 LiteSSL 不要求邮箱的原因。
 	var contact []string
 	if email != "" {
 		contact = []string{"mailto:" + email}
 	}
 	acct := &acme.Account{Contact: contact}
+	if eab != nil {
+		hmacKey, kerr := DecodeEABHMACKey(eab.HMACKey)
+		if kerr != nil {
+			return "", "", "", fmt.Errorf("解析 EAB HMAC Key 失败: %w", kerr)
+		}
+		acct.ExternalAccountBinding = &acme.ExternalAccountBinding{
+			KID: eab.KID,
+			Key: hmacKey,
+		}
+	}
 	_, err = client.Register(ctx, acct, acme.AcceptTOS)
 	if err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		// 某些 CA 会返回特定错误代码表示账户已存在
 		if !strings.Contains(strings.ToLower(err.Error()), "already") && !strings.Contains(strings.ToLower(err.Error()), "existing") {
-			return "", "", "", fmt.Errorf("注册 ACME 账户失败 (%s): %w", m.cfg.DirectoryURL, err)
+			return "", "", "", fmt.Errorf("注册 ACME 账户失败 (%s): %w", dirURL, err)
 		}
 	}
 
