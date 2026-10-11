@@ -76,7 +76,7 @@ firewall_windows.go[IN6T]: F:基于Windows netsh advfirewall命令行实现端�
 
 ===E:/code/go-port-forward/internal/forward/===
 acl.go[DS8M]: F:实现IP黑白名单原子快照无锁判定、异步连接日志持久化与活跃会话跟踪 | R:code:internal/models/acl.go,code:internal/storage/storage.go | A:forward.Manager,Forwarder | S:热路径ACL判定使用atomic.Pointer无锁读取，白名单隐式拒绝仅作用于指定规则
-manager.go[AN9L]: F:管理全部TCP/UDP/NetherNet转发器生命周期、端点级端口冲突拦截与旁路服务装配 | R:code:internal/forward/tcp.go,code:internal/forward/udp.go,code:internal/forward/acl.go | A:web.handler,main | S:透明模式绑定需CAP_NET_ADMIN权限，端口冲突检测覆盖NetherNet信令TCP与数据UDP端口并在保存前拦截
+manager.go[AN9L]: F:管理全部TCP/UDP/NetherNet转发器生命周期、端点级端口冲突拦截与证书解析装配 | R:code:internal/forward/tcp.go,code:internal/forward/udp.go,code:internal/forward/acl.go | A:web.handler,main | S:透明模式绑定需CAP_NET_ADMIN权限，端口冲突检测覆盖NetherNet信令TCP与数据UDP端口并在保存前拦截
 nethernet_backend.go[IN7S]: F:包装透明UDP套接字工厂并将NetherNet会话接入主转发会话注册表 | R:code:internal/forward/tuple_registry.go,code:internal/nethernet/multiplexer.go | A:Manager.startNetherNet | S:NetherNet会话建立与销毁必须同步注册表，否则Windows客户端无法安装/32回程路由
 target.go[DN8S]: F:校验通用模式转发目标IP合法性，严防内网、回环、保留及本机网卡地址跳板 | R:- | A:CheckDialControl,CheckTargetIP | S:透明模式豁免内网地址检查（其目标必须为隧道地址），通用模式拦截CGNAT与本机网卡IP
 tcp.go[AN8M]: F:实现TCP端口监听、出站连接拨号、双向数据拷贝与PROXY Protocol v2注入 | R:code:internal/forward/acl.go,code:pkg/pool/pool.go | A:Manager.startForwarders | S:非阻塞停止时必须并发关闭所有活跃客户端和上游连接，缓冲区使用全局pool复用
@@ -91,9 +91,10 @@ logger.go[CO7T]: F:初始化基于Zap和Lumberjack的全局结构化日志记录
 ===E:/code/go-port-forward/internal/models/===
 accesscode.go[DI7S]: F:定义隧道访问码数据模型、设备指纹解析、摘要脱敏及创建更新请求结构 | R:code:internal/models/models.go | A:storage,users,web | S:密钥与设备指纹标记json忽略，对外API与日志中指纹仅展示前后4位摘要
 group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间与上限不突破全局天花板 | R:code:internal/models/settings.go | A:storage,users | S:组配额上限不能为负，且非零时不得超越Settings配置的全局上限天花板
-models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet端口计算及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet信令与数据端口不能相同，开启TLS时证书与私钥必须通过tls.X509KeyPair解析配对
+models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet端口计算及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet信令与数据端口不能相同，TLS启用时须选择cert_id或粘贴可配对的证书与私钥
 settings.go[DC8M]: F:定义全局设置单例模型、Schema版本、端口区间与默认组等全局配额天花板 | R:- | A:storage,users | S:默认端口范围20000-29999防止普通用户侵占低位特权端口，注册开关默认关闭
 user.go[DI8M]: F:定义Web用户账号模型、角色常量、密码修改与注册请求数据传输结构 | R:code:internal/models/group.go | A:storage,auth,users | S:PasswordHash必须标记json忽略严禁在REST响应中回显，配额由组动态解析
+certificate.go[DM8L]: F:定义SSL证书数据模型、上传与ACME申请请求结构及PEM解析校验逻辑 | R:code:internal/models/models.go | A:storage,certmanager,web | S:私钥、ACME账户密钥与DNS凭据均标记json忽略防止REST泄漏，X509解析自动提取SANs与有效期
 
 ===E:/code/go-port-forward/internal/nethernet/===
 gateway.go[EN8L]: F:实现NetherNet HTTP/HTTPS信令网关、MOTD返回及WebRTC SDP candidate重写 | R:code:internal/nethernet/multiplexer.go,code:internal/models/models.go | A:forward.Manager | S:SDP重写必须折叠candidate为单个公网地址且保持原始CRLF行尾，双模式同端口监听
@@ -105,8 +106,9 @@ acl.go[PS7M]: F:管理bbolt acl桶与按用户嵌套子桶的connlogs连接日�
 group.go[PC7M]: F:管理bbolt settings与groups桶的全局设置及用户组增删改查 | R:code:internal/models/group.go,code:internal/models/settings.go | A:users.Service | S:组名唯一性与默认组标记唯一性在同一写事务内完成，阻止删除包含成员的组
 migrate.go[PD8M]: F:执行bbolt存储模型版本检查与v1到v2访问码/用户组数据迁移 | R:code:internal/storage/storage.go,code:internal/models/settings.go | A:storage.Open | S:根据Settings.SchemaVersion判断迁移是否执行，迁移过程必须保持幂等
 smtp.go[PC6S]: F:管理settings桶下的SMTP配置持久化，提供脱敏读取与安全更新 | R:code:internal/models/system.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立smtpRecord保留密码，更新密码为空时在事务内保留原有密码
-storage.go[PD8M]: F:定义bbolt存储层Store总接口规范，管理数据库打开与所有根桶初始化 | R:code:internal/models/models.go | A:main,forward,users | S:数据库文件权限为0600且打开超时设为2秒，包含rules/users/groups/codes等核心桶
+storage.go[PD8M]: F:定义bbolt存储层Store总接口规范，管理数据库打开与所有根桶初始化 | R:code:internal/models/models.go | A:main,forward,users | S:数据库文件权限为0600且打开超时设为2秒，新增bucket必须加入Open的CreateBucketIfNotExists列表
 user.go[PI8L]: F:管理users桶的Web账号持久化、密码哈希存储、邮箱唯一性校验与角色约束 | R:code:internal/models/user.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立的userRecord避免API结构体忽略密码哈希，禁止删除最后一名管理员
+certificate.go[PD8M]: F:基于bbolt certificates桶实现SSL证书的持久化读写与按用户过滤查询 | R:code:internal/models/certificate.go | A:certmanager.Service | S:私钥与DNS凭据必须经certRecord持久化，models侧json忽略字段直接落盘会重启后全丢
 
 ===E:/code/go-port-forward/internal/svc/===
 service.go[RO6T]: F:封装kardianos/service库，提供跨平台Windows/systemd/launchd服务管理 | R:code:internal/logger/logger.go | A:main | S:交互式终端直接运行runner.Start，服务运行错误异步记录至日志
@@ -144,8 +146,9 @@ handlers_tunnel.go[EU6T]: F:向管理员暴露服务端在线隧道链路质量�
 handlers_users.go[EU7T]: F:处理管理员对用户账号的增删改查及配额分配 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:管理员不能停用或降级自己，删除用户前必须确认名下已无关联的转发规则
 handlers_wsl.go[EU6S]: F:提供WSL2能力检测、发行版端口发现与批量导入转发规则接口 | R:code:pkg/os/wsl/wsl.go,code:internal/forward/manager.go | A:web.router | S:仅管理员可用，批量导入前自动检测WSL2 IP并检查导入列表内端口协议去重
 middleware_auth.go[EU8S]: F:实现Web会话认证、管理员权限校验、CSRF同源检查与本机应急后门认证 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.Server | S:应急后门凭据仅允许从回环地址请求时生效，非GET请求强校验Origin/Referer
-rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go | A:web.handlers | S:普通用户透明规则必须锁定到名下启用中访问码隧道IP，通用模式严禁转发到内网或隧道网段
+rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go | A:web.handlers | S:普通用户透明规则必须锁定到名下启用中访问码IP，通用模式严禁转发到内网或隧道网段
 server.go[EU8L]: F:启动Web HTTP管理面板服务，注册静态资源嵌入、内置MIME字典与路由映射 | R:code:internal/web/handlers.go,code:internal/web/middleware_auth.go | A:main | S:静态文件根据内置staticMIME表映射Content-Type，绕过Windows注册表错误覆盖
+handlers_certs.go[EU7M]: F:提供SSL证书的CRUD、手动上传、ACME申请与续签HTTP端点及多租户作用域控制 | R:code:internal/certmanager/service.go,code:internal/forward/manager.go | A:web.router | S:普通用户仅能操作自己的证书，越权一律返回404，删除被规则引用的证书返回409
 
 ===E:/code/go-port-forward/internal/web/static/css/===
 app.css[EU7L]: F:Web管理面板主样式表，定义响应式栅格、卡片、徽标、表单与明暗适配 | R:code:internal/web/static/index.html | A:Web浏览器 | S:嵌入可执行文件二进制发布
@@ -288,3 +291,8 @@ uid.go[KN6T]: F:将访问码UUID字符串解析为16字节二进制UID以紧凑�
 
 ===E:/code/go-port-forward/pkg/tunnet/===
 tunnet.go[RN8M]: F:封装wireguard/tun虚拟网卡创建、批量读写队列与16字节virtio_net_hdr偏移预留 | R:- | A:tunnelapp.Server,client.Engine | S:缓冲区前部必须预留16字节Offset以容纳Linux virtio_net_hdr，ReadPacket不可并发
+
+===E:/code/go-port-forward/internal/certmanager/===
+acme.go[KR8L]: F:封装RFC8555 ACME协议客户端，完成账户注册、DNS-01与HTTP-01挑战求解、CSR签发与证书链下载 | R:code:internal/certmanager/dns_provider.go | A:Service.ApplyACME,Service.Renew | S:HTTP-01挑战Token仅在验证窗口内驻留内存，DNS-01等待时间可注入以便测试
+dns_provider.go[KS8L]: F:实现Cloudflare、阿里云、腾讯云DNSPod的DNS-01验证TXT记录写入与清理适配器 | R:code:internal/models/certificate.go | A:ACMEManager.ObtainCertificate | S:各服务商签名算法必须与官方文档一致，二级后缀域名需按三段切分根域
+service.go[DR9L]: F:管理SSL证书上传、ACME申请、到期自动续签调度与TLS证书内存热缓存 | R:code:internal/storage/certificate.go,code:internal/certmanager/acme.go,code:internal/certmanager/dns_provider.go | A:main,forward.Manager,web | S:剩余有效期≤30天触发续签，GetTLSCertificate走内存缓存实现零中断热重载，删除证书前须无规则引用
