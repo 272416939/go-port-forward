@@ -365,6 +365,79 @@ func (s *Service) Renew(ctx context.Context, id string) (*models.Certificate, er
 	return cert, nil
 }
 
+// PrepareManualDNS 执行手动 DNS 解析的第一步：创建 Order 并返回待添加的 TXT 记录。
+// 不落库——证书要等第二步验证通过后才保存。
+func (s *Service) PrepareManualDNS(ctx context.Context, owner *models.User, req *models.ApplyACMERequest) (*ManualDNSPrepareResult, error) {
+	if err := models.ValidateApplyACMERequest(req); err != nil {
+		return nil, err
+	}
+	if !req.Provider.IsManualDNS() {
+		return nil, fmt.Errorf("当前验证方式不是手动 DNS 解析 | provider is not manual DNS")
+	}
+	userID := ""
+	if owner != nil {
+		userID = owner.ID
+	}
+	if req.UserID != "" {
+		userID = req.UserID
+	}
+	creds := make(map[string]string)
+	for k, v := range req.Credentials {
+		creds[k] = strings.TrimSpace(v)
+	}
+	eab := eabFromCredentials(req.Provider, req.Credentials)
+	meta := certMeta{
+		name:         strings.TrimSpace(req.Name),
+		userID:       userID,
+		autoRenew:    req.AutoRenew,
+		provider:     req.Provider,
+		email:        req.Email,
+		directoryURL: req.DirectoryURL,
+		creds:        creds,
+	}
+	res, _, err := s.acme.PrepareManualDNS(ctx, req.DirectoryURL, "", req.Email, req.Domains, eab, meta)
+	return res, err
+}
+
+// CompleteManualDNS 执行第二步：提交挑战、验证域名并下载证书，随后落库。
+// 只需 token——证书元数据在 prepare 阶段已收下。
+func (s *Service) CompleteManualDNS(ctx context.Context, token string) (*models.Certificate, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("验证令牌不能为空 | verification token is required")
+	}
+	certPEM, keyPEM, meta, err := s.acme.CompleteManualDNS(ctx, strings.TrimSpace(token))
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	cert := &models.Certificate{
+		ID:             uuid.NewString(),
+		UserID:         meta.userID,
+		Name:           meta.name,
+		SourceType:     models.CertSourceACME,
+		CertPEM:        certPEM,
+		KeyPEM:         keyPEM,
+		AutoRenew:      meta.autoRenew,
+		Provider:       meta.provider,
+		Email:          meta.email,
+		DirectoryURL:   meta.directoryURL,
+		Credentials:    meta.creds,
+		HasCredentials: len(meta.creds) > 0,
+		LastRenewAt:    now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := cert.ValidateAndParsePEM(); err != nil {
+		return nil, err
+	}
+	if err := s.store.SaveCertificate(cert); err != nil {
+		return nil, err
+	}
+	s.updateCache(cert)
+	return cert, nil
+}
+
 // eabFromCredentials 在 provider 走 LiteSSL 时构造 EAB 凭据；其余 CA 返回 nil。
 // 非 LiteSSL 的 provider 即使误带 eab_* 字段也忽略——EAB 是 LiteSSL 专属路径。
 func eabFromCredentials(provider models.ACMEProvider, creds map[string]string) *EABCredentials {

@@ -32,6 +32,7 @@ type ACMEManager struct {
 	cfg        ACMEConfig
 	mu         sync.RWMutex
 	httpTokens map[string]string // token -> keyAuth (供 HTTP-01 挑战使用)
+	manual     *manualStore      // DNS-01 手动解析的两段式中间状态
 }
 
 func newACMEManager(cfg ACMEConfig) *ACMEManager {
@@ -47,6 +48,7 @@ func newACMEManager(cfg ACMEConfig) *ACMEManager {
 	return &ACMEManager{
 		cfg:        cfg,
 		httpTokens: make(map[string]string),
+		manual:     newManualStore(),
 	}
 }
 

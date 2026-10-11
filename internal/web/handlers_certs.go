@@ -143,6 +143,66 @@ func (h *handler) applyACMECertificate(w http.ResponseWriter, r *http.Request) {
 	createdWithMessage(w, cert, "证书申请成功并已保存 | certificate issued successfully")
 }
 
+// prepareManualDNSCertificate 执行手动 DNS 解析第一步：返回待添加的 TXT 记录。
+func (h *handler) prepareManualDNSCertificate(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		unauthorized(w)
+		return
+	}
+	if h.certs == nil {
+		fail(w, http.StatusServiceUnavailable, "证书管理服务未就绪 | certificate service unavailable")
+		return
+	}
+	var req models.ApplyACMERequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	owner := me
+	if me.IsAdmin() && req.UserID != "" && req.UserID != me.ID {
+		got, gerr := h.users.Get(req.UserID)
+		if gerr != nil {
+			writeUserError(w, gerr)
+			return
+		}
+		owner = got
+	}
+	res, err := h.certs.PrepareManualDNS(r.Context(), owner, &req)
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Sprintf("获取 DNS 记录失败: %v | failed to prepare DNS challenge: %v", err, err))
+		return
+	}
+	ok(w, res)
+}
+
+// verifyManualDNSCertificate 执行第二步：用户已添加 TXT 记录，提交验证并签发。
+func (h *handler) verifyManualDNSCertificate(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		unauthorized(w)
+		return
+	}
+	if h.certs == nil {
+		fail(w, http.StatusServiceUnavailable, "证书管理服务未就绪 | certificate service unavailable")
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cert, err := h.certs.CompleteManualDNS(r.Context(), req.Token)
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Sprintf("证书签发失败: %v | issuance failed: %v", err, err))
+		return
+	}
+	_ = me
+	createdWithMessage(w, cert, "证书签发成功并已保存 | certificate issued and saved")
+}
+
 func (h *handler) getCertificate(w http.ResponseWriter, r *http.Request) {
 	cert, allowed := h.ownedCert(w, r)
 	if !allowed {

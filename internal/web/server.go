@@ -388,6 +388,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/certificates", s.authed(h.listCertificates))
 	mux.HandleFunc("POST /api/certificates", s.authed(h.uploadCertificate))
 	mux.HandleFunc("POST /api/certificates/acme", s.authed(h.applyACMECertificate))
+	// 手动 DNS 解析两段式：先取 TXT 记录，用户添加后再提交验证
+	mux.HandleFunc("POST /api/certificates/acme/prepare", s.authed(h.prepareManualDNSCertificate))
+	mux.HandleFunc("POST /api/certificates/acme/verify", s.authed(h.verifyManualDNSCertificate))
 	mux.HandleFunc("GET /api/certificates/{id}", s.authed(h.getCertificate))
 	mux.HandleFunc("PUT /api/certificates/{id}", s.authed(h.updateCertificate))
 	mux.HandleFunc("DELETE /api/certificates/{id}", s.authed(h.deleteCertificate))

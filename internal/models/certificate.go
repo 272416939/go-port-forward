@@ -38,7 +38,21 @@ const (
 	ACMEProviderLiteSSLCloudflare ACMEProvider = "litessl_cloudflare"
 	ACMEProviderLiteSSLAliyun     ACMEProvider = "litessl_aliyun"
 	ACMEProviderLiteSSLDNSPod     ACMEProvider = "litessl_dnspod"
+	ACMEProviderLiteSSLManualDNS  ACMEProvider = "litessl_manualdns"
+
+	// manualdns：DNS-01 手动解析。不需要任何 DNS API 凭据——系统给出 TXT
+	// 记录，用户去自己的 DNS 服务商添加后点「验证」。这是宝塔「DNS验证 +
+	// 手动解析」的同款实现，也是唯一能同时做到零凭据 + 支持泛域名 + 不限
+	// DNS 服务商的模式。
+	ACMEProviderManualDNS ACMEProvider = "manualdns"
 )
+
+// DefaultLiteSSLDirectoryURL 是 LiteSSL 的 ACME 目录地址默认值。
+//
+// 该地址由 FreeSSL 官方固定（见 blog.freessl.cn「FreeSSL.cn 的 ACME 服务器
+// 地址」），因此可安全地作为默认值预填——用户只有在自建/代理 ACME 端点时才
+// 需要改动。宝塔正是把这个地址写死在代码里，用户才看不到这一项。
+const DefaultLiteSSLDirectoryURL = "https://acme.freessl.cn/directory"
 
 // litesslPrefix 是 LiteSSL 族 provider 取值的前缀。
 const litesslPrefix = "litessl"
@@ -53,9 +67,14 @@ func (p ACMEProvider) IsHTTP01() bool {
 	return strings.HasSuffix(strings.ToLower(string(p)), "http01")
 }
 
-// DNSProvider 返回该 provider 使用的 DNS-01 服务商；HTTP-01 返回空串。
+// IsManualDNS 报告该 provider 是否为 DNS-01 手动解析模式（无需 DNS API 凭据）。
+func (p ACMEProvider) IsManualDNS() bool {
+	return strings.HasSuffix(strings.ToLower(string(p)), "manualdns")
+}
+
+// DNSProvider 返回该 provider 使用的 DNS-01 服务商；HTTP-01 与手动解析返回空串。
 func (p ACMEProvider) DNSProvider() ACMEProvider {
-	if p.IsHTTP01() {
+	if p.IsHTTP01() || p.IsManualDNS() {
 		return ""
 	}
 	s := strings.ToLower(string(p))
@@ -85,15 +104,21 @@ func BuildProvider(ca ACMEProvider, challenge ACMEProvider) ACMEProvider {
 	ch := ACMEProvider(strings.ToLower(strings.TrimSpace(string(challenge))))
 	ca = ACMEProvider(strings.ToLower(strings.TrimSpace(string(ca))))
 	if ca.IsLiteSSL() {
-		if ch == "" {
-			return ACMEProviderLiteSSLCloudflare
+		if ch == "" || ch == ACMEProviderHTTP01 {
+			if ch == ACMEProviderHTTP01 {
+				return ACMEProviderLiteSSLHTTP01
+			}
+			return ACMEProviderLiteSSLManualDNS
 		}
-		if ch == ACMEProviderHTTP01 {
-			return ACMEProviderLiteSSLHTTP01
+		if ch == ACMEProviderManualDNS {
+			return ACMEProviderLiteSSLManualDNS
 		}
 		return ACMEProvider(litesslPrefix + "_" + string(ch))
 	}
-	if ch == "" {
+	if ch == "" || ch == ACMEProviderManualDNS {
+		if ch == ACMEProviderManualDNS {
+			return ACMEProviderManualDNS
+		}
 		return ACMEProviderCloudflare
 	}
 	return ch
@@ -290,15 +315,21 @@ func ValidateApplyACMERequest(req *ApplyACMERequest) error {
 			return fmt.Errorf("请填写有效的通知邮箱（用于 Let's Encrypt 账户注册）| a valid email address is required")
 		}
 	} else {
+		// 目录地址留空时用官方固定地址兜底——宝塔正是把它写死在代码里，用户才
+		// 看不到这一项。只有自建/代理 ACME 端点时才需要改动。
 		req.DirectoryURL = strings.TrimSpace(req.DirectoryURL)
-		if req.DirectoryURL == "" || !strings.HasPrefix(strings.ToLower(req.DirectoryURL), "http") {
-			return fmt.Errorf("请填写 LiteSSL 的 ACME 目录地址（FreeSSL 控制台「ACME 账号管理」获取）| LiteSSL ACME directory URL is required")
+		if req.DirectoryURL == "" {
+			req.DirectoryURL = DefaultLiteSSLDirectoryURL
+		}
+		if !strings.HasPrefix(strings.ToLower(req.DirectoryURL), "http") {
+			return fmt.Errorf("LiteSSL 的 ACME 目录地址必须以 http(s) 开头 | LiteSSL ACME directory URL must start with http(s)")
 		}
 		if strings.TrimSpace(req.Credentials["eab_kid"]) == "" || strings.TrimSpace(req.Credentials["eab_hmac_key"]) == "" {
 			return fmt.Errorf("请填写 LiteSSL 的 EAB 凭据（KID 与 HMAC Key，FreeSSL 控制台获取，密钥仅显示一次）| LiteSSL EAB credentials (KID and HMAC Key) are required")
 		}
 	}
 
+	// LiteSSL 目录地址留空时用官方固定地址兜底（自建/代理 ACME 端点才需改动）。
 	dnsProv := req.Provider.DNSProvider()
 	switch {
 	case dnsProv == ACMEProviderCloudflare:
@@ -319,6 +350,9 @@ func ValidateApplyACMERequest(req *ApplyACMERequest) error {
 				return fmt.Errorf("HTTP-01 验证不支持泛域名 (%s)，泛域名请使用 DNS-01 验证 | wildcard domain requires DNS-01 validation", d)
 			}
 		}
+	case req.Provider.IsManualDNS():
+		// 手动 DNS 解析：无需任何 DNS API 凭据。TXT 记录由 ACME 流程算出后
+		// 展示给用户，去自己的 DNS 服务商添加即可。
 	default:
 		return fmt.Errorf("不支持的 ACME 验证方式：%s | unsupported ACME provider: %s", req.Provider, req.Provider)
 	}
