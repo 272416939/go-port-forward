@@ -270,8 +270,8 @@ func TestCreateRulePortConflictWithNetherNetInterceptsOnSave(t *testing.T) {
 		t.Fatalf("管理员冲突提示应包含占用规则名称：%s", rec.Body.String())
 	}
 
-	// 3. 尝试在 39043（NetherNet 数据端口）创建透明代理 UDP 规则：必须在保存时 409 拦截
-	tpBody := `{"name":"tp-conflict","listen_addr":"0.0.0.0","listen_port":39043,"protocol":"udp","transparent":true,"target_addr":"10.66.0.3","target_port":19132,"enabled":true}`
+	// 3. 尝试在 39042（NetherNet 默认数据端口）创建透明代理 UDP 规则：必须在保存时 409 拦截
+	tpBody := `{"name":"tp-conflict","listen_addr":"0.0.0.0","listen_port":39042,"protocol":"udp","transparent":true,"target_addr":"10.66.0.3","target_port":19132,"enabled":true}`
 	rec = httptest.NewRecorder()
 	f.h.createRule(rec, postJSON("/api/rules", tpBody, f.admin))
 	if rec.Code != http.StatusConflict {
@@ -293,8 +293,8 @@ func TestCreateRulePortConflictWithNetherNetInterceptsOnSave(t *testing.T) {
 		t.Fatalf("NetherNet 规则撞上已有通用 TCP 端口必须在保存时 409 拦截，status=%d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	// 5. /api/ports/check 对已被未启用规则占用的 39042、39043（数据端口）、39060 均返回 available: false
-	for _, p := range []string{"39042", "39043", "39060"} {
+	// 5. /api/ports/check 对已被未启用规则占用的 39042（信令+数据端口）、39060 均返回 available: false
+	for _, p := range []string{"39042", "39060"} {
 		rec = httptest.NewRecorder()
 		f.h.checkPort(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/ports/check?port="+p, nil), f.admin))
 		if rec.Code != http.StatusOK {

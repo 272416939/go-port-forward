@@ -63,13 +63,23 @@ func (h *handler) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeUserError(w, err)
 		return
 	}
-	// 附带邮件功能的可用状态：注册开关旁要提示「未配置邮件时注册无邮箱验证」，
-	// 这个信息只有设置端点能带出去（SMTP 详情与密码在独立的 /api/smtp）。
+	// 附带邮件与全局 ACME 的可用状态
 	smtpCfg, serr := h.users.SMTPConfig()
+	acmeConfigured := false
+	if h.certs != nil {
+		if ast, aerr := h.certs.PublicACMEStatus(); aerr == nil {
+			acmeConfigured = ast.Configured
+		}
+	}
 	resp := struct {
 		models.Settings
 		SMTPConfigured bool `json:"smtp_configured"`
-	}{cfg, serr == nil && smtpCfg != nil && smtpCfg.Configured()}
+		ACMEConfigured bool `json:"acme_configured"`
+	}{
+		Settings:       cfg,
+		SMTPConfigured: serr == nil && smtpCfg != nil && smtpCfg.Configured(),
+		ACMEConfigured: acmeConfigured,
+	}
 	ok(w, resp)
 }
 

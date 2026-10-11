@@ -79,6 +79,11 @@
         <i class="bi bi-shield-check sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('证书管理','Certificates')"></span>
       </a>
+      <a href="#" class="sidebar__link" @click.prevent="showDNSModal()">
+        <i class="bi bi-globe2 sidebar__link-icon"></i>
+        <span class="sidebar__link-text" x-text="t('DNS 管理','DNS Providers')"></span>
+      </a>
+
       <a href="#" class="sidebar__link" style="display:none" x-show="isAdmin" @click.prevent="showUsersModal()">
         <i class="bi bi-people sidebar__link-icon"></i>
         <span class="sidebar__link-text" x-text="t('用户管理','Users')"></span>
@@ -553,8 +558,8 @@
                     <label class="form-label" x-text="t('UDP 数据端口','UDP Data Port')"></label>
                     <input class="form-control" type="number" min="1" max="65535"
                            x-model.number="form.nethernet_data_port"
-                           :placeholder="t('默认为信令端口+1','Defaults to signal port + 1')"/>
-                    <div class="form-text" x-text="t('WebRTC 数据传输端口（留空自动使用监听端口+1）','WebRTC data port (auto: listen port + 1)')"></div>
+                           :placeholder="t('默认为监听端口','Defaults to listen port')"/>
+                    <div class="form-text" x-text="t('WebRTC 数据传输端口（留空自动使用监听端口）','WebRTC data port (auto: listen port)')"></div>
                   </div>
                 </div>
               </div>
@@ -1443,15 +1448,29 @@
             </form>
             <!-- Tab 2: ACME 自动申请与续签 -->
             <form style="display:none" x-show="certTab === 'acme'" @submit.prevent="submitACMECert()">
+              <!-- 平台已就绪全局 LiteSSL ACME 配置时的快捷提示条 -->
+              <div class="alert alert-success py-2 small mb-2 d-flex justify-content-between align-items-center" x-show="publicACME && publicACME.configured && publicACME.allow_user_apply">
+                <div>
+                  <i class="bi bi-check-circle-fill me-1"></i>
+                  <span x-text="t('平台已配置全局 LiteSSL 签发账号，无需填写 EAB 凭据，只需选择验证方式并输入域名即可签发！', 'Platform global LiteSSL account is ready. Select a validation method and enter your domain to issue!')"></span>
+                </div>
+                <div class="form-check form-switch mb-0" x-show="isAdmin || !useGlobalACME">
+                  <input class="form-check-input" type="checkbox" id="chkUseGlobalACME" x-model="useGlobalACME"/>
+                  <label class="form-check-label small" for="chkUseGlobalACME" x-text="t('使用平台 LiteSSL 账号','Use Platform LiteSSL')"></label>
+                </div>
+              </div>
+
               <div class="row g-2">
-                <div class="col-md-4">
+                <div class="col-md-6" :class="isUsingGlobalACME() ? 'col-md-6' : 'col-md-4'">
                   <label class="form-label small mb-1"><span x-text="t('证书名称','Certificate Name')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm" x-model="certForm.name" :placeholder="t('如：泛域名自动续签','e.g. wildcard auto-renew')"/>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-6" :class="isUsingGlobalACME() ? 'col-md-6' : 'col-md-4'">
                   <label class="form-label small mb-1"><span x-text="t('申请域名（支持泛域名，多个用逗号分隔）','Domains (comma separated, wildcard ok)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.domains" placeholder="mc.example.com, *.mc.example.com"/>
                 </div>
+                <div class="col-12" x-show="!isUsingGlobalACME()">
+                  <div class="row g-2">
                 <div class="col-md-4">
                   <label class="form-label small mb-1"><span x-text="t('证书颁发机构 (CA)','Certificate Authority')"></span> <span class="text-danger">*</span></label>
                   <select class="form-select form-select-sm" x-model="certForm.ca">
@@ -1487,12 +1506,16 @@
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.eab_hmac_key"/>
                   <div class="form-text" x-text="t('创建时仅显示一次，请妥善保存','Shown only once at creation — keep it safe')"></div>
                 </div>
+                  </div>
+                </div>
 
+
+                <!-- 验证方式（始终由用户自由设置） -->
                 <div class="col-md-4">
                   <label class="form-label small mb-1"><span x-text="t('验证方式','Challenge Type')"></span> <span class="text-danger">*</span></label>
                   <select class="form-select form-select-sm" x-model="certForm.challenge">
                     <option value="manualdns" x-text="t('DNS 手动解析（推荐 · 零凭据 · 支持泛域名）','Manual DNS (recommended · no credentials · wildcard ok)')"></option>
-                    <option value="dns01" x-text="t('DNS API 自动解析（需 DNS 服务商凭据）','DNS API auto (requires DNS provider credentials)')"></option>
+                    <option value="dns01" x-text="t('DNS API 自动解析（需填个人 DNS 凭据）','DNS API auto (requires DNS provider credentials)')"></option>
                     <option value="http01" x-text="t('HTTP-01 文件验证（仅单域名 · 需 80 端口公网可达）','HTTP-01 (single domain · needs port 80)')"></option>
                   </select>
                   <div class="form-text" x-show="certForm.challenge === 'manualdns'" x-cloak
@@ -1502,35 +1525,57 @@
                 <!-- DNS API 服务商选择（仅 DNS API 自动解析时显示） -->
                 <div class="col-md-4" x-show="certForm.challenge === 'dns01'">
                   <label class="form-label small mb-1"><span x-text="t('DNS 服务商','DNS Provider')"></span> <span class="text-danger">*</span></label>
-                  <select class="form-select form-select-sm" x-model="certForm.dns_provider">
+                  <select class="form-select form-select-sm" x-model="certForm.dns_provider" @change="onCertDNSProviderChange()">
                     <option value="cloudflare" x-text="t('Cloudflare','Cloudflare')"></option>
                     <option value="aliyun" x-text="t('阿里云','Aliyun')"></option>
                     <option value="dnspod" x-text="t('腾讯云 DNSPod','Tencent DNSPod')"></option>
                   </select>
                 </div>
 
+                <!-- DNS 账号凭据选择（可从保存的凭据中免密选择） -->
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01'">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <label class="form-label small mb-0"><span x-text="t('已存 DNS 凭据账号','DNS Credential')"></span></label>
+                    <a href="#" class="small text-decoration-none" @click.prevent="openDNSModalFromCerts()" x-text="t('+ 管理/新建账号','+ Manage')"></a>
+                  </div>
+                  <select class="form-select form-select-sm" x-model="certForm.dns_credential_id">
+                    <option value="" x-text="t('临时手动输入 Token / 密钥...','Manual Token/Secret...')"></option>
+                    <template x-for="dc in filteredDNSCredentials()" :key="dc.id">
+                      <option :value="dc.id" x-text="dc.name + ' (' + dnsProviderLabel(dc.provider) + ')'"></option>
+                    </template>
+                  </select>
+                </div>
+
+                <!-- 已绑定保存的账号提示 -->
+                <div class="col-12" x-show="certForm.challenge === 'dns01' && certForm.dns_credential_id" x-cloak>
+                  <div class="alert alert-success py-1 px-2 small mb-0 d-flex align-items-center">
+                    <i class="bi bi-shield-lock-fill me-1"></i>
+                    <span x-text="t('已绑定所选 DNS 账号，申请与自动续签将直接复用该凭据，无需每次手动输入密钥 Token。','Saved DNS credential active. Tokens/Secrets are safely reused without re-typing.')"></span>
+                  </div>
+                </div>
+
                 <!-- Cloudflare API Token -->
-                <div class="col-md-8" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'cloudflare'">
+                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && !certForm.dns_credential_id && certForm.dns_provider === 'cloudflare'">
                   <label class="form-label small mb-1"><span x-text="t('Cloudflare API Token（需具备 Zone.DNS 编辑权限）','Cloudflare API Token (Zone.DNS Edit)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.cf_token" placeholder="粘贴 Cloudflare API Token"/>
                 </div>
 
                 <!-- 阿里云 AccessKey -->
-                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'aliyun'">
+                <div class="col-md-2" x-show="certForm.challenge === 'dns01' && !certForm.dns_credential_id && certForm.dns_provider === 'aliyun'">
                   <label class="form-label small mb-1">AccessKey ID <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.ali_ak"/>
                 </div>
-                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'aliyun'">
+                <div class="col-md-2" x-show="certForm.challenge === 'dns01' && !certForm.dns_credential_id && certForm.dns_provider === 'aliyun'">
                   <label class="form-label small mb-1">AccessKey Secret <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.ali_sk"/>
                 </div>
 
                 <!-- 腾讯云 SecretId / SecretKey -->
-                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'dnspod'">
+                <div class="col-md-2" x-show="certForm.challenge === 'dns01' && !certForm.dns_credential_id && certForm.dns_provider === 'dnspod'">
                   <label class="form-label small mb-1">SecretId <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.tc_id"/>
                 </div>
-                <div class="col-md-4" x-show="certForm.challenge === 'dns01' && certForm.dns_provider === 'dnspod'">
+                <div class="col-md-2" x-show="certForm.challenge === 'dns01' && !certForm.dns_credential_id && certForm.dns_provider === 'dnspod'">
                   <label class="form-label small mb-1">SecretKey <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.tc_key"/>
                 </div>
@@ -1669,6 +1714,138 @@
     </div>
   </div>
 </div>
+
+<!-- ============================================================
+     DNS Providers Modal（DNS API 凭据管理）
+     ============================================================ -->
+<div class="modal fade" id="dnsModal" tabindex="-1" aria-labelledby="dnsModalLabel">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="dnsModalLabel">
+          <i class="bi bi-globe2 me-2"></i><span x-text="t('DNS 提供商凭据管理','DNS Providers & Credentials')"></span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-danger py-2 small" x-show="dnsError" x-text="dnsError" x-cloak></div>
+
+        <!-- 凭据录入/编辑卡片 -->
+        <div class="card mb-3 border-secondary-subtle">
+          <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span class="fw-semibold small" x-text="dnsForm.id ? t('编辑 DNS 凭证','Edit DNS Credential') : t('添加 DNS 凭据（保存后申请证书一键免密选择，支持 Cloudflare / 阿里云 / 腾讯云 DNSPod）','Add DNS Credential')"></span>
+            <button type="button" class="btn btn-xs btn-outline-secondary" x-show="dnsForm.id"
+                    @click="resetDNSForm()" x-text="t('取消编辑','Cancel Edit')"></button>
+          </div>
+          <div class="card-body py-3">
+            <form class="row g-2" @submit.prevent="submitSaveDNS()">
+              <div class="col-md-4">
+                <label class="form-label small mb-1"><span x-text="t('凭据别名','Credential Name')"></span> <span class="text-danger">*</span></label>
+                <input class="form-control form-control-sm" x-model="dnsForm.name" :placeholder="t('如：我的 Cloudflare / 公司阿里云','e.g. My Cloudflare')"/>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small mb-1"><span x-text="t('DNS 服务商','Provider')"></span> <span class="text-danger">*</span></label>
+                <select class="form-select form-select-sm" x-model="dnsForm.provider">
+                  <option value="cloudflare" x-text="t('Cloudflare','Cloudflare')"></option>
+                  <option value="aliyun" x-text="t('阿里云 DNS','Aliyun DNS')"></option>
+                  <option value="dnspod" x-text="t('腾讯云 DNSPod','Tencent DNSPod')"></option>
+                </select>
+              </div>
+              <div class="col-md-4" style="display:none" x-show="isAdmin">
+                <label class="form-label small mb-1" x-text="t('归属用户（留空为全局共享）','Owner (empty = shared)')"></label>
+                <select class="form-select form-select-sm" x-model="dnsForm.user_id">
+                  <option value="" x-text="t('全局共享 / 管理员','Shared / Admin')"></option>
+                  <template x-for="u in users" :key="u.id">
+                    <option :value="u.id" x-text="u.username"></option>
+                  </template>
+                </select>
+              </div>
+
+              <!-- Cloudflare -->
+              <div class="col-12" x-show="dnsForm.provider === 'cloudflare'">
+                <label class="form-label small mb-1"><span x-text="t('Cloudflare API Token（需具备 Zone.DNS 编辑权限）','API Token (Zone.DNS Edit)')"></span> <span class="text-danger" x-show="!dnsForm.id">*</span></label>
+                <input class="form-control form-control-sm font-monospace" type="password" x-model="dnsForm.cf_token" :placeholder="dnsForm.id ? t('留空表示保留原 Token','Leave blank to keep existing token') : t('粘贴 Cloudflare API Token','Paste Cloudflare API Token')"/>
+              </div>
+
+              <!-- 阿里云 -->
+              <div class="col-md-6" x-show="dnsForm.provider === 'aliyun'">
+                <label class="form-label small mb-1">AccessKey ID <span class="text-danger" x-show="!dnsForm.id">*</span></label>
+                <input class="form-control form-control-sm font-monospace" x-model="dnsForm.ali_ak" :placeholder="dnsForm.id ? t('留空表示保留原 AccessKey ID','Leave blank to keep existing') : ''"/>
+              </div>
+              <div class="col-md-6" x-show="dnsForm.provider === 'aliyun'">
+                <label class="form-label small mb-1">AccessKey Secret <span class="text-danger" x-show="!dnsForm.id">*</span></label>
+                <input class="form-control form-control-sm font-monospace" type="password" x-model="dnsForm.ali_sk" :placeholder="dnsForm.id ? t('留空表示保留原 Secret','Leave blank to keep existing') : ''"/>
+              </div>
+
+              <!-- 腾讯云 DNSPod -->
+              <div class="col-md-6" x-show="dnsForm.provider === 'dnspod'">
+                <label class="form-label small mb-1">SecretId <span class="text-danger" x-show="!dnsForm.id">*</span></label>
+                <input class="form-control form-control-sm font-monospace" x-model="dnsForm.tc_id" :placeholder="dnsForm.id ? t('留空表示保留原 SecretId','Leave blank to keep existing') : ''"/>
+              </div>
+              <div class="col-md-6" x-show="dnsForm.provider === 'dnspod'">
+                <label class="form-label small mb-1">SecretKey <span class="text-danger" x-show="!dnsForm.id">*</span></label>
+                <input class="form-control form-control-sm font-monospace" type="password" x-model="dnsForm.tc_key" :placeholder="dnsForm.id ? t('留空表示保留原 SecretKey','Leave blank to keep existing') : ''"/>
+              </div>
+
+              <div class="col-12 text-end mt-2">
+                <button type="submit" class="btn btn-sm btn-primary" :disabled="dnsBusy">
+                  <i class="bi bi-check-lg me-1"></i><span x-text="dnsForm.id ? t('保存修改','Save Changes') : t('添加凭证','Add Credential')"></span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+        <!-- 凭据列表 -->
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle mb-0">
+            <thead>
+              <tr>
+                <th x-text="t('别名','Name')"></th>
+                <th x-text="t('服务商','Provider')"></th>
+                <th style="width:120px" style="display:none" x-show="isAdmin" x-text="t('归属','Owner')"></th>
+                <th x-text="t('凭据状态','Credentials')"></th>
+                <th style="width:140px" x-text="t('更新时间','Updated')"></th>
+                <th style="width:90px" class="text-end" x-text="t('操作','Actions')"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in dnsCredentials" :key="c.id">
+                <tr>
+                  <td class="fw-semibold small" x-text="c.name"></td>
+                  <td>
+                    <span class="badge" :class="dnsProviderBadgeClass(c.provider)" x-text="dnsProviderLabel(c.provider)"></span>
+                  </td>
+                  <td class="small text-muted" style="display:none" x-show="isAdmin" x-text="c.user_id ? (users.find(u => u.id === c.user_id)?.username || c.user_id) : t('全局共享','Shared')"></td>
+                  <td class="small font-monospace">
+                    <template x-for="(v, k) in (c.masked_credentials || {})" :key="k">
+                      <span class="badge bg-secondary-subtle text-body-secondary border border-secondary-subtle me-1"><span class="text-secondary" x-text="k"></span>: <span class="font-monospace text-body" x-text="v"></span></span>
+                    </template>
+                  </td>
+                  <td class="small text-muted" x-text="fmtDateOnly(c.updated_at || c.created_at)"></td>
+                  <td class="text-end">
+                    <div class="btn-group btn-group-sm">
+                      <button class="btn btn-xs btn-outline-secondary" @click="editDNSCredential(c)" :title="t('编辑','Edit')">
+                        <i class="bi bi-pencil"></i>
+                      </button>
+                      <button class="btn btn-xs btn-outline-danger" @click="deleteDNSCredential(c)" :title="t('删除','Delete')">
+                        <i class="bi bi-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="dnsCredentials.length === 0">
+                <td colspan="6" class="text-center text-muted py-3 small"
+                    x-text="t('暂无已保存的 DNS 凭证，在上方添加后，申请证书时可一键免密选择。','No saved DNS credentials. Add one above to select without typing tokens next time.')"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 
 
@@ -1873,10 +2050,74 @@
             <i class="bi bi-gear me-1"></i><span x-text="t('配置','Configure')"></span>
           </button>
         </div>
+        <hr/>
+        <div class="d-flex align-items-center justify-content-between">
+          <div class="small">
+            <i class="bi bi-shield-lock me-1"></i>
+            <span x-text="t('全局 ACME / LiteSSL 证书','Global ACME / LiteSSL')"></span>:
+            <span class="badge rounded-pill" :class="acmeConfigured() ? 'text-bg-success' : 'text-bg-secondary'"
+                  x-text="acmeConfigured() ? t('已配置','Configured') : t('未配置','Not configured')"></span>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary btn-icon" @click="showACMEConfigModal()">
+            <i class="bi bi-gear me-1"></i><span x-text="t('配置','Configure')"></span>
+          </button>
+        </div>
+
       </div>
     </div>
   </div>
 </div>
+<!-- ============================================================
+     ACME Config Modal（平台全局 LiteSSL 签发账号配置；密钥存 bbolt，永不回显）
+     ============================================================ -->
+<div class="modal fade" id="acmeConfigModal" tabindex="-1" aria-labelledby="acmeConfigModalLabel">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="acmeConfigModalLabel"><i class="bi bi-shield-lock-fill me-2"></i><span x-text="t('平台全局 LiteSSL (ACME) 账号配置','Platform Global LiteSSL (ACME) Settings')"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-info py-2 small" x-text="t('管理员在此统一配置 FreeSSL / LiteSSL 的 ACME 目录与 EAB 账号凭据。启用后，普通用户申请 LiteSSL 证书时无需自己申请和填写 EAB KID / HMAC Key，只需选择验证方式并输入域名即可签发。','Configure platform-level LiteSSL ACME directory and EAB credentials. Once enabled, users can issue LiteSSL certificates without providing their own EAB credentials.')"></div>
+        <form class="row g-2" @submit.prevent="saveACMEConfig()">
+          <div class="col-12">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="chkACMEEnabled" x-model="acmeConfigForm.enabled"/>
+              <label class="form-check-label small" for="chkACMEEnabled" x-text="t('启用平台全局 LiteSSL (ACME) 账号','Enable Platform Global LiteSSL Account')"></label>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="chkACMEAllowUser" x-model="acmeConfigForm.allow_user_apply"/>
+              <label class="form-check-label small" for="chkACMEAllowUser" x-text="t('允许租户免配置使用平台 LiteSSL 凭据申请证书','Allow users to issue LiteSSL certs using platform EAB credentials')"></label>
+            </div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('ACME 目录地址','ACME Directory URL')"></label>
+            <input class="form-control form-control-sm font-monospace" x-model="acmeConfigForm.directory_url" placeholder="https://acme.freessl.cn/directory"/>
+            <div class="form-text" x-text="t('已预填 LiteSSL 官方地址，一般无需修改。','Pre-filled with the official LiteSSL directory URL.')"></div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1"><span x-text="t('EAB KID','EAB KID')"></span> <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm font-monospace" x-model="acmeConfigForm.eab_kid"/>
+            <div class="form-text" x-text="t('FreeSSL 控制台「ACME 账号管理」获取','From FreeSSL console: ACME Account Management')"></div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small mb-1"><span x-text="t('EAB HMAC Key','EAB HMAC Key')"></span> <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm font-monospace" type="password" x-model="acmeConfigForm.eab_hmac_key"
+                   :placeholder="acmeConfigHasHMAC ? t('已保存（留空 = 不修改）','saved (blank = keep)') : ''"/>
+            <div class="form-text" x-text="t('密钥保存后永不回显','Never echoed after saving')"></div>
+          </div>
+
+          <div class="col-12 mt-3">
+            <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="acmeConfigSaving" x-text="t('保存配置','Save Configuration')"></button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 <!-- ============================================================
      SMTP Modal（发信配置；密码存 bbolt，永不回显）
@@ -2303,6 +2544,12 @@ function portForwardApp() {
 	    smtpTestTo: '',
 	    smtpSaving: false, smtpTestSending: false,
 	    _smtpModal: null,
+	    acmeConfigForm: { enabled:false, allow_user_apply:true, directory_url:'https://acme.freessl.cn/directory', eab_kid:'', eab_hmac_key:'' },
+	    acmeConfigHasHMAC: false, acmeConfigSaving: false,
+	    _acmeConfigModal: null,
+	    publicACME: { configured:false, allow_user_apply:false, ca:'' },
+	    useGlobalACME: true,
+
 	    portBusy: false,
 	    portHint: '',
 	    portAvailable: false,
@@ -2315,6 +2562,17 @@ function portForwardApp() {
 	    _groupsModal: null,
 	    _settingsModal: null,
 	    _accountModal: null,
+	    _dnsModal: null,
+
+	    // DNS 提供商凭据管理
+	    dnsCredentials: [],
+	    dnsBusy: false,
+	    dnsError: '',
+	    dnsForm: {
+	      id: '', name: '', user_id: '',
+	      provider: 'cloudflare',
+	      cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: ''
+	    },
 
 	    // SSL 证书管理与 ACME 自动续签
 	    certificates: [],
@@ -2328,8 +2586,9 @@ function portForwardApp() {
 	      email: '',                // 仅 Let's Encrypt 需要
 	      directory_url: '',        // 仅 LiteSSL 需要（FreeSSL 控制台获取）
 	      eab_kid: '', eab_hmac_key: '',
-	      challenge: 'dns01',       // dns01 | http01
+	      challenge: 'manualdns',   // manualdns | dns01 | http01
 	      dns_provider: 'cloudflare',
+	      dns_credential_id: '',    // 选中的已存 DNS 凭据 ID
 	      cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
 	      auto_renew: true
 	    },
@@ -2369,6 +2628,9 @@ function portForwardApp() {
       this._groupsModal = new bootstrap.Modal(document.getElementById('groupsModal'))
       this._settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'))
       this._smtpModal = new bootstrap.Modal(document.getElementById('smtpModal'))
+      this._acmeConfigModal = new bootstrap.Modal(document.getElementById('acmeConfigModal'))
+      this._dnsModal = new bootstrap.Modal(document.getElementById('dnsModal'))
+
       this._accountModal = new bootstrap.Modal(document.getElementById('accountModal'))
       this._sessionsModal = new bootstrap.Modal(document.getElementById('sessionsModal'))
       const sessionsModalEl = document.getElementById('sessionsModal')
@@ -2654,10 +2916,29 @@ function portForwardApp() {
 
     // --- SSL 证书管理与 ACME 自动续签 ---
 
+    isUsingGlobalACME() {
+      return !!(this.useGlobalACME && this.publicACME && this.publicACME.configured && this.publicACME.allow_user_apply)
+    },
+
+    async loadPublicACMEStatus() {
+      try {
+        const res = await fetch('/api/certificates/acme/status')
+        const d = await res.json()
+        if (d.success && d.data) {
+          this.publicACME = d.data
+          if (this.publicACME.configured && this.publicACME.allow_user_apply) {
+            this.useGlobalACME = true
+          }
+        }
+      } catch (e) {}
+    },
+
     showCertsModal() {
       this.certError = ''
       this.resetCertForm()
+      this.loadPublicACMEStatus()
       if (this.isAdmin && this.users.length === 0) this.loadUsers()
+      this.loadDNSCredentials()
       this.loadCertificates()
       this._certsModal.show()
     },
@@ -2679,9 +2960,172 @@ function portForwardApp() {
         eab_kid: '', eab_hmac_key: '',
         challenge: 'manualdns',
         dns_provider: 'cloudflare',
+        dns_credential_id: '',
         cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: '',
         auto_renew: true
       }
+      this.autoSelectDNSCredential()
+    },
+
+    // --- DNS 提供商凭据管理 ---
+
+    showDNSModal() {
+      this.dnsError = ''
+      this.resetDNSForm()
+      if (this.isAdmin && this.users.length === 0) this.loadUsers()
+      this.loadDNSCredentials()
+      this._dnsModal.show()
+    },
+
+    openDNSModalFromCerts() {
+      if (this._certsModal) this._certsModal.hide()
+      window.setTimeout(() => this.showDNSModal(), 200)
+    },
+
+    resetDNSForm() {
+      this.dnsError = ''
+      this.dnsForm = {
+        id: '',
+        name: '',
+        user_id: this.isAdmin ? '' : (this.me.id || ''),
+        provider: 'cloudflare',
+        cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: ''
+      }
+    },
+
+    async loadDNSCredentials() {
+      try {
+        const res = await fetch('/api/dns-credentials')
+        const d = await res.json()
+        if (d.success) {
+          this.dnsCredentials = d.data || []
+          this.autoSelectDNSCredential()
+        }
+      } catch (e) {}
+    },
+
+    filteredDNSCredentials() {
+      const prov = (this.certForm && this.certForm.dns_provider) || 'cloudflare'
+      return (this.dnsCredentials || []).filter(c => c.provider === prov)
+    },
+
+    autoSelectDNSCredential() {
+      const list = this.filteredDNSCredentials()
+      if (list.length > 0) {
+        if (!this.certForm.dns_credential_id || !list.some(c => c.id === this.certForm.dns_credential_id)) {
+          this.certForm.dns_credential_id = list[0].id
+        }
+      } else {
+        this.certForm.dns_credential_id = ''
+      }
+    },
+
+    onCertDNSProviderChange() {
+      this.autoSelectDNSCredential()
+    },
+
+    dnsProviderLabel(p) {
+      switch (p) {
+        case 'cloudflare': return 'Cloudflare'
+        case 'aliyun': return _t('阿里云 DNS', 'Aliyun DNS')
+        case 'dnspod': return _t('腾讯云 DNSPod', 'Tencent DNSPod')
+        default: return p || '-'
+      }
+    },
+
+    dnsProviderBadgeClass(p) {
+      switch (p) {
+        case 'cloudflare': return 'text-bg-warning'
+        case 'aliyun': return 'text-bg-primary'
+        case 'dnspod': return 'text-bg-info'
+        default: return 'text-bg-secondary'
+      }
+    },
+
+    editDNSCredential(c) {
+      this.dnsError = ''
+      this.dnsForm = {
+        id: c.id,
+        name: c.name || '',
+        user_id: c.user_id || '',
+        provider: c.provider || 'cloudflare',
+        cf_token: '', ali_ak: '', ali_sk: '', tc_id: '', tc_key: ''
+      }
+    },
+
+    async submitSaveDNS() {
+      this.dnsError = ''
+      if (!this.dnsForm.name.trim()) {
+        this.dnsError = _t('请填写凭证别名', 'Credential name is required')
+        return
+      }
+      const isEdit = !!this.dnsForm.id
+      const creds = {}
+      if (this.dnsForm.provider === 'cloudflare') {
+        if (!isEdit && !this.dnsForm.cf_token.trim()) {
+          this.dnsError = _t('请填写 Cloudflare API Token', 'Cloudflare API Token is required')
+          return
+        }
+        if (this.dnsForm.cf_token.trim()) creds.api_token = this.dnsForm.cf_token.trim()
+      } else if (this.dnsForm.provider === 'aliyun') {
+        if (!isEdit && (!this.dnsForm.ali_ak.trim() || !this.dnsForm.ali_sk.trim())) {
+          this.dnsError = _t('请填写阿里云 AccessKey ID 与 Secret', 'Aliyun AccessKey ID and Secret are required')
+          return
+        }
+        if (this.dnsForm.ali_ak.trim()) creds.access_key_id = this.dnsForm.ali_ak.trim()
+        if (this.dnsForm.ali_sk.trim()) creds.access_key_secret = this.dnsForm.ali_sk.trim()
+      } else if (this.dnsForm.provider === 'dnspod') {
+        if (!isEdit && (!this.dnsForm.tc_id.trim() || !this.dnsForm.tc_key.trim())) {
+          this.dnsError = _t('请填写腾讯云 DNSPod SecretId 与 SecretKey', 'Tencent Cloud SecretId and SecretKey are required')
+          return
+        }
+        if (this.dnsForm.tc_id.trim()) creds.secret_id = this.dnsForm.tc_id.trim()
+        if (this.dnsForm.tc_key.trim()) creds.secret_key = this.dnsForm.tc_key.trim()
+      }
+      this.dnsBusy = true
+      try {
+        const url = isEdit ? ('/api/dns-credentials/' + this.dnsForm.id) : '/api/dns-credentials'
+        const method = isEdit ? 'PUT' : 'POST'
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: this.dnsForm.name.trim(),
+            user_id: this.dnsForm.user_id || '',
+            provider: this.dnsForm.provider,
+            credentials: creds
+          })
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('DNS 凭据已保存', 'DNS credential saved'))
+          this.resetDNSForm()
+          await this.loadDNSCredentials()
+        } else {
+          this.dnsError = d.message || _t('保存失败', 'Failed to save')
+        }
+      } catch (e) {
+        this.dnsError = _t('网络错误: ', 'Network error: ') + e.message
+      } finally {
+        this.dnsBusy = false
+      }
+    },
+
+    async deleteDNSCredential(c) {
+      showConfirm(_t('确定要删除 DNS 凭据「' + c.name + '」吗？', 'Delete DNS credential "' + c.name + '"?'), async () => {
+        try {
+          const res = await fetch('/api/dns-credentials/' + c.id, { method: 'DELETE' })
+          const d = await res.json()
+          if (d.success) {
+            showToast('success', d.message || _t('已删除', 'Deleted'))
+            await this.loadDNSCredentials()
+          } else {
+            this.dnsError = d.message || _t('删除失败', 'Delete failed')
+          }
+        } catch (e) {
+          this.dnsError = _t('网络错误: ', 'Network error: ') + e.message
+        }
+      })
     },
 
     // 手动 DNS 解析的中间状态（第二步展示 TXT 记录用）
@@ -2689,7 +3133,8 @@ function portForwardApp() {
 
     // 把「CA + 验证方式」拼成后端 provider 复合值，与 models.BuildProvider 一致。
     buildCertProvider() {
-      const ca = this.certForm.ca === 'litessl' ? 'litessl' : 'letsencrypt'
+      const useGlobal = this.isUsingGlobalACME()
+      const ca = useGlobal ? 'litessl' : (this.certForm.ca === 'litessl' ? 'litessl' : 'letsencrypt')
       const ch = this.certForm.challenge
       if (ch === 'http01') return ca === 'litessl' ? 'litessl_http01' : 'http01'
       if (ch === 'manualdns') return ca === 'litessl' ? 'litessl_manualdns' : 'manualdns'
@@ -2714,36 +3159,42 @@ function portForwardApp() {
         this.certError = _t('请填写至少一个域名', 'At least one domain is required')
         return
       }
-      const isLiteSSL = this.certForm.ca === 'litessl'
-      if (isLiteSSL) {
-        if (!this.certForm.eab_kid.trim() || !this.certForm.eab_hmac_key.trim()) {
-          this.certError = _t('请填写 LiteSSL 的 EAB KID 与 HMAC Key', 'LiteSSL EAB KID and HMAC Key are required')
+      const useGlobal = this.isUsingGlobalACME()
+      const isLiteSSL = useGlobal || (this.certForm.ca === 'litessl')
+      if (!useGlobal) {
+        if (isLiteSSL) {
+          if (!this.certForm.eab_kid.trim() || !this.certForm.eab_hmac_key.trim()) {
+            this.certError = _t('请填写 LiteSSL 的 EAB KID 与 HMAC Key', 'LiteSSL EAB KID and HMAC Key are required')
+            return
+          }
+        } else if (!this.certForm.email.trim()) {
+          this.certError = _t("Let's Encrypt 需要填写通知邮箱", "Let's Encrypt requires an email address")
           return
         }
-      } else if (!this.certForm.email.trim()) {
-        this.certError = _t("Let's Encrypt 需要填写通知邮箱", "Let's Encrypt requires an email address")
-        return
       }
       const creds = {}
-      if (isLiteSSL) {
+      if (!useGlobal && isLiteSSL) {
         creds.eab_kid = this.certForm.eab_kid.trim()
         creds.eab_hmac_key = this.certForm.eab_hmac_key.trim()
       }
       this.certBusy = true
       try {
+        const payload = {
+          name: this.certForm.name.trim(),
+          user_id: this.certForm.user_id || '',
+          domains,
+          provider: this.buildCertProvider(),
+          credentials: creds,
+          auto_renew: !!this.certForm.auto_renew
+        }
+        if (!useGlobal) {
+          payload.email = isLiteSSL ? '' : this.certForm.email.trim()
+          payload.directory_url = isLiteSSL ? (this.certForm.directory_url.trim() || '') : ''
+        }
         const res = await fetch('/api/certificates/acme/prepare', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: this.certForm.name.trim(),
-            user_id: this.certForm.user_id || '',
-            domains,
-            email: isLiteSSL ? '' : this.certForm.email.trim(),
-            provider: this.buildCertProvider(),
-            directory_url: isLiteSSL ? (this.certForm.directory_url.trim() || '') : '',
-            credentials: creds,
-            auto_renew: !!this.certForm.auto_renew
-          })
+          body: JSON.stringify(payload)
         })
         const d = await res.json()
         if (d.success && d.data && d.data.records && d.data.records.length) {
@@ -2841,6 +3292,13 @@ function portForwardApp() {
       return _t('到期: ', 'Expires: ') + d.toISOString().slice(0, 10)
     },
 
+    fmtDateOnly(iso) {
+      if (!iso) return '—'
+      const d = new Date(iso)
+      if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return '—'
+      return d.toISOString().slice(0, 10)
+    },
+
     readCertFile(ev, field) {
       const file = ev.target.files && ev.target.files[0]
       if (!file) return
@@ -2901,59 +3359,70 @@ function portForwardApp() {
         this.certError = _t('请填写至少一个域名', 'At least one domain is required')
         return
       }
-      const isLiteSSL = this.certForm.ca === 'litessl'
-      // LiteSSL 走 EAB 免邮箱；Let's Encrypt 必须留邮箱。
-      if (!isLiteSSL && !this.certForm.email.trim()) {
-        this.certError = _t("Let's Encrypt 需要填写通知邮箱", "Let's Encrypt requires an email address")
-        return
-      }
-      if (isLiteSSL) {
-        if (!this.certForm.eab_kid.trim() || !this.certForm.eab_hmac_key.trim()) {
-          this.certError = _t('请填写 LiteSSL 的 EAB KID 与 HMAC Key',
-                              'LiteSSL EAB KID and HMAC Key are required')
+      const useGlobal = this.isUsingGlobalACME()
+      const isLiteSSL = useGlobal || (this.certForm.ca === 'litessl')
+      const challenge = this.certForm.challenge
+
+      if (!useGlobal) {
+        // 自定义配置：LiteSSL 走 EAB 免邮箱；Let's Encrypt 必须留邮箱。
+        if (!isLiteSSL && !this.certForm.email.trim()) {
+          this.certError = _t("Let's Encrypt 需要填写通知邮箱", "Let's Encrypt requires an email address")
           return
         }
+        if (isLiteSSL) {
+          if (!this.certForm.eab_kid.trim() || !this.certForm.eab_hmac_key.trim()) {
+            this.certError = _t('请填写 LiteSSL 的 EAB KID 与 HMAC Key',
+                                'LiteSSL EAB KID and HMAC Key are required')
+            return
+          }
+        }
       }
-      const isHTTP01 = this.certForm.challenge === 'http01'
+      const isHTTP01 = challenge === 'http01'
       if (isHTTP01 && domains.some(d => d.startsWith('*.'))) {
         this.certError = _t('HTTP-01 验证不支持泛域名，泛域名请改用 DNS 验证',
                             'HTTP-01 does not support wildcard domains; use DNS validation instead')
         return
       }
       // 手动 DNS 解析走两段式流程：先取 TXT 记录，用户添加后再验证
-      if (this.certForm.challenge === 'manualdns') {
+      if (challenge === 'manualdns') {
         await this.submitManualDNSPrepare()
         return
       }
       const creds = {}
-      if (this.certForm.dns_provider === 'cloudflare') {
-        creds.api_token = this.certForm.cf_token.trim()
-      } else if (this.certForm.dns_provider === 'aliyun') {
-        creds.access_key_id = this.certForm.ali_ak.trim()
-        creds.access_key_secret = this.certForm.ali_sk.trim()
-      } else if (this.certForm.dns_provider === 'dnspod') {
-        creds.secret_id = this.certForm.tc_id.trim()
-        creds.secret_key = this.certForm.tc_key.trim()
+      if (!this.certForm.dns_credential_id) {
+        if (this.certForm.dns_provider === 'cloudflare') {
+          creds.api_token = this.certForm.cf_token.trim()
+        } else if (this.certForm.dns_provider === 'aliyun') {
+          creds.access_key_id = this.certForm.ali_ak.trim()
+          creds.access_key_secret = this.certForm.ali_sk.trim()
+        } else if (this.certForm.dns_provider === 'dnspod') {
+          creds.secret_id = this.certForm.tc_id.trim()
+          creds.secret_key = this.certForm.tc_key.trim()
+        }
       }
-      if (isLiteSSL) {
+      if (!useGlobal && isLiteSSL) {
         creds.eab_kid = this.certForm.eab_kid.trim()
         creds.eab_hmac_key = this.certForm.eab_hmac_key.trim()
       }
       this.certBusy = true
       try {
+        const payload = {
+          name: this.certForm.name.trim(),
+          user_id: this.certForm.user_id || '',
+          domains,
+          provider: this.buildCertProvider(),
+          dns_credential_id: this.certForm.dns_credential_id || '',
+          credentials: creds,
+          auto_renew: !!this.certForm.auto_renew
+        }
+        if (!useGlobal) {
+          payload.email = isLiteSSL ? '' : this.certForm.email.trim()
+          payload.directory_url = isLiteSSL ? this.certForm.directory_url.trim() : ''
+        }
         const res = await fetch('/api/certificates/acme', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: this.certForm.name.trim(),
-            user_id: this.certForm.user_id || '',
-            domains,
-            email: isLiteSSL ? '' : this.certForm.email.trim(),
-            provider: this.buildCertProvider(),
-            directory_url: isLiteSSL ? this.certForm.directory_url.trim() : '',
-            credentials: creds,
-            auto_renew: !!this.certForm.auto_renew
-          })
+          body: JSON.stringify(payload)
         })
         const d = await res.json()
         if (d.success) {
@@ -3549,6 +4018,65 @@ function portForwardApp() {
       } catch (e) {
         showToast('danger', _t('网络错误: ','Network error: ') + e.message)
       } finally { this.smtpTestSending = false }
+    },
+
+    // --- 全局 ACME / LiteSSL 平台配置（仅管理员）---
+
+    acmeConfigured() {
+      return !!(this.globalSettings && this.globalSettings.acme_configured)
+    },
+
+    showACMEConfigModal() {
+      this._acmeConfigModal.show()
+      fetch('/api/acme-config').then(r => r.json()).then(d => {
+        if (!d.success) return
+        const v = d.data || {}
+        this.acmeConfigForm = {
+          enabled: !!v.enabled,
+          allow_user_apply: v.allow_user_apply !== false,
+          directory_url: v.directory_url || 'https://acme.freessl.cn/directory',
+          eab_kid: v.eab_kid || '',
+          eab_hmac_key: ''
+        }
+        this.acmeConfigHasHMAC = !!v.has_eab_hmac_key
+      })
+      fetch('/api/settings').then(r => r.json()).then(d => {
+        if (d.success && d.data) this.globalSettings = d.data
+      })
+    },
+
+    async saveACMEConfig() {
+      this.acmeConfigSaving = true
+      try {
+        const payload = {
+          enabled: !!this.acmeConfigForm.enabled,
+          allow_user_apply: !!this.acmeConfigForm.allow_user_apply,
+          directory_url: this.acmeConfigForm.directory_url.trim(),
+          eab_kid: this.acmeConfigForm.eab_kid.trim(),
+          eab_hmac_key: this.acmeConfigForm.eab_hmac_key // 留空 = 服务端保留原值
+        }
+        const res = await fetch('/api/acme-config', {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(payload)
+        })
+        const d = await res.json()
+        if (d.success) {
+          showToast('success', d.message || _t('全局 LiteSSL 配置已更新','Global LiteSSL configuration updated'))
+          this.acmeConfigHasHMAC = !!this.acmeConfigForm.eab_hmac_key || this.acmeConfigHasHMAC
+          this.acmeConfigForm.eab_hmac_key = ''
+          fetch('/api/settings').then(r => r.json()).then(s => {
+            if (s.success && s.data) this.globalSettings = s.data
+          })
+          this.loadPublicACMEStatus()
+        } else {
+          showToast('danger', d.message || _t('保存失败','Save failed'))
+        }
+      } catch (e) {
+        showToast('danger', _t('网络错误: ','Network error: ') + e.message)
+      } finally {
+        this.acmeConfigSaving = false
+      }
     },
 
     // 管理员在规则表单里换归属用户时，目标地址清空（管理员手填任意主机）。

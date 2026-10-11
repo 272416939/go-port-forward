@@ -29,10 +29,11 @@ type ACMEConfig struct {
 
 // ACMEManager 封装基于 RFC 8555 的自动化证书申请流程。
 type ACMEManager struct {
-	cfg        ACMEConfig
-	mu         sync.RWMutex
-	httpTokens map[string]string // token -> keyAuth (供 HTTP-01 挑战使用)
-	manual     *manualStore      // DNS-01 手动解析的两段式中间状态
+	cfg            ACMEConfig
+	mu             sync.RWMutex
+	httpTokens     map[string]string // token -> keyAuth (供 HTTP-01 挑战使用)
+	manual         *manualStore      // DNS-01 手动解析的两段式中间状态
+	eabAccountKeys map[string]string // dirURL + "|" + eab.KID -> accountKeyPEM 内存缓存（确保同一 EAB 凭据始终复用同一 ACME 账户密钥）
 }
 
 func newACMEManager(cfg ACMEConfig) *ACMEManager {
@@ -46,9 +47,10 @@ func newACMEManager(cfg ACMEConfig) *ACMEManager {
 		cfg.DNSDelay = 5 * time.Second
 	}
 	return &ACMEManager{
-		cfg:        cfg,
-		httpTokens: make(map[string]string),
-		manual:     newManualStore(),
+		cfg:            cfg,
+		httpTokens:     make(map[string]string),
+		manual:         newManualStore(),
+		eabAccountKeys: make(map[string]string),
 	}
 }
 
@@ -154,89 +156,38 @@ func (m *ACMEManager) ObtainCertificate(
 	if dirURL == "" {
 		dirURL = m.cfg.DirectoryURL
 	}
-	if eab != nil {
-		eab.KID = strings.TrimSpace(eab.KID)
-		eab.HMACKey = strings.TrimSpace(eab.HMACKey)
-		if eab.KID == "" || eab.HMACKey == "" {
-			return "", "", "", errors.New("EAB 凭据不完整（KID 与 HMAC Key 均必填）| incomplete EAB credentials")
-		}
-	}
-
-	var acctKey *ecdsa.PrivateKey
-	if strings.TrimSpace(accountKeyPEM) != "" {
-		acctKey, _ = parseECPrivateKey(accountKeyPEM)
-	}
-	if acctKey == nil {
-		acctKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return "", "", "", fmt.Errorf("生成 ACME 账户密钥失败: %w", err)
-		}
-		newAccountKeyPEM, err = encodeECPrivateKey(acctKey)
-		if err != nil {
-			return "", "", "", err
-		}
-	} else {
-		newAccountKeyPEM = accountKeyPEM
-	}
-
-	client := &acme.Client{
-		Key:          acctKey,
-		DirectoryURL: dirURL,
-		HTTPClient:   m.cfg.HTTPClient,
-	}
-
-	// 注册 ACME 账户。有 EAB 时 contact 留空——外部账户绑定本身就是账号身份，
-	// 这也是 LiteSSL 不要求邮箱的原因。
-	var contact []string
-	if email != "" {
-		contact = []string{"mailto:" + email}
-	}
-	acct := &acme.Account{Contact: contact}
-	if eab != nil {
-		hmacKey, kerr := DecodeEABHMACKey(eab.HMACKey)
-		if kerr != nil {
-			return "", "", "", fmt.Errorf("解析 EAB HMAC Key 失败: %w", kerr)
-		}
-		acct.ExternalAccountBinding = &acme.ExternalAccountBinding{
-			KID: eab.KID,
-			Key: hmacKey,
-		}
-	}
-	_, err = client.Register(ctx, acct, acme.AcceptTOS)
-	if err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
-		// 某些 CA 会返回特定错误代码表示账户已存在
-		if !strings.Contains(strings.ToLower(err.Error()), "already") && !strings.Contains(strings.ToLower(err.Error()), "existing") {
-			return "", "", "", fmt.Errorf("注册 ACME 账户失败 (%s): %w", dirURL, err)
-		}
+	client, newAccountKeyPEM, err := m.registerClient(ctx, dirURL, accountKeyPEM, email, eab)
+	if err != nil {
+		return "", "", "", err
 	}
 
 	// 创建 Order
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
 	if err != nil {
-		return "", "", "", fmt.Errorf("创建 ACME Order 失败: %w", err)
+		return "", "", newAccountKeyPEM, fmt.Errorf("创建 ACME Order 失败: %w", err)
 	}
 
 	// 完成所有 Authorization 挑战
 	for _, authzURL := range order.AuthzURLs {
 		if err := m.solveAuthorization(ctx, client, authzURL, dnsProvider); err != nil {
-			return "", "", "", err
+			return "", "", newAccountKeyPEM, err
 		}
 	}
 
 	// 等待 Order 进入 Ready 状态
 	order, err = client.WaitOrder(ctx, order.URI)
 	if err != nil {
-		return "", "", "", fmt.Errorf("等待 ACME Order Ready 失败: %w", err)
+		return "", "", newAccountKeyPEM, fmt.Errorf("等待 ACME Order Ready 失败: %w", err)
 	}
 
 	// 生成证书私钥与 CSR
 	certKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", "", "", fmt.Errorf("生成证书私钥失败: %w", err)
+		return "", "", newAccountKeyPEM, fmt.Errorf("生成证书私钥失败: %w", err)
 	}
 	keyPEM, err = encodeECPrivateKey(certKey)
 	if err != nil {
-		return "", "", "", err
+		return "", "", newAccountKeyPEM, err
 	}
 
 	csrTemplate := &x509.CertificateRequest{
@@ -245,13 +196,13 @@ func (m *ACMEManager) ObtainCertificate(
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, certKey)
 	if err != nil {
-		return "", "", "", fmt.Errorf("创建 CSR 失败: %w", err)
+		return "", "", newAccountKeyPEM, fmt.Errorf("创建 CSR 失败: %w", err)
 	}
 
 	// 提交 CSR 并获取证书
 	derList, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csrDER, true)
 	if err != nil {
-		return "", "", "", fmt.Errorf("签署并下载证书失败: %w", err)
+		return "", "", newAccountKeyPEM, fmt.Errorf("签署并下载证书失败: %w", err)
 	}
 	certPEM = encodeCertificates(derList)
 	return certPEM, keyPEM, newAccountKeyPEM, nil

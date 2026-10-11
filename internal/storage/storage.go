@@ -14,6 +14,7 @@ import (
 
 var rulesBucket = []byte("rules")
 var certificatesBucket = []byte("certificates")
+var dnsCredentialsBucket = []byte("dns_credentials")
 
 // ErrRuleNotFound indicates the requested rule does not exist in storage.
 var ErrRuleNotFound = errors.New("rule not found")
@@ -91,6 +92,19 @@ type Store interface {
 	GetCertificate(id string) (*models.Certificate, error)
 	SaveCertificate(cert *models.Certificate) error
 	DeleteCertificate(id string) error
+	// Global ACME Defaults (管理员统一 ACME / LiteSSL 配置)
+	GlobalACMEConfig() (*models.GlobalACMEConfig, error)
+	UpdateGlobalACMEConfig(req *models.UpdateGlobalACMEConfigRequest) (*models.GlobalACMEConfig, error)
+	SaveGlobalACMEAccountKey(acctKeyPEM string) error
+	FindAccountKeyByEAB(directoryURL, eabKID string) (string, error)
+
+	// DNS Credentials (DNS-01 验证服务商 API 凭证管理)
+	ListDNSCredentials() ([]*models.DNSCredential, error)
+	ListDNSCredentialsByUser(userID string) ([]*models.DNSCredential, error)
+	GetDNSCredential(id string) (*models.DNSCredential, error)
+	SaveDNSCredential(cred *models.DNSCredential) error
+	UpdateDNSCredential(id string, req *models.SaveDNSCredentialRequest) (*models.DNSCredential, error)
+	DeleteDNSCredential(id string) error
 
 	Close() error
 }
@@ -110,6 +124,7 @@ func Open(path string) (Store, error) {
 		for _, b := range [][]byte{
 			rulesBucket, aclBucket, connLogsBucket, usersBucket,
 			settingsBucket, groupsBucket, codesBucket, certificatesBucket,
+			dnsCredentialsBucket,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

@@ -4,6 +4,38 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.0] - 2026-10-12
+
+### Added
+
+**SSL 证书管理中心与 ACME 自动续签**
+
+- **证书集中管理**：支持手动上传 PEM 证书与私钥，以及基于 RFC 8555 ACME v2 协议的自动化证书申请与到期前 30 天后台自动续签
+- **双 CA 引擎支持**：支持 **Let's Encrypt** 与 **LiteSSL（TrustAsia 亚洲诚信免费 CA）**；接入 EAB（外部账户绑定）免邮箱注册机制，并内置预填官方 ACME 目录地址 `https://acme.freessl.cn/directory`
+- **多种验证方式**：
+  - **DNS-01 自动验证**：内置 Cloudflare、阿里云 DNS、腾讯云 DNSPod 自动写入与清理 `_acme-challenge` TXT 记录（支持泛域名证书）
+  - **DNS-01 手动解析（零凭据）**：宝塔同款两段式手动解析流程（生成 TXT 记录 → 用户去任意 DNS 服务商添加 → 点击完成验证签发），无需提供任何 API 密钥且不限 DNS 厂商
+  - **HTTP-01 文件验证**：支持单域名 80 端口 HTTP 验证
+- **规则引用与零中断热重载**：NetherNet 规则支持下拉选择已纳管证书（`cert_id`），网关通过 `tls.Config.GetCertificate` 动态回调按需取证，证书自动续签或更新后所有关联规则**零中断即时生效**，无需重启规则或踢出在线玩家；删除证书前强制校验规则引用计数防止误删
+
+**DNS 提供商凭据管理与一键免密复用**
+
+- **DNS 凭据管理**：侧边栏「证书管理」下方新增「DNS 管理」，支持集中保存、编辑、删除 Cloudflare（API Token）、阿里云（AccessKey ID / Secret）、腾讯云 DNSPod（SecretId / SecretKey）账号凭据
+- **脱敏安全存储**：所有密钥字段在模型层标记 `json:"-"` 严防 REST 响应泄漏，经存储层专用 Record 落盘；API 统一返回 `••••••••1234` 掩码视图（仅保留末 4 位供核对），编辑留空时自动在单事务内保留原密钥
+- **申请证书免密联动**：在申请证书选择 DNS-01 验证时，可直接下拉选择已保存的 DNS 账号，自动隐藏 Token/Secret 输入框并由后端注入凭据，告别每次重复粘贴密钥
+
+### Changed
+
+**NetherNet 端口复用与冲突检测优化**
+
+- **默认复用监听端口（不再 +1）**：NetherNet 的 WebRTC UDP 数据端口留空时默认直接使用规则的监听端口（`dataPort = listenPort`），不再自动 `+1`
+- **解除信令与数据同端口限制**：移除「NetherNet 信令端口与数据端口不能相同」的校验限制；信令网关（TCP）与数据面多路复用器（UDP）协议栈相互独立，现支持直接共用同一端口号（如同时使用 `39042/tcp` 与 `39042/udp`）
+
+### Fixed
+
+- **全端点端口冲突保存前拦截**：`Manager.checkPortConflictEx` 将 NetherNet 规则展开为实际占用的信令（TCP）与数据面（UDP）全端点集合，在创建或更新规则保存落盘前与存量规则双向交叉比对，冲突时直接返回 `409 Conflict`
+- **深色模式与界面细节修复**：修复 DNS 凭据列表与说明框在深色模式下的背景反差问题，优化凭据类型徽章配色与更新时间展示格式
+
 ## [v1.3.0] - 2026-10-10
 
 ### Added

@@ -80,7 +80,7 @@ type NetherNetTLS struct {
 	KeyPEM string `json:"key_pem,omitempty"`
 	// SignalPort 留 0 表示用规则的监听端口。
 	SignalPort int `json:"signal_port"`
-	// DataPort 留 0 表示用规则的监听端口 + 1。
+	// DataPort 留 0 表示用规则的监听端口。
 	DataPort int `json:"data_port"`
 }
 
@@ -90,7 +90,7 @@ func NetherNetPorts(listenPort int, tls *NetherNetTLS) (signalPort int, dataPort
 	if tls != nil && tls.SignalPort > 0 {
 		signalPort = tls.SignalPort
 	}
-	dataPort = listenPort + 1
+	dataPort = listenPort
 	if tls != nil && tls.DataPort > 0 {
 		dataPort = tls.DataPort
 	}
@@ -547,12 +547,9 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 		if req.Protocol != ProtocolUDP {
 			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
 		}
-		signalPort, dataPort := NetherNetPorts(req.ListenPort, req.NetherNetTLS)
+		_, dataPort := NetherNetPorts(req.ListenPort, req.NetherNetTLS)
 		if dataPort > 65535 {
-			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）：监听端口为 65535 时请显式配置数据端口 | NetherNet data port out of range (1-65535)")
-		}
-		if signalPort == dataPort {
-			return fmt.Errorf("NetherNet 信令端口与数据端口不能相同 (%d) | NetherNet signal port and data port cannot be identical", signalPort)
+			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）| NetherNet data port out of range (1-65535)")
 		}
 	}
 	if err := req.NetherNetTLS.Validate(); err != nil {
@@ -603,12 +600,9 @@ func ValidateForwardRule(rule *ForwardRule) error {
 		if rule.Protocol != ProtocolUDP {
 			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
 		}
-		signalPort, dataPort := NetherNetPorts(rule.ListenPort, rule.NetherNetTLS)
+		_, dataPort := NetherNetPorts(rule.ListenPort, rule.NetherNetTLS)
 		if dataPort > 65535 {
-			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）：监听端口为 65535 时请显式配置数据端口 | NetherNet data port out of range (1-65535)")
-		}
-		if signalPort == dataPort {
-			return fmt.Errorf("NetherNet 信令端口与数据端口不能相同 (%d) | NetherNet signal port and data port cannot be identical", signalPort)
+			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）| NetherNet data port out of range (1-65535)")
 		}
 	}
 	if err := rule.NetherNetTLS.Validate(); err != nil {

@@ -35,13 +35,14 @@ type DNSChallengeRecord struct {
 // 在 prepare 阶段一次性收下，verify 阶段只凭 token 就能建证——避免前端在两次
 // 请求之间改了口径，也避免用户改个名字就导致第二步对不上。
 type certMeta struct {
-	name        string
-	userID      string
-	autoRenew   bool
-	provider    models.ACMEProvider
-	email       string
+	name         string
+	userID       string
+	autoRenew    bool
+	provider     models.ACMEProvider
+	email        string
 	directoryURL string
-	creds       map[string]string
+	accountKey   string
+	creds        map[string]string
 }
 
 // pendingManualOrder 是手动 DNS 解析两段式流程的中间状态。
@@ -141,10 +142,11 @@ func (m *ACMEManager) PrepareManualDNS(
 	if err != nil {
 		return nil, "", err
 	}
+	meta.accountKey = newAccountKeyPEM
 
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
 	if err != nil {
-		return nil, "", fmt.Errorf("创建 ACME Order 失败: %w", err)
+		return nil, newAccountKeyPEM, fmt.Errorf("创建 ACME Order 失败: %w", err)
 	}
 
 	// 逐个 authorization 取 DNS-01 挑战的记录值。通配符域名的 identifier 不带
@@ -153,7 +155,7 @@ func (m *ACMEManager) PrepareManualDNS(
 	for _, authzURL := range order.AuthzURLs {
 		authz, aerr := client.GetAuthorization(ctx, authzURL)
 		if aerr != nil {
-			return nil, "", fmt.Errorf("获取 ACME 授权失败: %w", aerr)
+			return nil, newAccountKeyPEM, fmt.Errorf("获取 ACME 授权失败: %w", aerr)
 		}
 		if authz.Status == acme.StatusValid {
 			continue
@@ -166,11 +168,11 @@ func (m *ACMEManager) PrepareManualDNS(
 			}
 		}
 		if chal == nil {
-			return nil, "", fmt.Errorf("域名 %s 未提供 dns-01 挑战类型 | dns-01 challenge not offered for %s", authz.Identifier.Value, authz.Identifier.Value)
+			return nil, newAccountKeyPEM, fmt.Errorf("域名 %s 未提供 dns-01 挑战类型 | dns-01 challenge not offered for %s", authz.Identifier.Value, authz.Identifier.Value)
 		}
 		txtValue, terr := client.DNS01ChallengeRecord(chal.Token)
 		if terr != nil {
-			return nil, "", fmt.Errorf("计算 DNS-01 挑战记录失败: %w", terr)
+			return nil, newAccountKeyPEM, fmt.Errorf("计算 DNS-01 挑战记录失败: %w", terr)
 		}
 		records = append(records, DNSChallengeRecord{
 			Domain:      authz.Identifier.Value,
@@ -180,12 +182,12 @@ func (m *ACMEManager) PrepareManualDNS(
 		})
 	}
 	if len(records) == 0 {
-		return nil, "", errors.New("ACME 未返回任何待验证的域名授权 | no pending authorizations returned")
+		return nil, newAccountKeyPEM, errors.New("ACME 未返回任何待验证的域名授权 | no pending authorizations returned")
 	}
 
 	token, err := newManualToken()
 	if err != nil {
-		return nil, "", err
+		return nil, newAccountKeyPEM, err
 	}
 	m.manual.put(&pendingManualOrder{
 		token:        token,
@@ -217,6 +219,9 @@ func (m *ACMEManager) CompleteManualDNS(ctx context.Context, token string) (cert
 		return "", "", certMeta{}, errors.New("验证令牌不存在或已过期，请重新获取 DNS 记录 | verification token not found or expired")
 	}
 	meta = pending.meta
+	if meta.accountKey == "" {
+		meta.accountKey = pending.accountKey
+	}
 	if meta.name == "" && len(pending.domains) > 0 {
 		meta.name = pending.domains[0]
 	}
@@ -265,6 +270,15 @@ func (m *ACMEManager) CompleteManualDNS(ctx context.Context, token string) (cert
 
 // registerClient 构造并注册 ACME 客户端。有 EAB 时 contact 留空——外部账户绑定
 // 本身就是账号身份，这也是 LiteSSL 免邮箱的原因。
+//
+// 关键修复：
+// 1. EAB 账户私钥复用：LiteSSL / ZeroSSL 等基于 EAB 的 CA 会将一对 EAB KID 绑定到首次注册时的
+//    ACME 账户密钥上。若后续使用同一 EAB KID 但新生成一套随机账户私钥，CA 会拒绝为未完成绑定
+//    的新密钥创建 Order（返回 400 urn:ietf:params:acme:error:malformed）。因此当调用方未传入
+//    accountKeyPEM 且携带了 EAB 凭据时，优先从 eabAccountKeys 缓存中复用已绑定的账户私钥。
+// 2. 已存在账户优先走 GetReg（{"onlyReturnExisting": true}）：避免重复向 newAccount 发送
+//    externalAccountBinding 载荷导致 CA 返回 400，从而使 client.KID 无法就绪并在后续
+//    AuthorizeOrder 时因降级为 JWK 签名或无效 KID 而报 400 malformed。
 func (m *ACMEManager) registerClient(
 	ctx context.Context,
 	dirURL string,
@@ -272,38 +286,93 @@ func (m *ACMEManager) registerClient(
 	email string,
 	eab *EABCredentials,
 ) (*acme.Client, string, error) {
-	acctKey, err := parseECPrivateKey(accountKeyPEM)
-	if err != nil {
-		return nil, "", fmt.Errorf("解析 ACME 账户密钥失败: %w", err)
-	}
-	client := &acme.Client{
-		Key:          acctKey,
-		DirectoryURL: dirURL,
-		HTTPClient:   m.cfg.HTTPClient,
-	}
-
-	var contact []string
-	if email != "" {
-		contact = []string{"mailto:" + email}
-	}
-	acct := &acme.Account{Contact: contact}
 	if eab != nil {
 		eab.KID = strings.TrimSpace(eab.KID)
 		eab.HMACKey = strings.TrimSpace(eab.HMACKey)
 		if eab.KID == "" || eab.HMACKey == "" {
 			return nil, "", errors.New("EAB 凭据不完整（KID 与 HMAC Key 均必填）| incomplete EAB credentials")
 		}
+	}
+
+	accountKeyPEM = strings.TrimSpace(accountKeyPEM)
+	if accountKeyPEM == "" && eab != nil {
+		m.mu.RLock()
+		accountKeyPEM = m.eabAccountKeys[dirURL+"|"+eab.KID]
+		m.mu.RUnlock()
+	}
+
+	var acctKey *ecdsa.PrivateKey
+	hadExistingKey := false
+	if accountKeyPEM != "" {
+		acctKey, _ = parseECPrivateKey(accountKeyPEM)
+		if acctKey != nil {
+			hadExistingKey = true
+		}
+	}
+	if acctKey == nil {
+		var err error
+		acctKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, "", fmt.Errorf("生成 ACME 账户密钥失败: %w", err)
+		}
+		accountKeyPEM, err = encodeECPrivateKey(acctKey)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	client := &acme.Client{
+		Key:          acctKey,
+		DirectoryURL: dirURL,
+		HTTPClient:   m.cfg.HTTPClient,
+	}
+
+	// 若复用了已有的 ACME 账户私钥，先通过 GetReg({"onlyReturnExisting": true}) 查询现有账户 URL
+	// 并写入 client.KID，避免再次携带 EAB 注册触发 CA 报错。
+	if hadExistingKey {
+		if existingAcct, gerr := client.GetReg(ctx, ""); gerr == nil && existingAcct != nil && existingAcct.URI != "" {
+			client.KID = acme.KeyID(existingAcct.URI)
+			if eab != nil {
+				m.mu.Lock()
+				m.eabAccountKeys[dirURL+"|"+eab.KID] = accountKeyPEM
+				m.mu.Unlock()
+			}
+			return client, accountKeyPEM, nil
+		}
+	}
+
+	var contact []string
+	if email != "" && eab == nil {
+		contact = []string{"mailto:" + email}
+	}
+	acct := &acme.Account{Contact: contact}
+	if eab != nil {
 		hmacKey, kerr := DecodeEABHMACKey(eab.HMACKey)
 		if kerr != nil {
 			return nil, "", fmt.Errorf("解析 EAB HMAC Key 失败: %w", kerr)
 		}
 		acct.ExternalAccountBinding = &acme.ExternalAccountBinding{KID: eab.KID, Key: hmacKey}
 	}
-	if _, rerr := client.Register(ctx, acct, acme.AcceptTOS); rerr != nil && !errors.Is(rerr, acme.ErrAccountAlreadyExists) {
-		msg := strings.ToLower(rerr.Error())
-		if !strings.Contains(msg, "already") && !strings.Contains(msg, "existing") {
-			return nil, "", fmt.Errorf("注册 ACME 账户失败 (%s): %w", dirURL, rerr)
+	if regAcct, rerr := client.Register(ctx, acct, acme.AcceptTOS); rerr != nil {
+		if !errors.Is(rerr, acme.ErrAccountAlreadyExists) {
+			msg := strings.ToLower(rerr.Error())
+			if !strings.Contains(msg, "already") && !strings.Contains(msg, "existing") {
+				return nil, "", fmt.Errorf("注册 ACME 账户失败 (%s): %w", dirURL, rerr)
+			}
 		}
+		if client.KID == "" {
+			if existingAcct, gerr := client.GetReg(ctx, ""); gerr == nil && existingAcct != nil && existingAcct.URI != "" {
+				client.KID = acme.KeyID(existingAcct.URI)
+			}
+		}
+	} else if regAcct != nil && regAcct.URI != "" && client.KID == "" {
+		client.KID = acme.KeyID(regAcct.URI)
+	}
+
+	if eab != nil {
+		m.mu.Lock()
+		m.eabAccountKeys[dirURL+"|"+eab.KID] = accountKeyPEM
+		m.mu.Unlock()
 	}
 	return client, accountKeyPEM, nil
 }

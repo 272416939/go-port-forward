@@ -900,26 +900,38 @@ func getRulePortEndpoints(listenAddr string, listenPort int, proto models.Protoc
 	addr := models.NormalizeListenAddr(listenAddr)
 	if nethernet {
 		signalPort, dataPort := models.NetherNetPorts(listenPort, tls)
-		return []rulePortEndpoint{
+		endpoints := []rulePortEndpoint{
 			{
 				addr:     addr,
 				port:     signalPort,
 				protocol: models.ProtocolTCP,
 				desc:     "NetherNet 信令端口",
 			},
-			{
-				addr:     addr,
-				port:     listenPort,
-				protocol: models.ProtocolUDP,
-				desc:     "NetherNet 监听端口",
-			},
-			{
+		}
+		if dataPort == listenPort {
+			endpoints = append(endpoints, rulePortEndpoint{
 				addr:     addr,
 				port:     dataPort,
 				protocol: models.ProtocolUDP,
 				desc:     "NetherNet 数据端口",
-			},
+			})
+		} else {
+			endpoints = append(endpoints,
+				rulePortEndpoint{
+					addr:     addr,
+					port:     listenPort,
+					protocol: models.ProtocolUDP,
+					desc:     "NetherNet 监听端口",
+				},
+				rulePortEndpoint{
+					addr:     addr,
+					port:     dataPort,
+					protocol: models.ProtocolUDP,
+					desc:     "NetherNet 数据端口",
+				},
+			)
 		}
+		return endpoints
 	}
 
 	proto = models.NormalizeProtocol(proto)
@@ -1127,7 +1139,7 @@ func (m *Manager) startNetherNet(r *models.ForwardRule, e *entry) error {
 		return fmt.Errorf("无法获取公网 IP，请在 forward.public_ip 中指定 | cannot detect public IP; set forward.public_ip")
 	}
 
-	// Determine signaling port and data port (default: signal port + 1)
+	// Determine signaling port and data port (default: listen port)
 	signalPort, dataPort := models.NetherNetPorts(r.ListenPort, r.NetherNetTLS)
 	_ = signalPort
 
@@ -1185,10 +1197,7 @@ func (m *Manager) checkNetherNetDataPortConflict(dataPort int, excludeID string)
 		if id == excludeID || !r.NetherNet || !r.Enabled {
 			continue
 		}
-		other := r.ListenPort + 1
-		if r.NetherNetTLS != nil && r.NetherNetTLS.DataPort > 0 {
-			other = r.NetherNetTLS.DataPort
-		}
+		_, other := models.NetherNetPorts(r.ListenPort, r.NetherNetTLS)
 		if other == dataPort {
 			return fmt.Errorf("%w: NetherNet UDP 数据端口 %d 已被规则 %q 占用，请在 NetherNet 配置中填写其它数据端口 | NetherNet data port %d is already used by rule %q", ErrPortConflict, dataPort, r.Name, dataPort, r.Name)
 		}

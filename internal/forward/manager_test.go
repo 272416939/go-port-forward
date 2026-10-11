@@ -515,6 +515,34 @@ func (s *countingStore) GetCertificate(id string) (*models.Certificate, error) {
 }
 func (s *countingStore) SaveCertificate(cert *models.Certificate) error { return nil }
 func (s *countingStore) DeleteCertificate(id string) error              { return nil }
+func (s *countingStore) GlobalACMEConfig() (*models.GlobalACMEConfig, error) {
+	return nil, nil
+}
+func (s *countingStore) UpdateGlobalACMEConfig(req *models.UpdateGlobalACMEConfigRequest) (*models.GlobalACMEConfig, error) {
+	return nil, nil
+}
+func (s *countingStore) SaveGlobalACMEAccountKey(acctKeyPEM string) error {
+	return nil
+}
+func (s *countingStore) FindAccountKeyByEAB(directoryURL, eabKID string) (string, error) {
+	return "", nil
+}
+func (s *countingStore) ListDNSCredentials() ([]*models.DNSCredential, error) {
+	return nil, nil
+}
+func (s *countingStore) ListDNSCredentialsByUser(userID string) ([]*models.DNSCredential, error) {
+	return nil, nil
+}
+func (s *countingStore) GetDNSCredential(id string) (*models.DNSCredential, error) {
+	return nil, storage.ErrDNSCredentialNotFound
+}
+func (s *countingStore) SaveDNSCredential(cred *models.DNSCredential) error { return nil }
+func (s *countingStore) UpdateDNSCredential(id string, req *models.SaveDNSCredentialRequest) (*models.DNSCredential, error) {
+	return nil, nil
+}
+func (s *countingStore) DeleteDNSCredential(id string) error { return nil }
+
+
 
 
 func (s *countingStore) listCalls() int {

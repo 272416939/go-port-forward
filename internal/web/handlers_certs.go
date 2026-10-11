@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -268,3 +269,173 @@ func (h *handler) renewCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	okWithMessage(w, next, "证书续签成功 | certificate renewed successfully")
 }
+
+// getACMEConfig handles GET /api/acme-config (仅管理员)
+func (h *handler) getACMEConfig(w http.ResponseWriter, r *http.Request) {
+	if h.certs == nil {
+		ok(w, (*models.GlobalACMEConfig)(nil).View())
+		return
+	}
+	v, err := h.certs.GlobalACMEConfig()
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	ok(w, v)
+}
+
+// updateACMEConfig handles PUT /api/acme-config (仅管理员)
+func (h *handler) updateACMEConfig(w http.ResponseWriter, r *http.Request) {
+	if h.certs == nil {
+		fail(w, http.StatusServiceUnavailable, "证书管理服务未就绪 | certificate service unavailable")
+		return
+	}
+	var req models.UpdateGlobalACMEConfigRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	v, err := h.certs.UpdateGlobalACMEConfig(&req)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	okWithMessage(w, v, "全局 ACME 配置已更新 | global ACME configuration updated")
+}
+
+// getPublicACMEStatus handles GET /api/certificates/acme/status (全部已登录用户)
+func (h *handler) getPublicACMEStatus(w http.ResponseWriter, r *http.Request) {
+	if h.certs == nil {
+		ok(w, models.PublicACMEStatus{})
+		return
+	}
+	st, err := h.certs.PublicACMEStatus()
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	ok(w, st)
+}
+// --- DNS 提供商凭据管理 ---
+
+func (h *handler) ownedDNSCredential(w http.ResponseWriter, r *http.Request) (*models.DNSCredential, bool) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		fail(w, http.StatusUnauthorized, "未登录 | unauthorized")
+		return nil, false
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		fail(w, http.StatusBadRequest, "缺少凭据 ID | credential id required")
+		return nil, false
+	}
+	if h.certs == nil {
+		fail(w, http.StatusServiceUnavailable, "服务未就绪 | service unavailable")
+		return nil, false
+	}
+	cred, err := h.certs.GetDNSCredential(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrDNSCredentialNotFound) {
+			fail(w, http.StatusNotFound, "DNS 凭据不存在 | DNS credential not found")
+			return nil, false
+		}
+		internalError(w, err)
+		return nil, false
+	}
+	if !me.IsAdmin() && cred.UserID != "" && cred.UserID != me.ID {
+		fail(w, http.StatusNotFound, "DNS 凭据不存在 | DNS credential not found")
+		return nil, false
+	}
+	return cred, true
+}
+
+func (h *handler) listDNSCredentials(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		fail(w, http.StatusUnauthorized, "未登录 | unauthorized")
+		return
+	}
+	if h.certs == nil {
+		ok(w, []models.DNSCredentialView{})
+		return
+	}
+	list, err := h.certs.ListDNSCredentials(me.ID, me.IsAdmin())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	ok(w, list)
+}
+
+func (h *handler) createDNSCredential(w http.ResponseWriter, r *http.Request) {
+	me := auth.UserFrom(r.Context())
+	if me == nil {
+		fail(w, http.StatusUnauthorized, "未登录 | unauthorized")
+		return
+	}
+	if h.certs == nil {
+		fail(w, http.StatusServiceUnavailable, "服务未就绪 | service unavailable")
+		return
+	}
+	var req models.SaveDNSCredentialRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	owner := me
+	if me.IsAdmin() && req.UserID != "" {
+		if got, err := h.users.Get(req.UserID); err == nil && got != nil {
+			owner = got
+		}
+	}
+	view, err := h.certs.CreateDNSCredential(owner, &req)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	okWithMessage(w, view, "DNS 凭据已保存 | DNS credential saved")
+}
+
+func (h *handler) getDNSCredential(w http.ResponseWriter, r *http.Request) {
+	cred, allowed := h.ownedDNSCredential(w, r)
+	if !allowed {
+		return
+	}
+	ok(w, cred.View())
+}
+
+func (h *handler) updateDNSCredential(w http.ResponseWriter, r *http.Request) {
+	cred, allowed := h.ownedDNSCredential(w, r)
+	if !allowed {
+		return
+	}
+	var req models.SaveDNSCredentialRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	view, err := h.certs.UpdateDNSCredential(cred.ID, &req)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	okWithMessage(w, view, "DNS 凭据已更新 | DNS credential updated")
+}
+
+func (h *handler) deleteDNSCredential(w http.ResponseWriter, r *http.Request) {
+	cred, allowed := h.ownedDNSCredential(w, r)
+	if !allowed {
+		return
+	}
+	if err := h.certs.DeleteDNSCredential(cred.ID); err != nil {
+		if errors.Is(err, storage.ErrDNSCredentialNotFound) {
+			fail(w, http.StatusNotFound, "DNS 凭据不存在 | DNS credential not found")
+			return
+		}
+		internalError(w, err)
+		return
+	}
+	okWithMessage(w, nil, "DNS 凭据已删除 | DNS credential deleted")
+}
+
+

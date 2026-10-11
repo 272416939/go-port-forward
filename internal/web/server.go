@@ -395,6 +395,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/certificates/{id}", s.authed(h.updateCertificate))
 	mux.HandleFunc("DELETE /api/certificates/{id}", s.authed(h.deleteCertificate))
 	mux.HandleFunc("POST /api/certificates/{id}/renew", s.authed(h.renewCertificate))
+	mux.HandleFunc("GET /api/certificates/acme/status", s.authed(h.getPublicACMEStatus))
+
+	// DNS 提供商凭据管理：登录即可，作用域默认为自己；管理员可查改他人
+	mux.HandleFunc("GET /api/dns-credentials", s.authed(h.listDNSCredentials))
+	mux.HandleFunc("POST /api/dns-credentials", s.authed(h.createDNSCredential))
+	mux.HandleFunc("GET /api/dns-credentials/{id}", s.authed(h.getDNSCredential))
+	mux.HandleFunc("PUT /api/dns-credentials/{id}", s.authed(h.updateDNSCredential))
+	mux.HandleFunc("DELETE /api/dns-credentials/{id}", s.authed(h.deleteDNSCredential))
+
 
 	// HTTP-01 ACME 挑战验证公开端点
 	mux.HandleFunc("GET /.well-known/acme-challenge/{token}", func(w http.ResponseWriter, r *http.Request) {
@@ -415,6 +424,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// SMTP 邮件设置（仅管理员；密码永不回显）
 	mux.HandleFunc("GET /api/smtp", s.adminOnly(h.getSMTP))
 	mux.HandleFunc("PUT /api/smtp", s.adminOnly(h.updateSMTP))
+
+	// 全局 ACME 证书签发配置（仅管理员；密钥永不回显）
+	mux.HandleFunc("GET /api/acme-config", s.adminOnly(h.getACMEConfig))
+	mux.HandleFunc("PUT /api/acme-config", s.adminOnly(h.updateACMEConfig))
+
 	mux.HandleFunc("POST /api/smtp/test", s.adminOnly(h.testSMTP))
 
 	// 诊断与系统级操作（仅管理员）

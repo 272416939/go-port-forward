@@ -46,6 +46,107 @@ const (
 	// DNS 服务商的模式。
 	ACMEProviderManualDNS ACMEProvider = "manualdns"
 )
+// GlobalACMEConfig 是管理员配置的平台级全局 LiteSSL ACME 设置（存 settings 桶的 "acme" 键）。
+//
+// 管理员配置好 LiteSSL 账号（EAB KID 与 HMAC Key）后，普通用户在申请证书时
+// 默认直接继承该 CA 与 EAB 凭据，用户无需知道 EAB 账号密钥，只需选择自己的验证方式
+// （如手动添加 TXT 记录或填写自己的 DNS Token）并填写域名即可签发。
+type GlobalACMEConfig struct {
+	Enabled        bool   `json:"enabled"`
+	DirectoryURL   string `json:"directory_url"`   // 目录地址（默认 https://acme.freessl.cn/directory）
+	EABKID         string `json:"eab_kid"`         // LiteSSL EAB KID
+	EABHMACKey     string `json:"-"`               // LiteSSL EAB HMAC Key（永不经 API 回显）
+	AccountKey     string `json:"-"`               // 绑定的 ACME 账户私钥 PEM（按 EAB 账号全局持久化复用，永不经 API 回显）
+
+	AllowUserApply bool   `json:"allow_user_apply"` // 是否允许普通用户免配置使用平台 LiteSSL 凭据申请证书
+}
+
+// Configured 报告全局 LiteSSL ACME 是否已配置到可用程度。
+func (c *GlobalACMEConfig) Configured() bool {
+	if c == nil || !c.Enabled {
+		return false
+	}
+	return strings.TrimSpace(c.EABKID) != "" && strings.TrimSpace(c.EABHMACKey) != ""
+}
+
+// GlobalACMEView 是管理员查看/编辑全局 LiteSSL ACME 配置的 API 响应视图（密码永不回显）。
+type GlobalACMEView struct {
+	Enabled        bool   `json:"enabled"`
+	DirectoryURL   string `json:"directory_url"`
+	EABKID         string `json:"eab_kid"`
+	HasEABHMACKey  bool   `json:"has_eab_hmac_key"`
+	AllowUserApply bool   `json:"allow_user_apply"`
+	Configured     bool   `json:"configured"`
+}
+
+// View 生成脱敏的管理视图。
+func (c *GlobalACMEConfig) View() GlobalACMEView {
+	if c == nil {
+		return GlobalACMEView{
+			DirectoryURL:   DefaultLiteSSLDirectoryURL,
+			AllowUserApply: true,
+		}
+	}
+	dir := c.DirectoryURL
+	if dir == "" {
+		dir = DefaultLiteSSLDirectoryURL
+	}
+	return GlobalACMEView{
+		Enabled:        c.Enabled,
+		DirectoryURL:   dir,
+		EABKID:         c.EABKID,
+		HasEABHMACKey:  strings.TrimSpace(c.EABHMACKey) != "",
+		AllowUserApply: c.AllowUserApply,
+		Configured:     c.Configured(),
+	}
+}
+
+// PublicACMEStatus 是供所有登录用户查询的平台 LiteSSL ACME 就绪状态（绝不包含任何敏感信息）。
+type PublicACMEStatus struct {
+	Configured     bool   `json:"configured"`
+	AllowUserApply bool   `json:"allow_user_apply"`
+	CA             string `json:"ca"` // 固定 "litessl"
+}
+
+// PublicStatus 生成供普通用户使用的公共状态。
+func (c *GlobalACMEConfig) PublicStatus() PublicACMEStatus {
+	if c == nil || !c.Configured() || !c.AllowUserApply {
+		return PublicACMEStatus{Configured: false, AllowUserApply: false}
+	}
+	return PublicACMEStatus{
+		Configured:     true,
+		AllowUserApply: true,
+		CA:             "litessl",
+	}
+}
+
+// UpdateGlobalACMEConfigRequest 是管理员更新全局 LiteSSL ACME 配置的请求载荷。
+// EABHMACKey 允许留空（留空 = 保留现有密钥）。
+type UpdateGlobalACMEConfigRequest struct {
+	Enabled        *bool   `json:"enabled"`
+	DirectoryURL   *string `json:"directory_url"`
+	EABKID         *string `json:"eab_kid"`
+	EABHMACKey     *string `json:"eab_hmac_key"`
+	AllowUserApply *bool   `json:"allow_user_apply"`
+}
+
+// ValidateGlobalACMEConfig 校验全局 LiteSSL ACME 配置合法性。
+func ValidateGlobalACMEConfig(c *GlobalACMEConfig) error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(c.DirectoryURL) == "" {
+		c.DirectoryURL = DefaultLiteSSLDirectoryURL
+	}
+	if !strings.HasPrefix(strings.ToLower(c.DirectoryURL), "http") {
+		return fmt.Errorf("LiteSSL 目录地址必须以 http(s) 开头 | directory URL must start with http(s)")
+	}
+	if strings.TrimSpace(c.EABKID) == "" || strings.TrimSpace(c.EABHMACKey) == "" {
+		return fmt.Errorf("启用 LiteSSL 全局配置必须填写 EAB KID 与 HMAC Key | LiteSSL EAB credentials are required")
+	}
+	return nil
+}
+
 
 // DefaultLiteSSLDirectoryURL 是 LiteSSL 的 ACME 目录地址默认值。
 //
@@ -175,27 +276,29 @@ type UploadCertificateRequest struct {
 
 // ApplyACMERequest 是通过 ACME 自动申请证书的请求载荷。
 type ApplyACMERequest struct {
-	Name        string            `json:"name"`
-	UserID      string            `json:"user_id"`
-	Domains     []string          `json:"domains"`
-	Email       string            `json:"email"`
-	Provider    ACMEProvider      `json:"provider"`
+	Name            string            `json:"name"`
+	UserID          string            `json:"user_id"`
+	Domains         []string          `json:"domains"`
+	Email           string            `json:"email"`
+	Provider        ACMEProvider      `json:"provider"`
 	// DirectoryURL 仅 LiteSSL 需要：FreeSSL 控制台「ACME 账号管理」下发的目录地址。
-	DirectoryURL string            `json:"directory_url"`
-	Credentials  map[string]string `json:"credentials"`
-	AutoRenew    bool              `json:"auto_renew"`
+	DirectoryURL    string            `json:"directory_url"`
+	DNSCredentialID string            `json:"dns_credential_id,omitempty"` // 选中的已存 DNS 凭据 ID（可免填 Credentials）
+	Credentials     map[string]string `json:"credentials"`
+	AutoRenew       bool              `json:"auto_renew"`
 }
 
 // UpdateCertificateRequest 是更新已有证书的请求载荷。
 type UpdateCertificateRequest struct {
-	Name        *string           `json:"name"`
-	CertPEM     *string           `json:"cert_pem"`
-	KeyPEM      *string           `json:"key_pem"`
-	AutoRenew   *bool             `json:"auto_renew"`
-	Email       *string           `json:"email"`
-	Provider    *ACMEProvider     `json:"provider"`
-	DirectoryURL *string          `json:"directory_url"`
-	Credentials map[string]string `json:"credentials"`
+	Name            *string           `json:"name"`
+	CertPEM         *string           `json:"cert_pem"`
+	KeyPEM          *string           `json:"key_pem"`
+	AutoRenew       *bool             `json:"auto_renew"`
+	Email           *string           `json:"email"`
+	Provider        *ACMEProvider     `json:"provider"`
+	DirectoryURL    *string           `json:"directory_url"`
+	DNSCredentialID *string           `json:"dns_credential_id,omitempty"`
+	Credentials     map[string]string `json:"credentials"`
 }
 
 // ValidateAndParsePEM 校验 CertPEM 与 KeyPEM 能否配成合法的 X509 密钥对，
