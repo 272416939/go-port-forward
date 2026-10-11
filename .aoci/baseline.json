@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-11T05:39:11Z",
-  "updated_at": "2026-10-11T07:07:57Z",
+  "updated_at": "2026-10-11T10:21:02Z",
   "files": {
     ".gitattributes": {
       "role": "index",
@@ -59,9 +59,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "7ca646b9f1188d4496c9438a11412a08d9f322f3e70964d8c2dbabfd3bcf2ffe",
-      "size": 49401,
-      "normalized_sha256": "7ca646b9f1188d4496c9438a11412a08d9f322f3e70964d8c2dbabfd3bcf2ffe"
+      "sha256": "e6e9d1becc171059e892d74b0b982044864ab248f0489ba62257cb5a84edffb9",
+      "size": 49594,
+      "normalized_sha256": "e6e9d1becc171059e892d74b0b982044864ab248f0489ba62257cb5a84edffb9"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -543,10 +543,10 @@
     },
     "internal/forward/manager.go": {
       "role": "index",
-      "sha256": "fbbeaccfc77acea988b37f4bdf24269d723ae4e46a8ea1094a00ada954dd84d4",
-      "size": 41923,
-      "normalized_sha256": "91e3b9290bc3baac270c674db06b993830f247f218f0f7f6b468fd3a269331fa",
-      "format_sha256": "f07befca1f1adab7826f53995880cb5af423483619dae681a532e4b7babca98e",
+      "sha256": "a07334c5e52287754a340c0e82762909ed9313d559eae76914346983880a4c2e",
+      "size": 44720,
+      "normalized_sha256": "9e9a10bdbce6c37f50890493fe2cdfe09b0176fc72ff8bc572534b9efdf2b7cf",
+      "format_sha256": "581ea64ee6c6335e06f7cf8be697ce3a23281606a0ec2d14a43295336df058e2",
       "format_kind": "gofmt"
     },
     "internal/forward/manager_test.go": {
@@ -559,10 +559,10 @@
     },
     "internal/forward/manager_transparent_test.go": {
       "role": "observe",
-      "sha256": "e967ed5d3a0dbf185e1f9518bd9bc244a3074fbff78aa4a3892c5c77d999561d",
-      "size": 4467,
-      "normalized_sha256": "e967ed5d3a0dbf185e1f9518bd9bc244a3074fbff78aa4a3892c5c77d999561d",
-      "format_sha256": "e967ed5d3a0dbf185e1f9518bd9bc244a3074fbff78aa4a3892c5c77d999561d",
+      "sha256": "d6778caa86625735a0f5403bf90c4faf5ab217ce94cb31f55c240d336a1d5377",
+      "size": 9028,
+      "normalized_sha256": "d6778caa86625735a0f5403bf90c4faf5ab217ce94cb31f55c240d336a1d5377",
+      "format_sha256": "266391837a60b7357f445c1006c14649812f0057b15da7ae26e20fd526896816",
       "format_kind": "gofmt"
     },
     "internal/forward/nethernet_backend.go": {
@@ -679,18 +679,18 @@
     },
     "internal/models/models.go": {
       "role": "index",
-      "sha256": "b5041c82f7298386ba1c5e3e6853d49da1b287e2756f15dcc76147feb4340797",
-      "size": 24898,
-      "normalized_sha256": "b435084f16671b32374b8cd24df7a94d6f1688d01cda0a13092347460e85b23d",
-      "format_sha256": "723eafcec5214fd04cfe178646c91563e0adb0f9913606c7a7ed0dcf311b5702",
+      "sha256": "c54a2220035bf75e070c98fde786db5e1c9bd2679e7a5003d8a80a8643e8e19a",
+      "size": 26258,
+      "normalized_sha256": "ebc617476a2e2d0d5b8c56af599819b001482d7f421363f88397be39de32a17a",
+      "format_sha256": "8ca2815fd05cee89bf2f79e0d44b534c7385862595971e5a9ed02d07920e752c",
       "format_kind": "gofmt"
     },
     "internal/models/models_nethernet_test.go": {
       "role": "observe",
-      "sha256": "612f805a8f6b15067ecd984aa5e298d22b13d6951f526fddd9222a122c894b85",
-      "size": 6222,
-      "normalized_sha256": "62109320255123aa1323f7b72a82eb617c9f9d53ef96beb1831c88be8a7719c0",
-      "format_sha256": "ed80260542e4df9f895af6ca2d2720a379129fcf1a9622393aa0d65e7a47f657",
+      "sha256": "41325603f788170341497714cb346e8fa510e3f339179c1a57bcebb639f823d9",
+      "size": 7766,
+      "normalized_sha256": "6c2cede3091fea44f14d56e626e29e91347a6ebc71bdd5748ab26d9c64ddb91e",
+      "format_sha256": "d688793557f57daf32e66867619a56cfbec61d393dbfbbdd2b26ee16109ca88c",
       "format_kind": "gofmt"
     },
     "internal/models/models_test.go": {
@@ -719,10 +719,10 @@
     },
     "internal/nethernet/gateway.go": {
       "role": "index",
-      "sha256": "7cb464f3f00391499c71656dbd04999cb25c9eb7a302f283f8c5780f2a46b404",
-      "size": 18785,
-      "normalized_sha256": "34efd1297436606da8c31e731d65fccbb5971521f18a1120efb580c7e1fce393",
-      "format_sha256": "488f3ce56af619790619c16e991f540128774c5a80456f48af46d39a308a46ae",
+      "sha256": "13b68a80056c925d94c215e6784dd2798ed984559a43fd1bab9245dfff5f7e90",
+      "size": 18589,
+      "normalized_sha256": "b4d22d970b70554566c92ee730923851b89719f22a8e4c6339fbcfefd9e825a8",
+      "format_sha256": "1bd2cd2559b3453cd7d1073abf225b6ed3b03aa472ee332d342b85abfedaf168",
       "format_kind": "gofmt"
     },
     "internal/nethernet/gateway_test.go": {
@@ -1071,10 +1071,10 @@
     },
     "internal/web/handlers_ports.go": {
       "role": "index",
-      "sha256": "a451606c45eaf59304eec146c166f915ba576993d16fb9a7942e77a3847e54b9",
-      "size": 4316,
-      "normalized_sha256": "1dbd4b4dbd39d9fb6307151bc4b457f288ab9217641e649e7421b38a51ae7adb",
-      "format_sha256": "1dbd4b4dbd39d9fb6307151bc4b457f288ab9217641e649e7421b38a51ae7adb",
+      "sha256": "e49cb33c0fbe1f4c0cd095cd9787cd654cb069ce074fb18b0bc2a395b4aae8b4",
+      "size": 4392,
+      "normalized_sha256": "f2f06dbd97dcbeb69bade1631f3d7b6220f262e3be3b629bd6e74d76a4011ec4",
+      "format_sha256": "f2f06dbd97dcbeb69bade1631f3d7b6220f262e3be3b629bd6e74d76a4011ec4",
       "format_kind": "gofmt"
     },
     "internal/web/handlers_register.go": {
@@ -1143,10 +1143,10 @@
     },
     "internal/web/ports_test.go": {
       "role": "observe",
-      "sha256": "922c1100a80604a5102123f6e7cadee7221acf6c9657ea6ab4eaa8f7bc00a7a4",
-      "size": 9320,
-      "normalized_sha256": "27fd2951d65d216f2f83a487dfd5223b105f0da92001db69e48760535314e740",
-      "format_sha256": "27fd2951d65d216f2f83a487dfd5223b105f0da92001db69e48760535314e740",
+      "sha256": "bfd9e5e3329aac97ef51dc8e2cc2a30123e786883662af7f9e3cd19632644617",
+      "size": 13474,
+      "normalized_sha256": "93a2b0fdd33232f109b6db5be88e27954237be4a72fbe56c1476006f4d45a987",
+      "format_sha256": "a545d1284a5f2a330572b6133226e71b1824f4a6355fcebe7db3d3be55abaf14",
       "format_kind": "gofmt"
     },
     "internal/web/ratelimit_test.go": {
@@ -1247,9 +1247,9 @@
     },
     "internal/web/static/index.html": {
       "role": "index",
-      "sha256": "37e6ff689d92cf3bcf267fc3e0388ccb7838a1d0d811308cc66ee43466726d7c",
-      "size": 194237,
-      "normalized_sha256": "d4444bf5beb395b5886bc492e5b8c0377e5ffa6822dc9f13e9fbc46603668566"
+      "sha256": "d41f7b641b66f9076aa0d308528d598f8b18cfb0dccb5699286bdf3ab50f3688",
+      "size": 194980,
+      "normalized_sha256": "1d1a4f208b866c260c4402a20ccde02471980152c31a8b6860046ca7e3883c69"
     },
     "internal/web/static/js/app.js": {
       "role": "index",

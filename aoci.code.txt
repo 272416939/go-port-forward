@@ -76,7 +76,7 @@ firewall_windows.go[IN6T]: F:基于Windows netsh advfirewall命令行实现端�
 
 ===E:/code/go-port-forward/internal/forward/===
 acl.go[DS8M]: F:实现IP黑白名单原子快照无锁判定、异步连接日志持久化与活跃会话跟踪 | R:code:internal/models/acl.go,code:internal/storage/storage.go | A:forward.Manager,Forwarder | S:热路径ACL判定使用atomic.Pointer无锁读取，白名单隐式拒绝仅作用于指定规则
-manager.go[AN9L]: F:管理全部TCP/UDP/NetherNet转发器生命周期、规则加载与旁路服务装配 | R:code:internal/forward/tcp.go,code:internal/forward/udp.go,code:internal/forward/acl.go | A:web.handler,main | S:透明模式下网卡与套接字绑定需要root/CAP_NET_ADMIN权限，规则状态变更由opsMu加锁互斥
+manager.go[AN9L]: F:管理全部TCP/UDP/NetherNet转发器生命周期、端点级端口冲突拦截与旁路服务装配 | R:code:internal/forward/tcp.go,code:internal/forward/udp.go,code:internal/forward/acl.go | A:web.handler,main | S:透明模式绑定需CAP_NET_ADMIN权限，端口冲突检测覆盖NetherNet信令TCP与数据UDP端口并在保存前拦截
 nethernet_backend.go[IN7S]: F:包装透明UDP套接字工厂并将NetherNet会话接入主转发会话注册表 | R:code:internal/forward/tuple_registry.go,code:internal/nethernet/multiplexer.go | A:Manager.startNetherNet | S:NetherNet会话建立与销毁必须同步注册表，否则Windows客户端无法安装/32回程路由
 target.go[DN8S]: F:校验通用模式转发目标IP合法性，严防内网、回环、保留及本机网卡地址跳板 | R:- | A:CheckDialControl,CheckTargetIP | S:透明模式豁免内网地址检查（其目标必须为隧道地址），通用模式拦截CGNAT与本机网卡IP
 tcp.go[AN8M]: F:实现TCP端口监听、出站连接拨号、双向数据拷贝与PROXY Protocol v2注入 | R:code:internal/forward/acl.go,code:pkg/pool/pool.go | A:Manager.startForwarders | S:非阻塞停止时必须并发关闭所有活跃客户端和上游连接，缓冲区使用全局pool复用
@@ -91,7 +91,7 @@ logger.go[CO7T]: F:初始化基于Zap和Lumberjack的全局结构化日志记录
 ===E:/code/go-port-forward/internal/models/===
 accesscode.go[DI7S]: F:定义隧道访问码数据模型、设备指纹解析、摘要脱敏及创建更新请求结构 | R:code:internal/models/models.go | A:storage,users,web | S:密钥与设备指纹标记json忽略，对外API与日志中指纹仅展示前后4位摘要
 group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间与上限不突破全局天花板 | R:code:internal/models/settings.go | A:storage,users | S:组配额上限不能为负，且非零时不得超越Settings配置的全局上限天花板
-models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet TLS及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet开启时必须校验证书与私钥能否通过tls.X509KeyPair解析配对
+models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet端口计算及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet信令与数据端口不能相同，开启TLS时证书与私钥必须通过tls.X509KeyPair解析配对
 settings.go[DC8M]: F:定义全局设置单例模型、Schema版本、端口区间与默认组等全局配额天花板 | R:- | A:storage,users | S:默认端口范围20000-29999防止普通用户侵占低位特权端口，注册开关默认关闭
 user.go[DI8M]: F:定义Web用户账号模型、角色常量、密码修改与注册请求数据传输结构 | R:code:internal/models/group.go | A:storage,auth,users | S:PasswordHash必须标记json忽略严禁在REST响应中回显，配额由组动态解析
 
@@ -138,7 +138,7 @@ handlers_acl.go[EU7S]: F:处理IP访问控制名单增删查、按租户连接�
 handlers_auth.go[EU8S]: F:处理用户登录、注销、当前身份与配额用量查询、改密及邮箱绑定 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.router | S:登录失败按IP和用户名滑动窗口双重限频，修改密码后同步清除当前会话Cookie
 handlers_codes.go[EU7S]: F:处理访问码自助管理，包括创建、更新、删除、复制接入码与解绑设备 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:删除访问码前必须检查其隧道地址是否仍被转发规则引用，越权访问返回404防探测
 handlers_groups.go[EU7S]: F:处理管理员对用户组CRUD、全局配额设置及SMTP配置更新与测试发信 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:仅管理员可访问，SMTP测试发信若失败必须原样返回SMTP服务错误以便排障
-handlers_ports.go[EU6S]: F:提供用户配额区间内的随机端口分发与服务端TCP/UDP真实试绑占用检测 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:普通用户只能检测自身配额允许的端口，端口冲突错误按用户身份脱敏规则名
+handlers_ports.go[EU6S]: F:提供用户配额区间内的随机端口分发与结合规则库及试绑的端口占用检测 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:普通用户只能检测自身配额允许的端口，端口检测与随机联动规则库IsPortUsed防冲突，冲突错误脱敏规则名
 handlers_register.go[EU7S]: F:处理无需登录的公开注册、发送邮箱验证码、重置密码与公开配置查询 | R:code:internal/users/service.go,code:internal/email/email.go | A:web.router | S:公开端点严格校验Origin防CSRF，发送验证码按IP限频，重名与找回失败响应对齐防枚举
 handlers_tunnel.go[EU6T]: F:向管理员暴露服务端在线隧道链路质量、MTU与丢包监控数据 | R:code:internal/tunnelapp/linkreport.go | A:web.router | S:仅管理员可查，隧道未开启时显式返回enabled=false而非404
 handlers_users.go[EU7T]: F:处理管理员对用户账号的增删改查及配额分配 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:管理员不能停用或降级自己，删除用户前必须确认名下已无关联的转发规则
@@ -153,7 +153,7 @@ theme.css[EU5S]: F:管理Web管理面板亮色与暗色主题变量切换及高�
 user-theme.css[EU5S]: F:针对普通用户端界面的专属轻量化主题与布局微调样式 | R:code:internal/web/static/index.html | A:Web浏览器 | S:-
 
 ===E:/code/go-port-forward/internal/web/static/===
-index.html[EU8L]: F:Web管理面板单页应用HTML模板骨架，包含仪表盘、规则、访问码与设置组件 | R:code:internal/web/static/js/app.js,code:internal/web/static/css/app.css | A:Web浏览器 | S:全部静态页面由Go embed嵌入
+index.html[EU8L]: F:Web管理面板单页应用HTML模板骨架，包含仪表盘、规则、访问码与设置组件 | R:code:internal/web/static/js/app.js,code:internal/web/static/css/app.css | A:Web浏览器 | S:全部静态页面由Go embed嵌入，规则模态框在端口修改时重置提示并在已知占用时前置拦截保存
 login.html[EU7M]: F:Web管理面板登录、注册与找回密码单页HTML模板及表单校验 | R:code:internal/web/static/css/app.css | A:Web浏览器 | S:公开访问页面，表单直接调用/api/auth相关公开端点
 
 ===E:/code/go-port-forward/internal/web/static/js/===
