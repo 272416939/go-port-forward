@@ -131,3 +131,130 @@ func TestTransparentDuplicateLegacyRulesLoadWithoutError(t *testing.T) {
 		t.Fatalf("应加载 2 条存量规则，得到 %d", len(rules))
 	}
 }
+
+// TestNetherNetPortConflictWithGeneralRules 验证 NetherNet 与通用规则/透明规则的端口双向冲突拦截：
+// 1. 已有 NetherNet 规则（监听 39042，默认占用 TCP 39042 信令端口与 UDP 39043 数据端口）：
+//    - 新建通用 TCP 规则（端口 39042）必须被拦截（ErrPortConflict）；
+//    - 新建通用 UDP 规则（端口 39043）必须被拦截；
+//    - 新建普通透明 UDP 规则（端口 39042 或 39043）必须被拦截；
+// 2. 反向：已有通用 TCP 规则（端口 39042），新建 NetherNet 规则（监听 39042）必须被拦截；
+// 3. 已有通用 UDP 规则（端口 39043），新建 NetherNet 规则（监听 39042，默认数据端口 39043）必须被拦截；
+// 4. UpdateRule 更新撞上 NetherNet 端口也必须被拦截。
+func TestNetherNetPortConflictWithGeneralRules(t *testing.T) {
+	mgr := newManagerFixture(t)
+
+	// 先建一条 NetherNet 规则（监听 0.0.0.0:39042，数据端口 39043）
+	nnReq := &models.CreateRuleRequest{
+		Name:        "bds26.51-1",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39042,
+		Protocol:    models.ProtocolUDP,
+		TargetAddr:  "10.66.0.3",
+		TargetPort:  39042,
+		Transparent: true,
+		NetherNet:   true,
+		Enabled:     false,
+	}
+	nnRule, err := mgr.AddRule(nnReq)
+	if err != nil {
+		t.Fatalf("add nethernet rule: %v", err)
+	}
+
+	// 1.1 新建通用 TCP 规则（端口 39042）：信令端口占用 TCP，必须报 ErrPortConflict
+	_, err = mgr.AddRule(&models.CreateRuleRequest{
+		Name:        "general-tcp-39042",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39042,
+		Protocol:    models.ProtocolTCP,
+		TargetAddr:  "198.51.100.1",
+		TargetPort:  80,
+		Transparent: false,
+		Enabled:     false,
+	})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("NetherNet 信令端口 (TCP 39042) 冲突必须返回 ErrPortConflict，得到 %v", err)
+	}
+
+	// 1.2 新建通用 UDP 规则（端口 39043）：数据端口占用 UDP，必须报 ErrPortConflict
+	_, err = mgr.AddRule(&models.CreateRuleRequest{
+		Name:        "general-udp-39043",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39043,
+		Protocol:    models.ProtocolUDP,
+		TargetAddr:  "198.51.100.1",
+		TargetPort:  80,
+		Transparent: false,
+		Enabled:     false,
+	})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("NetherNet 数据端口 (UDP 39043) 冲突必须返回 ErrPortConflict，得到 %v", err)
+	}
+
+	// 1.3 新建普通透明代理 UDP 规则（端口 39042）：主监听端口冲突
+	_, err = mgr.AddRule(&models.CreateRuleRequest{
+		Name:        "tp-udp-39042",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39042,
+		Protocol:    models.ProtocolUDP,
+		TargetAddr:  "10.66.0.3",
+		TargetPort:  19132,
+		Transparent: true,
+		Enabled:     false,
+	})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("透明 UDP 规则撞上 NetherNet 主端口 (39042) 必须被拦截，得到 %v", err)
+	}
+
+	// 1.4 新建普通透明代理 UDP 规则（端口 39043）：数据端口冲突
+	_, err = mgr.AddRule(&models.CreateRuleRequest{
+		Name:        "tp-udp-39043",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39043,
+		Protocol:    models.ProtocolUDP,
+		TargetAddr:  "10.66.0.3",
+		TargetPort:  19133,
+		Transparent: true,
+		Enabled:     false,
+	})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("透明 UDP 规则撞上 NetherNet 数据端口 (39043) 必须被拦截，得到 %v", err)
+	}
+
+	// 2. 反向验证：新建一个不同端口的通用 TCP 规则，然后更新为 39042
+	tcpRule, err := mgr.AddRule(&models.CreateRuleRequest{
+		Name:        "temp-tcp",
+		ListenAddr:  "0.0.0.0",
+		ListenPort:  39050,
+		Protocol:    models.ProtocolTCP,
+		TargetAddr:  "198.51.100.1",
+		TargetPort:  80,
+		Transparent: false,
+		Enabled:     false,
+	})
+	if err != nil {
+		t.Fatalf("add temp-tcp: %v", err)
+	}
+	newPort := 39042
+	_, err = mgr.UpdateRule(tcpRule.ID, &models.UpdateRuleRequest{ListenPort: &newPort})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("更新通用 TCP 端口为 39042 必须被拦截 (ErrPortConflict)，得到 %v", err)
+	}
+
+	// 3. 验证 IsPortUsed
+	if !mgr.IsPortUsed(39042) {
+		t.Fatal("IsPortUsed(39042) should be true (NetherNet signal and main port)")
+	}
+	if !mgr.IsPortUsed(39043) {
+		t.Fatal("IsPortUsed(39043) should be true (NetherNet data port)")
+	}
+	if mgr.IsPortUsed(39099) {
+		t.Fatal("IsPortUsed(39099) should be false")
+	}
+
+	// 4. 自身更新排除自身：改名字不改端口放行
+	newName := "bds-renamed"
+	if _, err := mgr.UpdateRule(nnRule.ID, &models.UpdateRuleRequest{Name: &newName}); err != nil {
+		t.Fatalf("自身更新同端口不应报错: %v", err)
+	}
+}
+

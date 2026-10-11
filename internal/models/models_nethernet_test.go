@@ -180,3 +180,39 @@ func TestNetherNetTLSNormalize(t *testing.T) {
 		t.Fatal("nil receiver must normalize to nil")
 	}
 }
+
+// TestNetherNetPortValidation 校验 NetherNet 端口计算与冲突约束：
+// 1. 数据端口超出 65535（如默认 listen_port=65535 且未显式指定 data_port 时计算出 65536）必须被拒；
+// 2. 信令端口与数据端口相同时必须被拒；
+// 3. 正常情况 NetherNetPorts 正确返回端口。
+func TestNetherNetPortValidation(t *testing.T) {
+	sig, dat := NetherNetPorts(39042, nil)
+	if sig != 39042 || dat != 39043 {
+		t.Fatalf("NetherNetPorts(39042, nil) = (%d, %d), want (39042, 39043)", sig, dat)
+	}
+
+	sig2, dat2 := NetherNetPorts(39042, &NetherNetTLS{SignalPort: 39044, DataPort: 39045})
+	if sig2 != 39044 || dat2 != 39045 {
+		t.Fatalf("NetherNetPorts custom = (%d, %d), want (39044, 39045)", sig2, dat2)
+	}
+
+	// 端口溢出拦截：65535 默认 +1 变成 65536
+	req := CreateRuleRequest{
+		Name: "overflow", ListenPort: 65535, TargetAddr: "10.66.0.3", TargetPort: 19132,
+		Protocol: ProtocolUDP, Transparent: true, NetherNet: true,
+	}
+	if err := ValidateCreateRuleRequest(&req); err == nil {
+		t.Fatal("listen_port=65535 without data_port must be rejected")
+	}
+
+	// 信令端口与数据端口相同拦截
+	reqSame := CreateRuleRequest{
+		Name: "same-port", ListenPort: 39042, TargetAddr: "10.66.0.3", TargetPort: 19132,
+		Protocol: ProtocolUDP, Transparent: true, NetherNet: true,
+		NetherNetTLS: &NetherNetTLS{SignalPort: 39042, DataPort: 39042},
+	}
+	if err := ValidateCreateRuleRequest(&reqSame); err == nil {
+		t.Fatal("signal_port == data_port must be rejected")
+	}
+}
+

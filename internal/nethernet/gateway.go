@@ -63,16 +63,7 @@ func NewGateway(rule *models.ForwardRule, mux *Multiplexer, publicIP string) (*G
 	}
 
 	// Determine signaling port and data port
-	signalPort := rule.ListenPort
-	dataPort := rule.ListenPort + 1
-	if rule.NetherNetTLS != nil {
-		if rule.NetherNetTLS.SignalPort > 0 {
-			signalPort = rule.NetherNetTLS.SignalPort
-		}
-		if rule.NetherNetTLS.DataPort > 0 {
-			dataPort = rule.NetherNetTLS.DataPort
-		}
-	}
+	signalPort, dataPort := models.NetherNetPorts(rule.ListenPort, rule.NetherNetTLS)
 
 	listenAddr := fmt.Sprintf("%s:%d", rule.ListenAddr, signalPort)
 	if rule.ListenAddr == "" {

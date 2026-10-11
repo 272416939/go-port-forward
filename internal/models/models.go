@@ -82,6 +82,19 @@ type NetherNetTLS struct {
 	DataPort int `json:"data_port"`
 }
 
+// NetherNetPorts 计算 NetherNet 规则实际使用的信令端口（TCP）与数据端口（UDP）。
+func NetherNetPorts(listenPort int, tls *NetherNetTLS) (signalPort int, dataPort int) {
+	signalPort = listenPort
+	if tls != nil && tls.SignalPort > 0 {
+		signalPort = tls.SignalPort
+	}
+	dataPort = listenPort + 1
+	if tls != nil && tls.DataPort > 0 {
+		dataPort = tls.DataPort
+	}
+	return signalPort, dataPort
+}
+
 // MaxNetherNetPEMBytes 限制单份 PEM 的长度。完整证书链通常几 KB，128KB 足够
 // 宽裕；上限的意义是防止把规则当成任意文件的存储位（bbolt 单值过大也会拖慢
 // 每次规则列表查询）。
@@ -528,6 +541,13 @@ func ValidateCreateRuleRequest(req *CreateRuleRequest) error {
 		if req.Protocol != ProtocolUDP {
 			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
 		}
+		signalPort, dataPort := NetherNetPorts(req.ListenPort, req.NetherNetTLS)
+		if dataPort > 65535 {
+			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）：监听端口为 65535 时请显式配置数据端口 | NetherNet data port out of range (1-65535)")
+		}
+		if signalPort == dataPort {
+			return fmt.Errorf("NetherNet 信令端口与数据端口不能相同 (%d) | NetherNet signal port and data port cannot be identical", signalPort)
+		}
 	}
 	if err := req.NetherNetTLS.Validate(); err != nil {
 		return err
@@ -576,6 +596,13 @@ func ValidateForwardRule(rule *ForwardRule) error {
 		}
 		if rule.Protocol != ProtocolUDP {
 			return fmt.Errorf("NetherNet 模式仅支持 UDP 协议 | NetherNet mode only supports UDP")
+		}
+		signalPort, dataPort := NetherNetPorts(rule.ListenPort, rule.NetherNetTLS)
+		if dataPort > 65535 {
+			return fmt.Errorf("NetherNet 数据端口超出范围（1-65535）：监听端口为 65535 时请显式配置数据端口 | NetherNet data port out of range (1-65535)")
+		}
+		if signalPort == dataPort {
+			return fmt.Errorf("NetherNet 信令端口与数据端口不能相同 (%d) | NetherNet signal port and data port cannot be identical", signalPort)
 		}
 	}
 	if err := rule.NetherNetTLS.Validate(); err != nil {

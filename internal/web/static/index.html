@@ -360,7 +360,8 @@
           <div class="col-md-4">
             <label class="form-label"><span x-text="t('监听端口','Listen Port')"></span> <span class="text-danger">*</span></label>
             <div class="input-group">
-              <input class="form-control" type="number" min="1" max="65535" x-model.number="form.listen_port" placeholder="8080"/>
+              <input class="form-control" type="number" min="1" max="65535" x-model.number="form.listen_port" placeholder="8080"
+                     @input="portHint=''; portAvailable=false; checkedPort=null"/>
               <button class="btn btn-outline-secondary" type="button" @click="randomPort()" :disabled="portBusy"
                       :title="t('在配额区间内随机挑一个可用端口','Pick a random free port in your range')">
                 <i class="bi bi-dice-3"></i>
@@ -1944,6 +1945,7 @@ function portForwardApp() {
 	    portBusy: false,
 	    portHint: '',
 	    portAvailable: false,
+	    checkedPort: null,
 	    pwForm: { old_password:'', new_password:'' },
 	    pwSaving: false,
 	    _usersModal: null,
@@ -2777,6 +2779,7 @@ function portForwardApp() {
         const res = await fetch('/api/ports/check?port=' + p)
         const d = await res.json()
         if (d.success && d.data) {
+          this.checkedPort = p
           this.portAvailable = !!d.data.available
           this.portHint = this.portAvailable
             ? _t('端口 ' + p + ' 可用', 'port ' + p + ' is free')
@@ -2855,6 +2858,9 @@ function portForwardApp() {
 
 	    showAddModal() {
 	      this.formError = ''
+	      this.portHint = ''
+	      this.portAvailable = false
+	      this.checkedPort = null
 	      this.form = this.newRuleForm()
 	      // 通用模式拦截「目标填了隧道地址」需要访问码的 tun_ip 列表做比对。
 	      if (this.isAdmin) this.loadAllCodes()
@@ -2863,6 +2869,9 @@ function portForwardApp() {
 
 	    editRule(r) {
 	      this.formError = ''
+	      this.portHint = ''
+	      this.portAvailable = false
+	      this.checkedPort = null
 	      this.form = this.editableRuleForm(r)
 	      if (this.isAdmin) this.loadAllCodes()
 	      this._ruleModal.show()
@@ -2995,6 +3004,12 @@ function portForwardApp() {
       if (!this.form.target_addr) { this.formError = _t('请填写目标地址', 'Target address is required'); return }
       if (!this.form.listen_port) { this.formError = _t('请填写监听端口', 'Listen port is required'); return }
       if (!this.form.target_port) { this.formError = _t('请填写目标端口', 'Target port is required'); return }
+
+      // 端口占用快速前置拦截：若刚刚检测过该端口且显示被占用，直接拦截
+      if (this.checkedPort === Number(this.form.listen_port) && !this.portAvailable) {
+        this.formError = _t('监听端口 ' + this.form.listen_port + ' 已被占用，请更换端口', 'Listen port ' + this.form.listen_port + ' is already in use, please choose another port')
+        return
+      }
 
       // 通用模式拦截：目标填的是访问码隧道地址，说明用户想走隧道——那是
       // 透明模式的语义，引导切模式，而不是存一条数据面语义错误的规则。

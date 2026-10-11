@@ -242,3 +242,73 @@ func TestMaskPortConflictHelper(t *testing.T) {
 		t.Fatal("非冲突错误应原样返回")
 	}
 }
+
+// TestCreateRulePortConflictWithNetherNetInterceptsOnSave 验证在 Web API 保存动作时：
+// 1. 已有 NetherNet 规则（UDP 39042），保存通用 TCP 规则（端口 39042）直接返回 409 Conflict 拦截，不会保存进规则库；
+// 2. 已有通用 TCP 规则（端口 39060），保存透明 NetherNet 规则（监听 39060）直接返回 409 Conflict 拦截；
+// 3. /api/ports/check 对已被规则（含未启用规则、NetherNet 数据端口）占用的端口返回 available: false。
+func TestCreateRulePortConflictWithNetherNetInterceptsOnSave(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	// 1. 创建一条 NetherNet 透明规则（39042，未启用）
+	nnBody := `{"name":"bds26.51-1","listen_addr":"0.0.0.0","listen_port":39042,"protocol":"udp","transparent":true,"nethernet":true,"target_addr":"10.66.0.3","target_port":39042,"enabled":false}`
+	rec := httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", nnBody, f.admin))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create nethernet rule: status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 2. 尝试创建通用代理 TCP 规则（端口 39042）：必须在保存动作时直接 409 拦截
+	tcpBody := `{"name":"w","listen_addr":"0.0.0.0","listen_port":39042,"protocol":"tcp","transparent":false,"target_addr":"198.51.100.7","target_port":80,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", tcpBody, f.admin))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("通用代理 TCP 与 NetherNet 信令同端口必须在保存时 409 拦截，status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bds26.51-1") {
+		t.Fatalf("管理员冲突提示应包含占用规则名称：%s", rec.Body.String())
+	}
+
+	// 3. 尝试在 39043（NetherNet 数据端口）创建透明代理 UDP 规则：必须在保存时 409 拦截
+	tpBody := `{"name":"tp-conflict","listen_addr":"0.0.0.0","listen_port":39043,"protocol":"udp","transparent":true,"target_addr":"10.66.0.3","target_port":19132,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", tpBody, f.admin))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("透明代理 UDP 与 NetherNet 数据端口同端口必须在保存时 409 拦截，status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 4. 反向：先建一条通用 TCP 规则 (39060)，再建 NetherNet 透明规则 (39060)，保存时直接 409 拦截
+	tcpOkBody := `{"name":"web-tcp","listen_addr":"0.0.0.0","listen_port":39060,"protocol":"tcp","transparent":false,"target_addr":"198.51.100.7","target_port":80,"enabled":false}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", tcpOkBody, f.admin))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create tcp rule: status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	nnConflictBody := `{"name":"nn-conflict","listen_addr":"0.0.0.0","listen_port":39060,"protocol":"udp","transparent":true,"nethernet":true,"target_addr":"10.66.0.3","target_port":39060,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", nnConflictBody, f.admin))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("NetherNet 规则撞上已有通用 TCP 端口必须在保存时 409 拦截，status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 5. /api/ports/check 对已被未启用规则占用的 39042、39043（数据端口）、39060 均返回 available: false
+	for _, p := range []string{"39042", "39043", "39060"} {
+		rec = httptest.NewRecorder()
+		f.h.checkPort(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/ports/check?port="+p, nil), f.admin))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("checkPort(%s) status=%d, body=%s", p, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Data PortCheckResult `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Data.Available {
+			t.Fatalf("端口 %s 已被规则占用，checkPort 应返回 available=false", p)
+		}
+	}
+}
+

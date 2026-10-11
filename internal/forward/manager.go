@@ -316,7 +316,7 @@ func (m *Manager) ValidateCreateRequest(req *models.CreateRuleRequest) error {
 	if err := models.ValidateCreateRuleRequest(req); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRule, err)
 	}
-	if err := m.checkPortConflict(req.ListenAddr, req.ListenPort, req.Protocol, ""); err != nil {
+	if err := m.checkPortConflictEx(req.ListenAddr, req.ListenPort, req.Protocol, req.NetherNet, req.NetherNetTLS, ""); err != nil {
 		return err
 	}
 	if err := m.checkTransparentTargetDuplicate(req.Transparent, req.TargetAddr, req.TargetPort, ""); err != nil {
@@ -397,7 +397,7 @@ func (m *Manager) UpdateRule(id string, req *models.UpdateRuleRequest) (*models.
 	}
 
 	// Port conflict detection (exclude self)
-	if err := m.checkPortConflict(next.ListenAddr, next.ListenPort, next.Protocol, id); err != nil {
+	if err := m.checkPortConflictEx(next.ListenAddr, next.ListenPort, next.Protocol, next.NetherNet, next.NetherNetTLS, id); err != nil {
 		return nil, err
 	}
 
@@ -813,25 +813,110 @@ func (m *Manager) Shutdown() {
 
 // --- internal helpers ---
 
+type rulePortEndpoint struct {
+	addr     string
+	port     int
+	protocol models.Protocol // ProtocolTCP or ProtocolUDP
+	desc     string
+}
+
+func getRulePortEndpoints(listenAddr string, listenPort int, proto models.Protocol, nethernet bool, tls *models.NetherNetTLS) []rulePortEndpoint {
+	addr := models.NormalizeListenAddr(listenAddr)
+	if nethernet {
+		signalPort, dataPort := models.NetherNetPorts(listenPort, tls)
+		return []rulePortEndpoint{
+			{
+				addr:     addr,
+				port:     signalPort,
+				protocol: models.ProtocolTCP,
+				desc:     "NetherNet 信令端口",
+			},
+			{
+				addr:     addr,
+				port:     listenPort,
+				protocol: models.ProtocolUDP,
+				desc:     "NetherNet 监听端口",
+			},
+			{
+				addr:     addr,
+				port:     dataPort,
+				protocol: models.ProtocolUDP,
+				desc:     "NetherNet 数据端口",
+			},
+		}
+	}
+
+	proto = models.NormalizeProtocol(proto)
+	switch proto {
+	case models.ProtocolTCP:
+		return []rulePortEndpoint{
+			{addr: addr, port: listenPort, protocol: models.ProtocolTCP, desc: "TCP"},
+		}
+	case models.ProtocolUDP:
+		return []rulePortEndpoint{
+			{addr: addr, port: listenPort, protocol: models.ProtocolUDP, desc: "UDP"},
+		}
+	case models.ProtocolBoth:
+		return []rulePortEndpoint{
+			{addr: addr, port: listenPort, protocol: models.ProtocolTCP, desc: "TCP"},
+			{addr: addr, port: listenPort, protocol: models.ProtocolUDP, desc: "UDP"},
+		}
+	default:
+		return nil
+	}
+}
+
+func formatConflictProtocol(ce, ee rulePortEndpoint, existingRule *models.ForwardRule) string {
+	if existingRule.NetherNet || ce.desc != ee.desc {
+		return fmt.Sprintf("%s 与 %s 冲突", ce.desc, ee.desc)
+	}
+	return string(existingRule.Protocol)
+}
+
+// IsPortUsed checks whether any configured rule uses the given port on any protocol.
+func (m *Manager) IsPortUsed(port int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.rules {
+		endpoints := getRulePortEndpoints(r.ListenAddr, r.ListenPort, r.Protocol, r.NetherNet, r.NetherNetTLS)
+		for _, ep := range endpoints {
+			if ep.port == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkPortConflict returns an error if the given listen addr/port/protocol
 // overlaps with any existing rule (excluding the rule with excludeID).
 func (m *Manager) checkPortConflict(listenAddr string, listenPort int, proto models.Protocol, excludeID string) error {
-	addrA := models.NormalizeListenAddr(listenAddr)
-	proto = models.NormalizeProtocol(proto)
+	return m.checkPortConflictEx(listenAddr, listenPort, proto, false, nil, excludeID)
+}
+
+// checkPortConflictEx performs full conflict detection covering TCP, UDP, and NetherNet
+// signaling (TCP) and data (UDP) ports.
+func (m *Manager) checkPortConflictEx(listenAddr string, listenPort int, proto models.Protocol, nethernet bool, tls *models.NetherNetTLS, excludeID string) error {
+	candidateEndpoints := getRulePortEndpoints(listenAddr, listenPort, proto, nethernet, tls)
+	if len(candidateEndpoints) == 0 {
+		return nil
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, r := range m.rules {
 		if r.ID == excludeID {
 			continue
 		}
-		addrB := models.NormalizeListenAddr(r.ListenAddr)
-		if addrA != addrB || r.ListenPort != listenPort {
-			continue
-		}
-		if protocolsOverlap(proto, r.Protocol) {
-			return fmt.Errorf("%w: %s:%d 已被规则 | already used by rule %q 占用 (协议 | protocol %s)",
-				ErrPortConflict,
-				addrA, listenPort, r.Name, r.Protocol)
+		existingEndpoints := getRulePortEndpoints(r.ListenAddr, r.ListenPort, r.Protocol, r.NetherNet, r.NetherNetTLS)
+		for _, ce := range candidateEndpoints {
+			for _, ee := range existingEndpoints {
+				if ce.protocol == ee.protocol && ce.port == ee.port && ce.addr == ee.addr {
+					return fmt.Errorf("%w: %s:%d 已被规则 | already used by rule %q 占用 (协议 | protocol %s)",
+						ErrPortConflict,
+						ce.addr, ce.port, r.Name, formatConflictProtocol(ce, ee, r))
+				}
+			}
 		}
 	}
 	return nil
@@ -966,11 +1051,9 @@ func (m *Manager) startNetherNet(r *models.ForwardRule, e *entry) error {
 		return fmt.Errorf("无法获取公网 IP，请在 forward.public_ip 中指定 | cannot detect public IP; set forward.public_ip")
 	}
 
-	// Determine data port (default: signal port + 1)
-	dataPort := r.ListenPort + 1
-	if r.NetherNetTLS != nil && r.NetherNetTLS.DataPort > 0 {
-		dataPort = r.NetherNetTLS.DataPort
-	}
+	// Determine signaling port and data port (default: signal port + 1)
+	signalPort, dataPort := models.NetherNetPorts(r.ListenPort, r.NetherNetTLS)
+	_ = signalPort
 
 	// 数据端口独占检查：NetherNet 数据面是裸 UDP socket，两条规则抢同一个端口
 	// 时后启动的那条 bind 失败，而失败只表现为「该规则的玩家进不来」——先在这里
