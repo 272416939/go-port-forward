@@ -453,3 +453,7 @@ pf-client.log
 pf-client.conf
 # 首次启动生成的初始管理员密码（明文凭据，绝不能进仓库）
 admin-credentials.txt
+
+# AOCI agent host integration (machine-bound; do not commit)
+.mcp.json
+.mcp.json.backup.*

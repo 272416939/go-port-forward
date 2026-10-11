@@ -1,0 +1,290 @@
+#AOCI-CODE-VOLUME: 1
+
+===E:/code/go-port-forward/===
+.gitattributes[FG2T]: F:声明全平台按LF检出文本文件，防止Windows检出重写换行导致指纹漂移 | R:- | A:git | S:检出时必须强制LF，禁止自动重写为CRLF
+.gitignore[FG3L]: F:声明开发工具、构建二进制、本地测试及私有凭据的忽略规则 | R:- | A:git | S:不要将aoci核心资产加进忽略，宿主MCP配置由工具自身区块管理
+AGENTS.md[SG7S]: F:声明AOCI仓库级认知层合同、模型认知生成准则及收尾维护边界 | R:code:aoci.txt,code:aoci.meta.txt | A:AI Agent | S:认知条目只能由模型根据真实源码证据创作，禁止根据规则模板拼接推导
+CHANGELOG.md[SG4L]: F:记录多版本功能新增、修复及破坏性变更历史 | R:code:README.md | A:维护者与使用者 | S:v1.3.0握手版本硬切为v5/v6，存量旧版客户端必须成对升级服务端
+LICENSE[SG2M]: F:声明Apache 2.0开源许可证条款 | R:- | A:开源合规 | S:-
+NETHERNET_UI.md[SN5S]: F:说明Minecraft基岩版NetherNet透明代理模式配置、TLS证书粘贴与排障指南 | R:code:README.md,code:internal/config/config.go | A:面板用户与服主 | S:iOS玩家必须启用HTTPS信令，UDP数据端口不可落在19132-19139的BDS预留池
+README.md[SG7L]: F:项目全貌说明，阐述通用与透明代理模式、多用户访问码体系及快速启动指南 | R:code:app/README.md,code:NETHERNET_UI.md | A:使用者与开发者 | S:透明代理模式要求中转机Linux root运行，后端Windows机器配合pf-client
+build.ps1[OV5S]: F:Windows PowerShell环境下跨平台交叉编译打包主程序并生成SHA256校验和 | R:code:main.go,code:go.mod | A:发布与构建 | S:amd64平台启用base64x和sonic标签，其他架构回退到go_json
+build.sh[OV5S]: F:Bash环境下交叉编译主程序全平台产物、打包压缩并计算SHA256校验和 | R:code:main.go,code:go.mod | A:发布与构建 | S:根据平台架构选择sonic/base64x或go_json编译标签，打包需在子shell避免cd污染
+go.mod[FV4T]: F:声明主项目Go版本、核心中间件与依赖库规范 | R:- | A:Go toolchain | S:Go版本要求1.26，使用sonic、ants、bbolt等高性能基础设施
+go.sum[FV2S]: F:记录主项目所有直接与间接依赖模块的代码哈希校验和 | R:code:go.mod | A:Go toolchain | S:-
+main.go[EB9M]: F:应用程序总入口，调度命令行参数、服务管理、应用生命周期与优雅停机 | R:code:internal/config/config.go,code:internal/web/server.go,code:internal/forward/manager.go | A:OS | S:支持Windows服务/systemd/launchd注册运行，捕获SIGINT/SIGTERM后有界等待清理避免挂起
+
+===E:/code/go-port-forward/.gitee/pipelines/===
+release.yml[OV4T]: F:定义Gitee Go全平台交叉编译与release-artifacts制品上传流水线 | R:code:build.sh,code:go.mod | A:Gitee CI | S:多架构编译须根据amd64/arm架构分别选择base64x,sonic或go_json构建标签
+
+===E:/code/go-port-forward/.github/workflows/===
+release.yml[OV5S]: F:定义GitHub Actions在推送版本tag时全平台交叉编译、打包校验和发布Release | R:code:go.mod,code:build.ps1 | A:GitHub Actions | S:amd64与arm64采用不同tags编译，预发布版本根据tag格式正则判断
+
+===E:/code/go-port-forward/app/===
+README.md[SN6S]: F:说明pf-client Windows加密隧道客户端架构、构建分发、运行配置与故障排查 | R:code:app/build.sh,code:app/cmd/client/main.go | A:Windows客户端部署者 | S:发布产物必须同时包含pf-client.exe与同目录wintun.dll，构建需带-H=windowsgui
+build.sh[OV4T]: F:交叉编译Windows amd64客户端pf-client.exe，拷贝wintun.dll并打包zip | R:code:app/cmd/client/main.go | A:开发构建 | S:必须注入-H=windowsgui去除控制台黑框，构建后清理非gui的临时client.exe
+go.mod[FV3T]: F:声明pfapp客户端Go模块依赖及替换为本地上级go-port-forward模块 | R:code:go.mod | A:go build | S:通过replace指令本地引用上级主模块
+go.sum[FV2T]: F:记录pfapp模块第三方依赖包的加密校验哈希 | R:code:app/go.mod | A:go build | S:-
+
+===E:/code/go-port-forward/app/cmd/client/===
+README.md[SV3T]: F:说明pf-client图标资源规范、多尺寸未压缩DIB要求及go-winres编译步骤 | R:code:assets/brand/generate.py | A:客户端资源构建者 | S:icon.ico必须为多尺寸未压缩DIB，API不认PNG压缩条目
+config_windows.go[FC6S]: F:管理pf-client.conf本地YAML配置读取、迁移兼容与保存 | R:code:pkg/accesscode/accesscode.go | A:Engine,startUI | S:配置文件权限收紧为0600，兼容旧版单行裸地址和历史user_id字段
+device_windows.go[RI6M]: F:派生Windows设备主指纹与结合SMBIOS/CIM系统UUID的v2指纹 | R:code:pkg/machineid/id.go,code:pkg/tunnel/tunnel.go | A:Engine.run | S:GUI进程派生PowerShell CIM时必须隐藏控制台窗口，VM占位UUID需降级回落
+diag_windows.go[RO5S]: F:提供pf-client启动期诊断日志输出、Windows真实版本获取与MessageBox弹窗 | R:- | A:main,fatalBox | S:GUI模式无控制台，致命错误必须使用user32 MessageBoxW直接弹窗
+engine.go[AB7M]: F:封装隧道连接生命周期状态机，管理握手、网络配置、数据统计与启停互斥 | R:code:app/cmd/client/run.go,code:app/cmd/client/config_windows.go | A:startUI,trayActions | S:Stop必须立即关闭socket和虚拟网卡以解除阻塞读，断开期间Start必须互斥等待
+icon_windows.go[RU3T]: F:从内嵌ICO未压缩DIB字节流解析并生成指定尺寸的Win32 HICON句柄 | R:- | A:installTray | S:仅支持未压缩DIB条目，按尺寸差值选择最贴合目标分辨率的图标
+instance_windows.go[RS5T]: F:基于Windows命名互斥体实现单实例运行保护并将已有窗口唤到前台 | R:- | A:main | S:互斥体置于Local命名空间支持多用户远程桌面，提权前探测避免重复UAC弹窗
+logring.go[CO4T]: F:提供固定容量且线程安全的环形内存日志缓冲区供UI轮询 | R:- | A:Engine.logs | S:写入采用环形截断策略永不阻塞调用方
+main.go[EN8S]: F:客户端程序主入口，调度提权、单实例检查、WebView2初始化与托盘主事件循环 | R:code:app/cmd/client/engine.go,code:app/cmd/client/ui.go,code:app/cmd/client/window_windows.go | A:Windows OS | S:WebView2消息循环必须锁定在创建它的OS主线程上，退出时先停隧道再关窗口
+reject_windows.go[EU4T]: F:将服务端返回的隧道握手RejectReason数字码翻译为用户友好的操作指引文案 | R:code:pkg/tunnel/tunnel.go | A:Engine.handshake | S:针对设备不匹配、访问码停用和版本不匹配等不同原因提供明确处置提示
+routes.go[DN8L]: F:管理动态/32回程路由的异步安装、pending入站包缓冲、无锁查询与本地空闲回收 | R:code:app/internal/syssetup/syssetup_windows.go | A:Engine.deliverInbound | S:热路径使用netip.Addr和原子指针无锁查找，新IP路由安装前缓冲入站包避免全服卡顿
+run.go[AN8L]: F:驱动隧道单次连接全生命周期，执行握手、下发网卡配置、双向泵数据流与心跳 | R:code:app/cmd/client/routes.go,code:pkg/tunnel/tunnel.go,code:pkg/tunnet/tunnet.go | A:Engine.Start | S:隧道内地址由握手动态下发后方可配置网卡，读超时必须触发重握手以应对NAT换端口
+tray_windows.go[EU6M]: F:实现Win32原生托盘图标、上下文菜单及WebView2窗口过程子类化消息分发 | R:code:app/cmd/client/icon_windows.go | A:runWindow | S:子类化拦截WM_CLOSE隐藏窗口到托盘，托盘回调必须避开0x8000以防被库拦截
+ui.go[EU6M]: F:启动本机回环HTTP控制面，提供WebView2状态轮询、连接参数解析与安全Token鉴权 | R:code:app/cmd/client/engine.go | A:runWindow,WebView2 | S:仅监听127.0.0.1随机端口且所有写操作校验内存随机Token，退出前同步等待引擎停止
+window_windows.go[EU6T]: F:封装Edge WebView2原生窗口创建、配置最小尺寸、导航本地URL及托盘宿主 | R:code:app/cmd/client/tray_windows.go | A:main | S:缺失WebView2时弹窗引导下载常青版安装包，关闭进程使用跨线程安全PostMessageW
+
+===E:/code/go-port-forward/app/cmd/client/ui/===
+app.css[EU4S]: F:定义客户端深色主题界面布局、连接状态徽标、卡片与链路指标样式 | R:code:app/cmd/client/ui/index.html | A:WebView2 | S:-
+app.js[AU5M]: F:客户端前端交互逻辑，处理1秒状态轮询、速率计算、链路质量徽章与错误提示粘住 | R:code:app/cmd/client/ui.go | A:index.html | S:从URL查询参数提取Token后立即清除地址栏历史，操作错误需粘住防止被轮询覆盖
+index.html[EU4S]: F:定义客户端单页HTML骨架，呈现连接凭据输入、运行状态、链路质量及玩家列表 | R:code:app/cmd/client/ui/app.js,code:app/cmd/client/ui/app.css | A:WebView2 | S:-
+
+===E:/code/go-port-forward/app/internal/syssetup/===
+elevate_windows.go[RI5T]: F:检查当前进程管理员提权状态并使用runas动词触发UAC重启自身 | R:- | A:main,Engine.Start | S:提权重启后原进程必须立即退出，让新提权进程接管
+firewall_windows.go[II5T]: F:通过PowerShell添加与移除指定虚拟网卡的Windows防火墙入站放行规则 | R:code:app/internal/syssetup/powershell_windows.go | A:run.go | S:wintun默认归类公用网络且阻断入站，必须放行以防玩家隧道回包被静默丢弃
+neighbor_windows.go[IN4T]: F:通过netsh为wintun接口添加和删除静态ARP邻居表项 | R:code:app/internal/syssetup/syssetup_windows.go | A:run.go | S:wintun为三层设备不依赖ARP，添加邻居仅为边缘场景防御，失败仅告警
+powershell_windows.go[RI4T]: F:执行PowerShell命令并提供防止单引号命令注入的参数安全转义函数 | R:- | A:firewall_windows.go | S:字符串参数采用连续单引号转义，防止动态入参拼接引发代码注入
+syssetup_windows.go[IN7S]: F:通过netsh和route命令配置wintun接口地址、MTU、/32回程路由增删与残留清扫 | R:- | A:app/cmd/client/routes.go,app/cmd/client/run.go | S:route add遇已存在路由直接收编以防强杀后残留，删除失败必须透传错误
+
+===E:/code/go-port-forward/assets/brand/===
+generate.py[XU3T]: F:基于logo.png源图批量生成未压缩DIB格式ICO、HiDPI应用标与Web favicon | R:code:app/cmd/client/README.md | A:开发者工具 | S:客户端icon.ico必须使用BITMAPINFOHEADER组装未压缩DIB，不能用PNG压缩
+
+===E:/code/go-port-forward/internal/auth/===
+auth.go[MI8M]: F:管理用户身份认证、bcrypt密码哈希、内存滑动会话表及HTTP Cookie下发 | R:code:internal/models/user.go | A:Server,web | S:会话纯内存存储重启失效，用户停用或改密码时必须同步RevokeUser全部会话
+
+===E:/code/go-port-forward/internal/config/===
+config.go[FC8M]: F:基于Viper管理主应用全模块配置结构定义、默认值注入与配置文件版本升级 | R:code:internal/config/render.go | A:main.go,Server | S:版本升级时先备份为bak再写回以防手写注释丢失，隧道地址池默认为10.66.0.1/16
+render.go[FC5S]: F:按确定字母序与多行中文注释将Viper配置项格式化渲染为可读YAML文件 | R:code:internal/config/config.go | A:writeDefaults,upgradeConfigFile | S:配置项值必须从Viper动态获取以保留用户覆盖，应急后门账号空值时跳过写入
+
+===E:/code/go-port-forward/internal/email/===
+email.go[MI6M]: F:提供标准SMTP邮件发送、STARTTLS升级及注册/重置验证码内存限频与校验 | R:code:internal/models/system.go | A:web.handlers | S:验证码纯内存生命周期，达到最大重试次数即销毁以防爆破，日志打印必须脱敏
+
+===E:/code/go-port-forward/internal/firewall/===
+firewall.go[IN6T]: F:抽象跨平台主机防火墙规则管理器接口，定义规则增删与存在性检查契约 | R:code:internal/models/rule.go | A:forward.Manager | S:规则名称采用固定前缀go-port-forward以支持统一识别与清理
+firewall_darwin.go[IN5T]: F:基于macOS pfctl工具实现独立anchor下的端口入站放行与清理规则 | R:code:internal/firewall/firewall.go | A:New | S:所有规则写入go-port-forward独立anchor，删除规则通过刷新对应子anchor实现
+firewall_linux.go[IN6T]: F:基于Linux iptables实现INPUT链端口入站放行、删除与规则存在性校验 | R:code:internal/firewall/firewall.go | A:New | S:使用规则名称作为iptables注释，删除时若规则不存在忽略错误以保持幂等
+firewall_windows.go[IN6T]: F:基于Windows netsh advfirewall命令行实现端口入站放行规则的增删查 | R:code:internal/firewall/firewall.go | A:New | S:双协议规则针对tcp与udp分别添加同名前缀规则，查询与删除按规则全名匹配
+
+===E:/code/go-port-forward/internal/forward/===
+acl.go[DS8M]: F:实现IP黑白名单原子快照无锁判定、异步连接日志持久化与活跃会话跟踪 | R:code:internal/models/acl.go,code:internal/storage/storage.go | A:forward.Manager,Forwarder | S:热路径ACL判定使用atomic.Pointer无锁读取，白名单隐式拒绝仅作用于指定规则
+manager.go[AN9L]: F:管理全部TCP/UDP/NetherNet转发器生命周期、规则加载与旁路服务装配 | R:code:internal/forward/tcp.go,code:internal/forward/udp.go,code:internal/forward/acl.go | A:web.handler,main | S:透明模式下网卡与套接字绑定需要root/CAP_NET_ADMIN权限，规则状态变更由opsMu加锁互斥
+nethernet_backend.go[IN7S]: F:包装透明UDP套接字工厂并将NetherNet会话接入主转发会话注册表 | R:code:internal/forward/tuple_registry.go,code:internal/nethernet/multiplexer.go | A:Manager.startNetherNet | S:NetherNet会话建立与销毁必须同步注册表，否则Windows客户端无法安装/32回程路由
+target.go[DN8S]: F:校验通用模式转发目标IP合法性，严防内网、回环、保留及本机网卡地址跳板 | R:- | A:CheckDialControl,CheckTargetIP | S:透明模式豁免内网地址检查（其目标必须为隧道地址），通用模式拦截CGNAT与本机网卡IP
+tcp.go[AN8M]: F:实现TCP端口监听、出站连接拨号、双向数据拷贝与PROXY Protocol v2注入 | R:code:internal/forward/acl.go,code:pkg/pool/pool.go | A:Manager.startForwarders | S:非阻塞停止时必须并发关闭所有活跃客户端和上游连接，缓冲区使用全局pool复用
+transparent_linux.go[IN7T]: F:Linux环境下检查IP_TRANSPARENT支持并在socket上配置非本机源地址绑定 | R:- | A:transparentDialer,transparentListenPacket | S:必须具备root或CAP_NET_ADMIN权限，否则创建透明套接字直接fail-closed
+transparent_other.go[IN5T]: F:非Linux平台透明模式桩实现，调用直接返回平台不支持错误 | R:- | A:checkTransparentSupport | S:透明模式强依赖Linux内核IP_TRANSPARENT，非Linux平台一律fail-closed
+tuple_registry.go[DN8M]: F:全机唯一管理玩家源元组透明UDP套接字共享绑定与回程路由分发 | R:code:internal/forward/transparent_linux.go,code:internal/forward/udp.go | A:UDPForwarder | S:同一玩家多规则并发时共享单一源端口socket，引用计数归零才关闭fd以杜绝EADDRINUSE
+udp.go[AN8L]: F:实现UDP端口监听、会话生命周期维护、透明模式注册表挂接与双向转发 | R:code:internal/forward/tuple_registry.go,code:internal/forward/acl.go | A:Manager.startForwarders | S:makeUDPAddrKey归一化IPv4的v4-mapped表示，透明模式下回程依赖策略路由本机投递
+
+===E:/code/go-port-forward/internal/logger/===
+logger.go[CO7T]: F:初始化基于Zap和Lumberjack的全局结构化日志记录器，支持日志轮转 | R:code:internal/config/config.go | A:main,logger.S,logger.L | S:控制台与文件采用Tee双写，日志路径相对于可执行文件目录锚定
+
+===E:/code/go-port-forward/internal/models/===
+accesscode.go[DI7S]: F:定义隧道访问码数据模型、设备指纹解析、摘要脱敏及创建更新请求结构 | R:code:internal/models/models.go | A:storage,users,web | S:密钥与设备指纹标记json忽略，对外API与日志中指纹仅展示前后4位摘要
+group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间与上限不突破全局天花板 | R:code:internal/models/settings.go | A:storage,users | S:组配额上限不能为负，且非零时不得超越Settings配置的全局上限天花板
+models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet TLS及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet开启时必须校验证书与私钥能否通过tls.X509KeyPair解析配对
+settings.go[DC8M]: F:定义全局设置单例模型、Schema版本、端口区间与默认组等全局配额天花板 | R:- | A:storage,users | S:默认端口范围20000-29999防止普通用户侵占低位特权端口，注册开关默认关闭
+user.go[DI8M]: F:定义Web用户账号模型、角色常量、密码修改与注册请求数据传输结构 | R:code:internal/models/group.go | A:storage,auth,users | S:PasswordHash必须标记json忽略严禁在REST响应中回显，配额由组动态解析
+
+===E:/code/go-port-forward/internal/nethernet/===
+gateway.go[EN8L]: F:实现NetherNet HTTP/HTTPS信令网关、MOTD返回及WebRTC SDP candidate重写 | R:code:internal/nethernet/multiplexer.go,code:internal/models/models.go | A:forward.Manager | S:SDP重写必须折叠candidate为单个公网地址且保持原始CRLF行尾，双模式同端口监听
+multiplexer.go[DN8L]: F:实现NetherNet单UDP端口数据面多路复用，通过STUN ufrag学习玩家5-tuple | R:code:internal/forward/nethernet_backend.go | A:forward.Manager,Gateway | S:数据面必须使用以玩家真实IP为源的透明socket向BDS转发，严格以冒号截取STUN用户名
+
+===E:/code/go-port-forward/internal/storage/===
+accesscode.go[PI7M]: F:基于bbolt codes桶持久化访问码记录，提供配额受限的隧道地址分配与绑定 | R:code:internal/models/accesscode.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立的codeRecord避免API标签丢弃密钥，地址在写事务内原子分配防撞号
+acl.go[PS7M]: F:管理bbolt acl桶与按用户嵌套子桶的connlogs连接日志存储、分页与环形裁剪 | R:code:internal/models/acl.go,code:internal/storage/storage.go | A:forward.Manager | S:连接日志键使用大端纳秒时间戳+UUID实现跨桶时间有序与k路归并查询
+group.go[PC7M]: F:管理bbolt settings与groups桶的全局设置及用户组增删改查 | R:code:internal/models/group.go,code:internal/models/settings.go | A:users.Service | S:组名唯一性与默认组标记唯一性在同一写事务内完成，阻止删除包含成员的组
+migrate.go[PD8M]: F:执行bbolt存储模型版本检查与v1到v2访问码/用户组数据迁移 | R:code:internal/storage/storage.go,code:internal/models/settings.go | A:storage.Open | S:根据Settings.SchemaVersion判断迁移是否执行，迁移过程必须保持幂等
+smtp.go[PC6S]: F:管理settings桶下的SMTP配置持久化，提供脱敏读取与安全更新 | R:code:internal/models/system.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立smtpRecord保留密码，更新密码为空时在事务内保留原有密码
+storage.go[PD8M]: F:定义bbolt存储层Store总接口规范，管理数据库打开与所有根桶初始化 | R:code:internal/models/models.go | A:main,forward,users | S:数据库文件权限为0600且打开超时设为2秒，包含rules/users/groups/codes等核心桶
+user.go[PI8L]: F:管理users桶的Web账号持久化、密码哈希存储、邮箱唯一性校验与角色约束 | R:code:internal/models/user.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立的userRecord避免API结构体忽略密码哈希，禁止删除最后一名管理员
+
+===E:/code/go-port-forward/internal/svc/===
+service.go[RO6T]: F:封装kardianos/service库，提供跨平台Windows/systemd/launchd服务管理 | R:code:internal/logger/logger.go | A:main | S:交互式终端直接运行runner.Start，服务运行错误异步记录至日志
+
+===E:/code/go-port-forward/internal/tunnelapp/===
+gso.go[KN7T]: F:计算UDP GSO分段消息合并判定与GRO接收聚合包的边界切分算法 | R:- | A:sockopt_linux.go,udpio.go | S:除最后一段外所有分段必须严格等长，合并累计长度不超过32KB
+linkreport.go[ON6T]: F:生成服务端隧道链路质量观测视图，汇总结算丢包率、乱序率、抖动与RTT | R:code:pkg/tunnel/tunnel.go | A:web.handler,main | S:从peerSession.Stats提取原子观测快照，包含内核收缓冲丢包与TUN丢弃计数
+registry.go[DN8M]: F:以COW不可变快照管理多访问码隧道会话，支持按访问码、公网地址与隧道IP多维无锁索引 | R:code:pkg/tunnel/tunnel.go | A:Server | S:读路径零锁零分配，会话对象除lastSeen外不可变，空闲超时达3分钟自动回收
+returnpath.go[IN8S]: F:装配与守护Linux策略路由本机投递规则，防止外部防火墙重载导致回程丢失 | R:code:internal/tunnelapp/setup_linux.go | A:Server.setupReturnPath | S:守护协程周期检测缺失项并补齐，INPUT链仅放行既有连接回包以严防未授权探测
+setup_linux.go[IN8S]: F:执行Linux环境下TUN网卡配置、sysctl放宽、mangle打标与策略路由创建 | R:code:internal/tunnelapp/returnpath.go | A:Server.Start | S:外部命令执行设置5秒超时，rp_filter需设为loose(2)以防反向路径校验丢弃回包
+setup_other.go[IN5T]: F:非Linux平台隧道服务端桩实现，启动直接返回平台不支持错误 | R:- | A:Server.Start | S:隧道服务端依赖Linux TUN与策略路由，非Linux环境下禁止启动
+sockopt_linux.go[RN7S]: F:管理Linux底层UDP套接字SO_RCVBUF生效值核查、UDP GRO/GSO开启与内核丢包统计 | R:code:internal/tunnelapp/gso.go | A:udpio.go | S:getsockopt返回内核记账值需折半计算载荷，读取/proc/net/udp获取端口丢包
+sockopt_other.go[RN4T]: F:非Linux平台UDP套接字高级特性桩实现，报告不支持批量和卸载 | R:- | A:udpio.go | S:非Linux平台优雅降级为单包读写，不启用GRO与GSO
+tunnelapp.go[AN9L]: F:内置隧道服务端核心引擎，驱动多用户握手、ChaCha20加密收发、回程路由推送与隔离校验 | R:code:internal/tunnelapp/registry.go,code:internal/tunnelapp/returnpath.go,code:pkg/tunnel/tunnel.go | A:main | S:TUN入向必须校验源地址等于会话tunIP以严防越权仿冒，禁止隧道内客户端互访
+udpio.go[RN8M]: F:抽象UDP批量与单包收发读源，基于recvmmsg/sendmmsg优化系统调用吞吐 | R:code:internal/tunnelapp/sockopt_linux.go,code:pkg/tunnel/tunnel.go | A:Server.loop | S:批边界严格以一次系统调用返回包数为准不额外凑批，支持GRO聚合消息在用户态拆包
+
+===E:/code/go-port-forward/internal/users/===
+accesscode.go[AI7M]: F:提供访问码业务CRUD、接入码pf1编码生成、设备绑定解除与在线状态合并 | R:code:internal/storage/accesscode.go,code:pkg/accesscode/accesscode.go | A:web.handlers | S:解除绑定或停用访问码时必须触发TunnelEvictor踢掉在线会话，创建受组配额约束
+bootstrap.go[AI7T]: F:系统初次启动时检查用户表，自动创建admin管理员并落盘一次性凭据文件 | R:code:internal/users/service.go | A:main | S:初始密码以0600权限写入admin-credentials.txt且禁止记入日志，初次登录强制改密
+group.go[AC7M]: F:提供用户组与全局设置的业务逻辑管理，校验配额变更与SMTP配置更新 | R:code:internal/storage/group.go,code:internal/models/group.go | A:web.handlers | S:收紧全局配额时先校验已有组是否超出，超出时拒绝修改并列出具体冲突组
+publicip.go[AN6S]: F:探测中转机公网IPv4地址，优先检查本机网卡，回退请求公共回显服务 | R:code:internal/logger/logger.go | A:users.Service | S:探测成功后进程级缓存结果，排除私网与CGNAT地址，失败时采用1分钟退避
+register.go[AS7L]: F:处理用户自助注册与基于邮件验证码的密码重置，执行IP限频与防爆破 | R:code:internal/users/service.go,code:internal/email/email.go | A:web.handlers | S:注册开关默认关闭，SMTP开启时强制校验邮箱验证码，用户名冲突提示必须脱敏防枚举
+service.go[AI8L]: F:用户服务总入口，组合账号、组、访问码、会话与隧道驱逐器生命周期 | R:code:internal/storage/storage.go,code:internal/auth/auth.go | A:main,web.handler | S:管理默认组兜底逻辑，用户删除时连带撤销所有有效会话并踢除对应在线隧道
+
+===E:/code/go-port-forward/internal/web/===
+diagnostics.go[EO5T]: F:采集并输出Go运行时内存、协程数、GC指标与转发协程池诊断信息 | R:code:pkg/pool/pool.go,code:internal/models/models.go | A:web.router | S:仅管理员鉴权后可访问，读取runtime/metrics度量指标
+handlers.go[EU7L]: F:定义Web核心API处理器结构、JSON请求体安全解码限制与统一响应格式 | R:code:internal/forward/manager.go,code:internal/auth/auth.go | A:web.Server | S:请求体严格限制1MB且禁止未知字段，内部系统错误对客户端屏蔽实现细节
+handlers_acl.go[EU7S]: F:处理IP访问控制名单增删查、按租户连接日志分页查询与批量清理 | R:code:internal/forward/manager.go,code:internal/models/acl.go | A:web.router | S:普通用户仅能查看与删除自己名下的连接日志，单次删除日志条数限制为2000
+handlers_auth.go[EU8S]: F:处理用户登录、注销、当前身份与配额用量查询、改密及邮箱绑定 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.router | S:登录失败按IP和用户名滑动窗口双重限频，修改密码后同步清除当前会话Cookie
+handlers_codes.go[EU7S]: F:处理访问码自助管理，包括创建、更新、删除、复制接入码与解绑设备 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:删除访问码前必须检查其隧道地址是否仍被转发规则引用，越权访问返回404防探测
+handlers_groups.go[EU7S]: F:处理管理员对用户组CRUD、全局配额设置及SMTP配置更新与测试发信 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:仅管理员可访问，SMTP测试发信若失败必须原样返回SMTP服务错误以便排障
+handlers_ports.go[EU6S]: F:提供用户配额区间内的随机端口分发与服务端TCP/UDP真实试绑占用检测 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:普通用户只能检测自身配额允许的端口，端口冲突错误按用户身份脱敏规则名
+handlers_register.go[EU7S]: F:处理无需登录的公开注册、发送邮箱验证码、重置密码与公开配置查询 | R:code:internal/users/service.go,code:internal/email/email.go | A:web.router | S:公开端点严格校验Origin防CSRF，发送验证码按IP限频，重名与找回失败响应对齐防枚举
+handlers_tunnel.go[EU6T]: F:向管理员暴露服务端在线隧道链路质量、MTU与丢包监控数据 | R:code:internal/tunnelapp/linkreport.go | A:web.router | S:仅管理员可查，隧道未开启时显式返回enabled=false而非404
+handlers_users.go[EU7T]: F:处理管理员对用户账号的增删改查及配额分配 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:管理员不能停用或降级自己，删除用户前必须确认名下已无关联的转发规则
+handlers_wsl.go[EU6S]: F:提供WSL2能力检测、发行版端口发现与批量导入转发规则接口 | R:code:pkg/os/wsl/wsl.go,code:internal/forward/manager.go | A:web.router | S:仅管理员可用，批量导入前自动检测WSL2 IP并检查导入列表内端口协议去重
+middleware_auth.go[EU8S]: F:实现Web会话认证、管理员权限校验、CSRF同源检查与本机应急后门认证 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.Server | S:应急后门凭据仅允许从回环地址请求时生效，非GET请求强校验Origin/Referer
+rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go | A:web.handlers | S:普通用户透明规则必须锁定到名下启用中访问码隧道IP，通用模式严禁转发到内网或隧道网段
+server.go[EU8L]: F:启动Web HTTP管理面板服务，注册静态资源嵌入、内置MIME字典与路由映射 | R:code:internal/web/handlers.go,code:internal/web/middleware_auth.go | A:main | S:静态文件根据内置staticMIME表映射Content-Type，绕过Windows注册表错误覆盖
+
+===E:/code/go-port-forward/internal/web/static/css/===
+app.css[EU7L]: F:Web管理面板主样式表，定义响应式栅格、卡片、徽标、表单与明暗适配 | R:code:internal/web/static/index.html | A:Web浏览器 | S:嵌入可执行文件二进制发布
+theme.css[EU5S]: F:管理Web管理面板亮色与暗色主题变量切换及高对比度色彩定义 | R:code:internal/web/static/css/app.css | A:Web浏览器 | S:基于CSS自定义属性定义系统级主题配色
+user-theme.css[EU5S]: F:针对普通用户端界面的专属轻量化主题与布局微调样式 | R:code:internal/web/static/index.html | A:Web浏览器 | S:-
+
+===E:/code/go-port-forward/internal/web/static/===
+index.html[EU8L]: F:Web管理面板单页应用HTML模板骨架，包含仪表盘、规则、访问码与设置组件 | R:code:internal/web/static/js/app.js,code:internal/web/static/css/app.css | A:Web浏览器 | S:全部静态页面由Go embed嵌入
+login.html[EU7M]: F:Web管理面板登录、注册与找回密码单页HTML模板及表单校验 | R:code:internal/web/static/css/app.css | A:Web浏览器 | S:公开访问页面，表单直接调用/api/auth相关公开端点
+
+===E:/code/go-port-forward/internal/web/static/js/===
+app.js[AU8L]: F:管理Web前端Alpine.js组件生命周期、顶部进度条、Toast通知与REST交互 | R:code:internal/web/static/js/secure-store.js | A:index.html | S:维护并发请求计数安全超时15秒防止进度条假死
+browser-check.js[AU4S]: F:前端环境特性检查，校验现代浏览器ES6/Fetch/IndexedDB支持并拦截老旧内核 | R:code:internal/web/static/index.html | A:Web浏览器 | S:对不兼容浏览器直接渲染友好升级提示
+charts.js[AU5S]: F:基于Canvas实现轻量级仪表盘实时流量趋势图表与性能指标绘制 | R:code:internal/web/static/js/app.js | A:index.html | S:纯原生Canvas渲染无重型图表库依赖
+codemirror-init.js[AU4S]: F:初始化前端CodeMirror编辑器实例，用于规则备注与YAML配置查看高亮 | R:code:internal/web/static/index.html | A:Web浏览器 | S:按需懒加载编辑器资源
+secure-store.js[CU7L]: F:前端安全存储模块，提供IndexedDB主存储、AES-GCM加密与localStorage降级 | R:- | A:app.js,user-preferences.js | S:优先使用Web Crypto API进行AES-GCM加密，不支持时降级混淆
+user-preferences.js[AU5S]: F:管理前端用户语言选择、主题偏好与表格分页大小本地持久化存储 | R:code:internal/web/static/js/secure-store.js | A:app.js | S:首选IndexedDB安全存储用户偏好设置
+
+===E:/code/go-port-forward/pkg/accesscode/===
+accesscode.go[LI7T]: F:编解码pf1前缀Base64URL接入码文本，打包中转机地址、访问码ID与密钥 | R:- | A:users,app/cmd/client | S:前缀pf1固定，解析时容忍空白换行及带填充的base64，无填充URL安全编码
+
+===E:/code/go-port-forward/pkg/emailtest/===
+emailtest.go[TI3T]: F:提供确定性固定验证码654321替身实现，供web与users集成测试注入 | R:- | A:测试用例 | S:验证码一次性消费，固定返回654321
+
+===E:/code/go-port-forward/pkg/file/===
+file.go[LG6L]: F:提供文件与目录存在性、MIME检测、扩展属性、MD5/SHA256哈希计算工具函数 | R:code:pkg/pool/pool.go | A:pkg/file | S:使用全局缓冲池优化哈希读缓冲区分配
+file_darwin.go[LG4T]: F:macOS平台读取文件创建时间系统调用封装 | R:code:pkg/file/file.go | A:CreationTime | S:从syscall.Stat_t的Birthtimespec提取创建时间
+file_linux.go[LG4T]: F:Linux平台读取文件创建时间系统调用桩实现（回退修改时间） | R:code:pkg/file/file.go | A:CreationTime | S:标准Linux文件系统不支持birthtime时安全回落为ModTime
+file_service.go[LP5L]: F:提供本地与云端对象存储抽象、文件上传保存、分片合并与元数据管理 | R:code:pkg/pool/pool.go | A:应用服务 | S:支持多种存储后端适配，本地存储路径相对于storageRoot沙箱隔离
+file_windows.go[LG4T]: F:Windows平台通过GetFileTime读取文件创建时间 | R:code:pkg/file/file.go | A:CreationTime | S:从syscall.Win32finddata提取CreationTime
+validator.go[LS5S]: F:基于MIME类型检测与文件扩展名白名单的双重文件上传安全验证器 | R:- | A:file.Service | S:读取文件头最多512字节探测MIME，配置了MIME与扩展名时二者必须同时满足
+
+===E:/code/go-port-forward/pkg/gc/===
+README.md[SP4L]: F:说明自动GC管理器的设计原理、多种回收策略（标准/激进/温和/自适应）与监控配置 | R:code:pkg/gc/gc.go | A:开发者与运维 | S:激进策略在GC后显式FreeOSMemory归还操作系统，高并发场景需评估CPU开销
+analyzer.go[KP5M]: F:基于内存变化趋势与增长斜率分析GC触发时机并评估健康状态 | R:code:pkg/gc/gc.go | A:Manager.analyze | S:维护滑动窗口内存样本，区分健康、降级与不健康状态
+config.go[FP5M]: F:定义GC管理器配置参数、策略枚举、默认值注入与合法性校验 | R:code:pkg/gc/gc.go | A:Manager.New | S:扫描间隔必须大于0，策略包括standard、aggressive、gentle与adaptive
+gc.go[MP7L]: F:提供全局定时周期GC管理器，支持基于内存阈值触发与重试保护 | R:code:pkg/gc/analyzer.go,code:pkg/gc/config.go,code:pkg/pool/pool.go | A:main | S:支持全局单例并发安全初始化与重置，执行耗时与指标统计线程安全
+monitor.go[OP6L]: F:周期性采集Go运行时堆内存、协程数、暂停时间并导出Prometheus风格指标 | R:code:pkg/gc/gc.go | A:Manager.StartMonitoring | S:支持注册告警回调，当堆内存或暂停耗时超过阈值时触发报警通知
+pressure.go[KP6M]: F:多维度评估系统内存压力等级，根据压力自动调整GC触发频率与策略 | R:code:pkg/gc/gc.go | A:adaptiveStrategy | S:划分极低、低、中、高、紧急五级压力，紧急状态下强制加速GC
+tuning.go[KP6L]: F:动态调优GOGC百分比和内存限制，根据工作负载自适应调整运行时GC参数 | R:code:pkg/gc/gc.go | A:Manager.tune | S:通过debug.SetGCPercent动态控制触发阈值，避免内存暴涨或频繁GC
+
+===E:/code/go-port-forward/pkg/ioutil/===
+ioutil.go[LG5M]: F:提供基于全局对象池的高性能Buffer读写、流拷贝与限速辅助工具 | R:code:pkg/pool/pool.go | A:forward,file | S:通过bytebufferpool复用字节切片，减少高并发I/O下的内存分配与GC压力
+
+===E:/code/go-port-forward/pkg/logger/===
+logger.go[CO6T]: F:提供全局日志实例快速获取与包级日志工具函数 | R:code:internal/logger/logger.go | A:全局各包 | S:对外提供Get()与GetSugar()快捷入口，支持动态替换单例实现
+
+===E:/code/go-port-forward/pkg/machineid/===
+helper.go[KI5S]: F:提供HMAC-SHA256计算与哈希字符串安全保护辅助函数 | R:code:pkg/machineid/id.go | A:ProtectedID | S:使用HMAC密钥对appID进行二次哈希，避免向外泄露原始机器标识
+id.go[LI7T]: F:跨平台安全读取主机操作系统唯一机器标识（无需管理员权限），提供缓存 | R:code:pkg/machineid/helper.go | A:app/cmd/client,internal/models | S:结果在进程生命周期内缓存，禁止使用空appID计算ProtectedID
+id_bsd.go[LI4T]: F:FreeBSD等BSD平台读取kern.hostuuid内核参数提取机器ID | R:code:pkg/machineid/id.go | A:machineID | S:通过sysctlByName调用系统kern.hostuuid
+id_darwin.go[LI5T]: F:macOS平台通过IOKit读取平台专家设备IOPlatformUUID作为机器ID | R:code:pkg/machineid/id.go | A:machineID | S:调用ioreg或直接通过CGO/外部命令读取IOPlatformUUID
+id_linux.go[LI6T]: F:Linux平台读取/etc/machine-id或/var/lib/dbus/machine-id提取系统ID | R:code:pkg/machineid/id.go | A:machineID | S:依次尝试systemd与dbus的machine-id文件，去除多余空白字符
+id_windows.go[LI6T]: F:Windows平台从注册表Cryptography读取MachineGuid提取机器ID | R:code:pkg/machineid/id.go | A:machineID | S:使用WOW64_64KEY确保在32位与64位进程下均访问64位注册表视图
+
+===E:/code/go-port-forward/pkg/os/disk/===
+disk.go[LO5T]: F:提供跨平台磁盘总空间、可用空间查询及预留安全缓冲检查工具 | R:- | A:系统监控 | S:HasEnoughSpace预留10%磁盘空间作为保护缓冲
+disk_darwin.go[LO4T]: F:macOS平台调用statfs系统调用读取挂载点磁盘空间 | R:code:pkg/os/disk/disk.go | A:getDiskSpace | S:从unix.Statfs_t按块大小计算字节总数与空闲数
+disk_linux.go[LO4T]: F:Linux平台调用statfs系统调用读取指定路径磁盘空间 | R:code:pkg/os/disk/disk.go | A:getDiskSpace | S:从unix.Statfs_t按Bsize与Bavail计算实际可用容量
+disk_windows.go[LO5T]: F:Windows平台调用GetDiskFreeSpaceExW读取磁盘卷可用空间 | R:code:pkg/os/disk/disk.go | A:getDiskSpace | S:通过kernel32 GetDiskFreeSpaceExW获取用户配额与磁盘物理空闲字节
+
+===E:/code/go-port-forward/pkg/os/exec/===
+exec.go[LR5T]: F:封装跨平台命令执行命令构造，注入平台特有的SysProcAttr | R:code:pkg/os/exec/exec_windows.go | A:internal/firewall | S:统一使用ExecCommand包装os/exec.Command以确保Windows控制台隐藏
+exec_darwin.go[LR4T]: F:macOS平台命令执行进程属性默认配置 | R:code:pkg/os/exec/exec.go | A:SysProcAttr | S:默认SysProcAttr为nil
+exec_linux.go[LR4T]: F:Linux平台命令执行进程属性默认配置 | R:code:pkg/os/exec/exec.go | A:SysProcAttr | S:默认SysProcAttr为nil
+exec_windows.go[LR6S]: F:Windows平台注入隐藏控制台标记，并从注册表自动合并系统与用户PATH环境 | R:code:pkg/os/exec/exec.go | A:main,SysProcAttr | S:配置CREATE_NO_WINDOW防弹黑窗，注册表展开REG_EXPAND_SZ防服务启动丢环境变量
+
+===E:/code/go-port-forward/pkg/os/info/===
+machineid.go[LI4T]: F:兼容适配层，转发机器标识读取到pkg/machineid核心实现 | R:code:pkg/machineid/id.go | A:调用方 | S:提供兼容调用别名
+
+===E:/code/go-port-forward/pkg/os/path/===
+path.go[LG5S]: F:提供跨平台标准路径格式化、绝对路径判断与默认日志路径解析工具 | R:- | A:config,storage | S:根据GOOS分别返回Windows ProgramData或Linux /var/log日志默认路径
+
+===E:/code/go-port-forward/pkg/os/process/===
+process.go[LR6M]: F:提供跨平台端口占用检查、进程按名称/端口查找与优雅/强制终止能力 | R:code:pkg/logger/logger.go | A:main | S:ForceStart优雅终止超时后强制Kill进程并循环检测端口释放
+process_darwin.go[LR5M]: F:macOS平台基于lsof和ps命令实现端口进程查找与SIGTERM/SIGKILL终止 | R:code:pkg/os/process/process.go | A:getProcessByPort,killProcess | S:使用lsof -i查询占用指定端口的PID
+process_linux.go[LR5M]: F:Linux平台基于/proc文件系统和ss/netstat命令实现进程查找与信号终止 | R:code:pkg/os/process/process.go | A:getProcessByPort,killProcess | S:读取/proc/<pid>/exe符号链接匹配进程执行路径
+process_windows.go[LR5M]: F:Windows平台基于netstat、tasklist和taskkill实现端口进程查找与终止 | R:code:pkg/os/process/process.go | A:getProcessByPort,killProcess | S:先用不带/F的taskkill尝试优雅关闭，超时后再加/F强制终止
+
+===E:/code/go-port-forward/pkg/os/protocol/===
+protocol.go[LN4S]: F:解析URL协议方案（http/https/file）并标准化本地文件协议路径 | R:- | A:Protocol.Value | S:file协议在Windows下需去除前导斜杠以还原盘符路径
+
+===E:/code/go-port-forward/pkg/os/wsl/===
+wsl.go[IH6M]: F:实现WSL2发行版枚举、UTF-16LE输出解码、监听端口扫描与IP地址探测 | R:code:pkg/os/exec/exec.go | A:web.handlers_wsl | S:wsl.exe命令输出为UTF-16LE编码，必须手动解码后才能正则解析
+wsl_distro_other.go[IH4T]: F:非Windows平台WSL注册表枚举桩实现，固定返回不支持错误 | R:code:pkg/os/wsl/wsl.go | A:listDistrosFromRegistry | S:WSL2能力仅在Windows平台有效
+wsl_distro_windows.go[IH6S]: F:Windows平台从Lxss注册表项读取已安装WSL发行版列表作为回退方案 | R:code:pkg/os/wsl/wsl.go | A:listDistrosFromRegistry | S:当服务账号下wsl -l输出为空时从HKCU Lxss注册表兜底读取
+
+===E:/code/go-port-forward/pkg/pool/===
+pool.go[CP8M]: F:提供基于ants的全局阻塞/非阻塞协程池及多级字节切片对象池管理 | R:- | A:forward,gc,file | S:区分4KB/32KB/128KB三级BufferPool，归还切片时必须检查容量匹配
+
+===E:/code/go-port-forward/pkg/retry/===
+README.md[SR4L]: F:说明retry包的退避算法（常量/指数/线性/斐波那契）、中间件与并发安全规范 | R:code:pkg/retry/retry.go | A:开发者 | S:Backoff实例含内部状态，严禁在多个goroutine间共享同一实例
+backoff.go[LR6M]: F:定义Backoff接口及最大重试次数、抖动、单次上限与总超时装饰器中间件 | R:code:pkg/retry/rand.go | A:pkg/retry | S:WithMaxDuration从创建Backoff实例时即开始计时而非首次Next调用
+backoff_constant.go[LR4T]: F:实现固定时间间隔的常量退避策略 | R:code:pkg/retry/backoff.go | A:NewConstant,Constant | S:间隔参数必须大于0，否则返回ErrInvalidInterval
+backoff_exponential.go[LR5T]: F:实现按2的幂次递增的指数退避策略，包含位运算溢出保护 | R:code:pkg/retry/backoff.go | A:NewExponential,Exponential | S:位移溢出或乘法溢出时钳制为math.MaxInt64，建议配合WithCappedDuration
+backoff_fibonacci.go[LR5T]: F:实现基于斐波那契数列递增的无锁CAS退避策略 | R:code:pkg/retry/backoff.go | A:NewFibonacci,Fibonacci | S:使用unsafe.Pointer与CAS原子更新状态对，溢出时饱和为math.MaxInt64
+backoff_linear.go[LR5S]: F:实现按固定步长线性累加的退避策略 | R:code:pkg/retry/backoff.go | A:NewLinear,Linear | S:原子累加重试次数并处理算术溢出保护
+errors.go[LR5M]: F:定义重试机制错误类型、RetryableError包装器及错误诊断信息提取 | R:code:pkg/retry/retry.go | A:RetryableError,IsRetryable | S:仅被RetryableError显式包装的错误才会触发重试，兼容errors.Is/As
+helpers.go[LR5M]: F:提供带返回值的泛型重试函数DoWithData及常用退避快捷组合封装 | R:code:pkg/retry/retry.go,code:pkg/retry/backoff.go | A:DoWithData,QuickRetry | S:快捷函数每次调用均创建独立Backoff实例以保证并发安全
+rand.go[LR4S]: F:提供基于sync.Pool的并发安全随机数生成器，用于退避抖动计算 | R:- | A:pkg/retry | S:通过对象池复用rand.Rand避免全局锁争用
+retry.go[LR7S]: F:核心重试执行器Do，结合Context取消、Timer复用与RetryableError判定循环执行 | R:code:pkg/retry/backoff.go,code:pkg/retry/errors.go | A:forward,gc | S:复用单个time.Timer避免每次重试泄漏定时器，非可重试错误立即终止
+test_helpers.go[TR3T]: F:提供重试次数统计与确定性退避测试辅助工具 | R:code:pkg/retry/retry.go | A:单元测试 | S:-
+
+===E:/code/go-port-forward/pkg/serializer/base64/===
+README.md[SG4M]: F:说明base64序列化器架构、SIMD硬件加速编译标签base64x与标准库回退用法 | R:code:pkg/serializer/base64/base64.go | A:开发者 | S:amd64架构下开启base64x标签启用SIMD加速，其他架构自动回退标准库
+base64.go[LG5T]: F:定义Base64编解码统一门面接口，支持标准、URL安全与无填充变体 | R:code:pkg/serializer/base64/base64_std.go | A:全局各包 | S:底层实现通过编译标签在base64x与标准库之间切换
+base64_base64x.go[LG5M]: F:基于cloudwego/base64x的高性能SIMD Base64编解码实现 | R:code:pkg/serializer/base64/base64.go | A:base64包 | S:仅在base64x构建标签且amd64架构下编译生效
+base64_std.go[LG5T]: F:基于Go标准库encoding/base64的跨平台回退实现 | R:code:pkg/serializer/base64/base64.go | A:base64包 | S:未启用base64x标签或非amd64架构时作为默认实现
+
+===E:/code/go-port-forward/pkg/serializer/cbor/===
+cbor.go[LG4T]: F:基于fxamacker/cbor封装CBOR二进制序列化与流式编解码器 | R:- | A:serializer | S:-
+
+===E:/code/go-port-forward/pkg/serializer/json/===
+json.go[LG6T]: F:提供统一JSON序列化、流式Encoder/Decoder与类型预热接口 | R:code:pkg/serializer/json/json_sonic.go,code:pkg/serializer/json/json_gojson.go | A:storage,web | S:通过构建标签在sonic、go_json、jsoniter和标准库间零侵入切换
+json_gojson.go[LG5S]: F:基于goccy/go-json的高性能跨架构JSON编解码实现（arm64/arm首选） | R:code:pkg/serializer/json/json.go | A:json包 | S:在go_json构建标签下编译，适用于不支持sonic的非x86架构
+json_jsoniter.go[LG5M]: F:基于json-iterator/go的JSON编解码可选实现 | R:code:pkg/serializer/json/json.go | A:json包 | S:仅在jsoniter构建标签且未启用sonic/go_json时生效
+json_sonic.go[LG6M]: F:基于bytedance/sonic的JIT/SIMD超高性能JSON编解码与类型预热实现 | R:code:pkg/serializer/json/json.go | A:json包 | S:仅在sonic标签且amd64架构下生效，Preload通过pretouch提前编译类型
+json_std.go[LG5S]: F:基于Go标准库encoding/json的默认回退实现 | R:code:pkg/serializer/json/json.go | A:json包 | S:无特定JSON构建标签时作为跨平台保底实现
+
+===E:/code/go-port-forward/pkg/serializer/msgpack/===
+msgpack.go[LG4T]: F:提供MessagePack二进制序列化门面接口 | R:code:pkg/serializer/msgpack/msgpack_vmihailenco.go | A:serializer | S:-
+msgpack_shamaton.go[LG4T]: F:基于shamaton/msgpack的MessagePack编解码可选实现 | R:code:pkg/serializer/msgpack/msgpack.go | A:msgpack包 | S:在shamaton_msgpack标签下启用
+msgpack_vmihailenco.go[LG4T]: F:基于vmihailenco/msgpack的默认MessagePack编解码实现 | R:code:pkg/serializer/msgpack/msgpack.go | A:msgpack包 | S:默认MessagePack实现
+
+===E:/code/go-port-forward/pkg/serializer/===
+serializer.go[LG5T]: F:汇总JSON/MsgPack/CBOR/XML序列化器信息并提供启动期类型预热注册 | R:code:pkg/serializer/json/json.go | A:应用初始化 | S:Preload通过sync.Once确保全局仅执行一次
+
+===E:/code/go-port-forward/pkg/serializer/xml/===
+xml.go[LG4T]: F:基于标准库encoding/xml封装XML序列化与流式编解码接口 | R:- | A:serializer | S:-
+
+===E:/code/go-port-forward/pkg/tunnel/===
+fec.go[KN7M]: F:实现8包一组XOR前向纠错编解码器，支持单包丢失无损恢复 | R:code:pkg/tunnel/protocol.go,code:pkg/tunnel/session_fec.go | A:Session | S:开启FEC时隧道MTU必须让出83字节开销以防IP分片导致整包全损
+handshake.go[KN8L]: F:实现隧道v6 Hello、v5 Accept/Reject报文封解包、X25519协商与HMAC认证 | R:code:pkg/tunnel/protocol.go,code:pkg/tunnel/legacy.go | A:tunnelapp.Server,client.Engine | S:PeekHello仅接受154字节0x06版本Hello，时间戳偏差超过10分钟拒绝防重放
+legacy.go[KN6M]: F:识别v1至v5旧版客户端Hello报文并按其对应时代版本签发跨版本拒绝应答 | R:code:pkg/tunnel/handshake.go | A:tunnelapp.Server | S:v5 Hello比v4多32字节Device2导致字段偏移不同，必须按版本分派验MAC
+protocol.go[KN8M]: F:定义加密隧道协议版本v5、报文类型常量、MTU计算规则与拒绝原因码 | R:code:pkg/tunnel/session.go | A:tunnelapp,client | S:AEAD采用ChaCha20-Poly1305并将1字节包类型纳入AAD防止类型混淆攻击
+session.go[KN8L]: F:实现隧道会话HKDF方向密钥派生、AEAD加解密、8192位图防重放窗口与小包冗余 | R:code:pkg/tunnel/protocol.go,code:pkg/tunnel/stats.go | A:tunnelapp.Server,client.Engine | S:c2s与s2c严格使用不同HKDF标签分离方向密钥，Open*仅限单接收协程调用
+session_fec.go[KN7S]: F:在Session层集成FEC校验包生成、接收登记与丢失数据包解密恢复 | R:code:pkg/tunnel/fec.go,code:pkg/tunnel/session.go | A:Session | S:恢复出的密文包必须重新走OpenData完整认证与重放窗口检查
+stats.go[ON6S]: F:无锁统计隧道会话丢包率、乱序率、RFC3550到达抖动、RTT与FEC恢复计数 | R:code:pkg/tunnel/session.go | A:Session.Stats | S:基于接收序列号跳跃与回退区分真实丢包与乱序到达
+uid.go[KN6T]: F:将访问码UUID字符串解析为16字节二进制UID以紧凑嵌入握手报文 | R:- | A:ParseUID,FormatUID | S:严格校验32位十六进制有效字符并拒绝全零UID
+
+===E:/code/go-port-forward/pkg/tunnet/===
+tunnet.go[RN8M]: F:封装wireguard/tun虚拟网卡创建、批量读写队列与16字节virtio_net_hdr偏移预留 | R:- | A:tunnelapp.Server,client.Engine | S:缓冲区前部必须预留16字节Offset以容纳Linux virtio_net_hdr，ReadPacket不可并发
