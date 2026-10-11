@@ -3,7 +3,7 @@
 ===E:/code/go-port-forward/===
 .gitattributes[FG2T]: F:声明全平台按LF检出文本文件，防止Windows检出重写换行导致指纹漂移 | R:- | A:git | S:检出时必须强制LF，禁止自动重写为CRLF
 .gitignore[FG3L]: F:声明开发工具、构建二进制、本地测试及私有凭据的忽略规则 | R:- | A:git | S:不要将aoci核心资产加进忽略，宿主MCP配置由工具自身区块管理
-AGENTS.md[SG7S]: F:声明AOCI仓库级认知层合同、模型认知生成准则及收尾维护边界 | R:code:aoci.txt,code:aoci.meta.txt | A:AI Agent | S:认知条目只能由模型根据真实源码证据创作，禁止根据规则模板拼接推导
+AGENTS.md[SG7S]: F:声明Git远端GitHub/Gitee双端推送纪律与AOCI仓库级认知层运行合同及维护准则 | R:code:aoci.txt,code:aoci.meta.txt | A:AI Agent | S:代码推送必须同时同步origin与gitee双端，认知条目只能由模型根据真实源码证据创作
 CHANGELOG.md[SG4L]: F:记录多版本功能新增、修复及破坏性变更历史 | R:code:README.md | A:维护者与使用者 | S:v1.3.0握手版本硬切为v5/v6，存量旧版客户端必须成对升级服务端
 LICENSE[SG2M]: F:声明Apache 2.0开源许可证条款 | R:- | A:开源合规 | S:-
 NETHERNET_UI.md[SN5S]: F:说明Minecraft基岩版NetherNet透明代理模式配置、TLS证书粘贴与排障指南 | R:code:README.md,code:internal/config/config.go | A:面板用户与服主 | S:iOS玩家必须启用HTTPS信令，UDP数据端口不可落在19132-19139的BDS预留池

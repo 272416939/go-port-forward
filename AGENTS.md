@@ -1,3 +1,26 @@
+# 项目协作规范
+
+## Git 远端双端同步规范 (GitHub & Gitee)
+
+本项目同时维护 GitHub 与 Gitee 两个远程仓库：
+- **GitHub (`origin`)**：`https://github.com/272416939/go-port-forward.git`
+- **Gitee (`gitee`)**：`https://gitee.com/Allen0528/go-port-forward.git`
+
+### 推送纪律
+每次完成代码提交（commit）并需要推送时，必须保持双端同步，**同时推送到 GitHub (`origin`) 和 Gitee (`gitee`) 双端**：
+
+```bash
+git push origin <branch>
+git push gitee <branch>
+```
+
+若涉及版本标签（tag）发布，同样须双端同步推送：
+
+```bash
+git push origin <tag>
+git push gitee <tag>
+```
+
 <!-- aoci:begin -->
 ## AOCI 仓库认知
 
