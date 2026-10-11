@@ -94,7 +94,7 @@ group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间�
 models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet端口计算及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet信令与数据端口不能相同，TLS启用时须选择cert_id或粘贴可配对的证书与私钥
 settings.go[DC8M]: F:定义全局设置单例模型、Schema版本、端口区间与默认组等全局配额天花板 | R:- | A:storage,users | S:默认端口范围20000-29999防止普通用户侵占低位特权端口，注册开关默认关闭
 user.go[DI8M]: F:定义Web用户账号模型、角色常量、密码修改与注册请求数据传输结构 | R:code:internal/models/group.go | A:storage,auth,users | S:PasswordHash必须标记json忽略严禁在REST响应中回显，配额由组动态解析
-certificate.go[DM8L]: F:定义SSL证书数据模型、上传与ACME申请请求结构、PEM解析校验及CA与验证方式的复合provider映射 | R:code:internal/models/models.go | A:storage,certmanager,web | S:私钥、ACME账户密钥与DNS凭据均标记json忽略防止REST泄漏，X509解析自动提取SANs与有效期，LiteSSL族免邮箱但强制目录地址与EAB凭据
+certificate.go[DM8M]: F:定义SSL证书数据模型、上传与ACME申请请求结构、PEM解析校验及CA与验证方式的复合provider映射 | R:code:internal/models/models.go | A:storage,certmanager,web | S:私钥、ACME账户密钥与DNS凭据均标记json忽略防止REST泄漏，X509解析自动提取SANs与有效期，LiteSSL族免邮箱但强制EAB凭据且目录地址留空时兜底官方固定地址
 
 ===E:/code/go-port-forward/internal/nethernet/===
 gateway.go[EN8L]: F:实现NetherNet HTTP/HTTPS信令网关、MOTD返回及WebRTC SDP candidate重写 | R:code:internal/nethernet/multiplexer.go,code:internal/models/models.go | A:forward.Manager | S:SDP重写必须折叠candidate为单个公网地址且保持原始CRLF行尾，双模式同端口监听
@@ -148,7 +148,7 @@ handlers_wsl.go[EU6S]: F:提供WSL2能力检测、发行版端口发现与批量
 middleware_auth.go[EU8S]: F:实现Web会话认证、管理员权限校验、CSRF同源检查与本机应急后门认证 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.Server | S:应急后门凭据仅允许从回环地址请求时生效，非GET请求强校验Origin/Referer
 rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go | A:web.handlers | S:普通用户透明规则必须锁定到名下启用中访问码IP，通用模式严禁转发到内网或隧道网段
 server.go[EU8L]: F:启动Web HTTP管理面板服务，注册静态资源嵌入、内置MIME字典与路由映射 | R:code:internal/web/handlers.go,code:internal/web/middleware_auth.go | A:main | S:静态文件根据内置staticMIME表映射Content-Type，绕过Windows注册表错误覆盖
-handlers_certs.go[EU7M]: F:提供SSL证书的CRUD、手动上传、ACME申请与续签HTTP端点及多租户作用域控制 | R:code:internal/certmanager/service.go,code:internal/forward/manager.go | A:web.router | S:普通用户仅能操作自己的证书，越权一律返回404，删除被规则引用的证书返回409
+handlers_certs.go[EU7M]: F:提供SSL证书的CRUD、手动上传、ACME申请与续签、DNS手动解析两段式HTTP端点及多租户作用域控制 | R:code:internal/certmanager/service.go,code:internal/forward/manager.go | A:web.router | S:普通用户仅能操作自己的证书，越权一律返回404，删除被规则引用的证书返回409
 
 ===E:/code/go-port-forward/internal/web/static/css/===
 app.css[EU7L]: F:Web管理面板主样式表，定义响应式栅格、卡片、徽标、表单与明暗适配 | R:code:internal/web/static/index.html | A:Web浏览器 | S:嵌入可执行文件二进制发布
@@ -293,6 +293,7 @@ uid.go[KN6T]: F:将访问码UUID字符串解析为16字节二进制UID以紧凑�
 tunnet.go[RN8M]: F:封装wireguard/tun虚拟网卡创建、批量读写队列与16字节virtio_net_hdr偏移预留 | R:- | A:tunnelapp.Server,client.Engine | S:缓冲区前部必须预留16字节Offset以容纳Linux virtio_net_hdr，ReadPacket不可并发
 
 ===E:/code/go-port-forward/internal/certmanager/===
-acme.go[KR8L]: F:封装RFC8555 ACME协议客户端，完成EAB外部账户绑定、DNS-01与HTTP-01挑战求解、CSR签发与证书链下载 | R:code:internal/certmanager/dns_provider.go | A:Service.ApplyACME,Service.Renew | S:EAB模式下contact留空（绑定即账号身份，故LiteSSL免邮箱），目录地址按证书下发而非全局，HMAC Key需兼容多种Base64变体解码
+acme.go[KR8M]: F:封装RFC8555 ACME协议客户端，完成EAB外部账户绑定、DNS-01与HTTP-01挑战求解、CSR签发与证书链下载 | R:code:internal/certmanager/dns_provider.go,code:internal/certmanager/manual_dns.go | A:Service.ApplyACME,Service.Renew | S:EAB模式下contact留空（绑定即账号身份，故LiteSSL免邮箱），目录地址按证书下发而非全局，HMAC Key需兼容多种Base64变体解码
 dns_provider.go[KS8L]: F:实现Cloudflare、阿里云、腾讯云DNSPod的DNS-01验证TXT记录写入与清理适配器 | R:code:internal/models/certificate.go | A:ACMEManager.ObtainCertificate | S:各服务商签名算法必须与官方文档一致，二级后缀域名需按三段切分根域，provider入参可能是litessl_*复合值须先归一化
-service.go[DR9L]: F:管理SSL证书上传、ACME申请（含LiteSSL EAB）、到期自动续签调度与TLS证书内存热缓存 | R:code:internal/storage/certificate.go,code:internal/certmanager/acme.go,code:internal/certmanager/dns_provider.go | A:main,forward.Manager,web | S:剩余有效期≤30天触发续签，GetTLSCertificate走内存缓存实现零中断热重载，删除证书前须无规则引用
+service.go[DR9L]: F:管理SSL证书上传、ACME申请（含LiteSSL EAB与DNS手动解析）、到期自动续签调度与TLS证书内存热缓存 | R:code:internal/storage/certificate.go,code:internal/certmanager/acme.go,code:internal/certmanager/dns_provider.go,code:internal/certmanager/manual_dns.go | A:main,forward.Manager,web | S:剩余有效期≤30天触发续签，GetTLSCertificate走内存缓存实现零中断热重载，删除证书前须无规则引用
+manual_dns.go[KR8L]: F:实现DNS-01手动解析两段式流程，创建Order后返回待添加TXT记录并由用户验证后签发证书 | R:code:internal/certmanager/acme.go | A:Service.PrepareManualDNS,Service.CompleteManualDNS | S:TXT记录必须先在公共DNS生效CA才验证，故创建Order与提交挑战必然是两个用户动作，中间状态存内存并设30分钟TTL而非落库
