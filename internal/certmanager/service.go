@@ -349,11 +349,16 @@ func (s *Service) Renew(ctx context.Context, id string) (*models.Certificate, er
 	}
 
 	eab := eabFromCredentials(cert.Provider, cert.Credentials)
+	dirURL := cert.DirectoryURL
+	if cert.Provider.IsLiteSSL() {
+		dirURL = models.NormalizeLiteSSLDirectoryURL(dirURL)
+		cert.DirectoryURL = dirURL
+	}
 	acctKey := strings.TrimSpace(cert.ACMEAccountKey)
 	if acctKey == "" {
-		acctKey = s.resolveAccountKey(cert.DirectoryURL, eab)
+		acctKey = s.resolveAccountKey(dirURL, eab)
 	}
-	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, cert.DirectoryURL, acctKey, cert.Email, cert.Domains, dnsProv, eab)
+	certPEM, keyPEM, acctKeyPEM, err := s.acme.ObtainCertificate(ctx, dirURL, acctKey, cert.Email, cert.Domains, dnsProv, eab)
 	if acctKeyPEM != "" {
 		cert.ACMEAccountKey = acctKeyPEM
 		s.persistAccountKey(eab, acctKeyPEM)
@@ -625,7 +630,9 @@ func (s *Service) injectGlobalACME(owner *models.User, req *models.ApplyACMERequ
 
 	if req.Provider.IsLiteSSL() {
 		if req.DirectoryURL == "" && gCfg.DirectoryURL != "" {
-			req.DirectoryURL = gCfg.DirectoryURL
+			req.DirectoryURL = models.NormalizeLiteSSLDirectoryURL(gCfg.DirectoryURL)
+		} else {
+			req.DirectoryURL = models.NormalizeLiteSSLDirectoryURL(req.DirectoryURL)
 		}
 		if req.Credentials == nil {
 			req.Credentials = make(map[string]string)

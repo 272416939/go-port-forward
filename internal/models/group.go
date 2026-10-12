@@ -10,7 +10,8 @@ import (
 // 配额挂在组上而不是用户上：管理员按「套餐」维护少量组，用户只需归属到某个
 // 组。挂在用户上时每个新用户都要重填一遍配额，而改套餐要逐个用户去改。
 //
-// 三个上限为 0 表示「该项未单独配置」，回落到全局设置（见 ResolveQuota）。
+// 三个上限为 -1 表示「该项未单独配置」，回落到全局设置（见 ResolveQuota）；
+// 为 0 表示「明确分配 0 配额（无配额/游客）」；> 0 表示明确上限。
 // 端口区间 0/0 同理。
 type UserGroup struct {
 	CreatedAt time.Time `json:"created_at"`
@@ -40,9 +41,9 @@ type CreateGroupRequest struct {
 	Comment        string `json:"comment"`
 	PortRangeStart int    `json:"port_range_start"`
 	PortRangeEnd   int    `json:"port_range_end"`
-	MaxAccessCodes int    `json:"max_access_codes"`
-	MaxTunnels     int    `json:"max_tunnels"`
-	MaxRules       int    `json:"max_rules"`
+	MaxAccessCodes *int   `json:"max_access_codes"`
+	MaxTunnels     *int   `json:"max_tunnels"`
+	MaxRules       *int   `json:"max_rules"`
 	IsDefault      bool   `json:"is_default"`
 }
 
@@ -92,11 +93,11 @@ func ValidateGroupAgainstSettings(g *UserGroup, s Settings) error {
 		{"规则上限 | max rules", g.MaxRules, s.MaxRulesPerUser},
 	}
 	for _, c := range checks {
-		if c.group < 0 {
+		if c.group < -1 {
 			return fmt.Errorf("%s 不能为负 | must not be negative", c.name)
 		}
-		// 全局为 0（不限）时组可以任意设值；全局有限时组不得超过它。
-		if c.glob > 0 && c.group > c.glob {
+		// c.group == -1 表示跟随全局；c.group == 0 表示无配额；全局为 0（不限）时组可任意设值。
+		if c.group > 0 && c.glob > 0 && c.group > c.glob {
 			return fmt.Errorf("%s 不能超过全局上限 %d | must not exceed the global limit of %d",
 				c.name, c.glob, c.glob)
 		}

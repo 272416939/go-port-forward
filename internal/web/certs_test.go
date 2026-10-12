@@ -152,7 +152,7 @@ func TestGlobalACMEConfigAndSecretMasking(t *testing.T) {
 	putBody := `{
 		"enabled": true,
 		"allow_user_apply": true,
-		"directory_url": "https://acme.freessl.cn/directory",
+		"directory_url": "https://acme.litessl.com/acme/v2/directory",
 		"eab_kid": "kid-global-123",
 		"eab_hmac_key": "dGVzdC1zZWNyZXQtaG1hYy1rZXk="
 	}`

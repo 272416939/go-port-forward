@@ -21,7 +21,7 @@ func (h *handler) diagnostics(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	ok(w, models.DiagnosticsResponse{
-		Timestamp: time.Now(),
+		Timestamp: models.Now(),
 		Runtime:   collectRuntimeDiagnostics(),
 		Pool: models.PoolDiagnostics{
 			Running: pool.Running(),

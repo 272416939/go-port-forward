@@ -1448,29 +1448,15 @@
             </form>
             <!-- Tab 2: ACME 自动申请与续签 -->
             <form style="display:none" x-show="certTab === 'acme'" @submit.prevent="submitACMECert()">
-              <!-- 平台已就绪全局 LiteSSL ACME 配置时的快捷提示条 -->
-              <div class="alert alert-success py-2 small mb-2 d-flex justify-content-between align-items-center" x-show="publicACME && publicACME.configured && publicACME.allow_user_apply">
-                <div>
-                  <i class="bi bi-check-circle-fill me-1"></i>
-                  <span x-text="t('平台已配置全局 LiteSSL 签发账号，无需填写 EAB 凭据，只需选择验证方式并输入域名即可签发！', 'Platform global LiteSSL account is ready. Select a validation method and enter your domain to issue!')"></span>
-                </div>
-                <div class="form-check form-switch mb-0" x-show="isAdmin || !useGlobalACME">
-                  <input class="form-check-input" type="checkbox" id="chkUseGlobalACME" x-model="useGlobalACME"/>
-                  <label class="form-check-label small" for="chkUseGlobalACME" x-text="t('使用平台 LiteSSL 账号','Use Platform LiteSSL')"></label>
-                </div>
-              </div>
-
               <div class="row g-2">
-                <div class="col-md-6" :class="isUsingGlobalACME() ? 'col-md-6' : 'col-md-4'">
+                <div class="col-md-4">
                   <label class="form-label small mb-1"><span x-text="t('证书名称','Certificate Name')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm" x-model="certForm.name" :placeholder="t('如：泛域名自动续签','e.g. wildcard auto-renew')"/>
                 </div>
-                <div class="col-md-6" :class="isUsingGlobalACME() ? 'col-md-6' : 'col-md-4'">
+                <div class="col-md-4">
                   <label class="form-label small mb-1"><span x-text="t('申请域名（支持泛域名，多个用逗号分隔）','Domains (comma separated, wildcard ok)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm font-monospace" x-model="certForm.domains" placeholder="mc.example.com, *.mc.example.com"/>
                 </div>
-                <div class="col-12" x-show="!isUsingGlobalACME()">
-                  <div class="row g-2">
                 <div class="col-md-4">
                   <label class="form-label small mb-1"><span x-text="t('证书颁发机构 (CA)','Certificate Authority')"></span> <span class="text-danger">*</span></label>
                   <select class="form-select form-select-sm" x-model="certForm.ca">
@@ -1478,34 +1464,41 @@
                     <option value="letsencrypt" x-text="t('Let\'s Encrypt（国际 · 需邮箱）','Let\'s Encrypt (international · email required)')"></option>
                   </select>
                   <div class="form-text" x-show="certForm.ca === 'litessl'" x-cloak
-                       x-text="t('LiteSSL 是 TrustAsia 运营的免费 CA，经 FreeSSL 控制台获取 ACME 目录与 EAB 凭据，无需邮箱、国内验证节点更快。','LiteSSL is a free CA by TrustAsia. Get the ACME directory and EAB credentials from the FreeSSL console — no email needed, faster CN validation nodes.')"></div>
+                       x-text="t('LiteSSL 是 TrustAsia 免费 CA，国内节点验证更快，可免邮箱签发','LiteSSL (TrustAsia) — faster CN validation nodes, no email needed')"></div>
+                  <div class="form-text" x-show="certForm.ca === 'letsencrypt'" x-cloak
+                       x-text="t('Let\'s Encrypt 是国际主流免费 CA，支持单域名与泛域名','Let\'s Encrypt — international free CA for single & wildcard domains')"></div>
                 </div>
 
                 <!-- 通知邮箱：仅 Let's Encrypt 需要 -->
-                <div class="col-md-4" x-show="certForm.ca === 'letsencrypt'">
+                <div class="col-md-4" x-show="certForm.ca === 'letsencrypt'" x-cloak>
                   <label class="form-label small mb-1"><span x-text="t('通知邮箱 (ACME 注册)','Email (for ACME account)')"></span> <span class="text-danger">*</span></label>
                   <input class="form-control form-control-sm" type="email" x-model="certForm.email" placeholder="admin@example.com"/>
+                  <div class="form-text" x-text="t('用于注册 Let\'s Encrypt 账户与接收证书到期通知','Used for Let\'s Encrypt account registration and expiry notifications')"></div>
                 </div>
 
-                <!-- LiteSSL：ACME 目录地址（官方固定地址已预填） -->
-                <div class="col-md-8" x-show="certForm.ca === 'litessl'">
-                  <label class="form-label small mb-1"><span x-text="t('ACME 目录地址','ACME Directory URL')"></span></label>
-                  <input class="form-control form-control-sm font-monospace" x-model="certForm.directory_url"
-                         placeholder="https://acme.freessl.cn/directory"/>
-                  <div class="form-text" x-text="t('已预填 LiteSSL 官方地址，一般无需修改。仅当你使用自建或代理的 ACME 端点时才需要改动。','Pre-filled with the official LiteSSL endpoint — usually no change needed. Only edit it if you use a self-hosted or proxied ACME endpoint.')"></div>
-                </div>
-
-                <!-- LiteSSL：EAB 凭据 -->
-                <div class="col-md-4" x-show="certForm.ca === 'litessl'">
-                  <label class="form-label small mb-1"><span x-text="t('EAB KID','EAB KID')"></span> <span class="text-danger">*</span></label>
-                  <input class="form-control form-control-sm font-monospace" x-model="certForm.eab_kid"/>
-                  <div class="form-text" x-text="t('FreeSSL 控制台「ACME 账号管理」获取','From the FreeSSL console: ACME Account Management')"></div>
-                </div>
-                <div class="col-md-4" x-show="certForm.ca === 'litessl'">
-                  <label class="form-label small mb-1"><span x-text="t('EAB HMAC Key','EAB HMAC Key')"></span> <span class="text-danger">*</span></label>
-                  <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.eab_hmac_key"/>
-                  <div class="form-text" x-text="t('创建时仅显示一次，请妥善保存','Shown only once at creation — keep it safe')"></div>
-                </div>
+                <!-- 自定义 LiteSSL EAB 配置：仅在管理员未配置全局 LiteSSL 账号时提示并显示输入项 -->
+                <div class="col-12" x-show="certForm.ca === 'litessl' && !isUsingGlobalACME()" x-cloak>
+                  <div class="alert alert-warning py-2 small mb-2">
+                    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                    <span x-text="t('管理员未配置全局 LiteSSL 签发账号，需手动填写下方 EAB 凭据，或切换为 Let\'s Encrypt 签发。', 'Administrator has not configured global LiteSSL account. Please enter EAB credentials below, or switch to Let\'s Encrypt.')"></span>
+                  </div>
+                  <div class="row g-2">
+                    <div class="col-md-4">
+                      <label class="form-label small mb-1"><span x-text="t('ACME 目录地址','ACME Directory URL')"></span></label>
+                      <input class="form-control form-control-sm font-monospace" x-model="certForm.directory_url"
+                             placeholder="https://acme.litessl.com/acme/v2/directory"/>
+                      <div class="form-text" x-text="t('已预填 LiteSSL 官方地址，一般无需修改','Pre-filled with the official LiteSSL endpoint')"></div>
+                    </div>
+                    <div class="col-md-4">
+                      <label class="form-label small mb-1"><span x-text="t('EAB KID','EAB KID')"></span> <span class="text-danger">*</span></label>
+                      <input class="form-control form-control-sm font-monospace" x-model="certForm.eab_kid"/>
+                      <div class="form-text" x-text="t('FreeSSL 控制台「ACME 账号管理」获取','From the FreeSSL console: ACME Account Management')"></div>
+                    </div>
+                    <div class="col-md-4">
+                      <label class="form-label small mb-1"><span x-text="t('EAB HMAC Key','EAB HMAC Key')"></span> <span class="text-danger">*</span></label>
+                      <input class="form-control form-control-sm font-monospace" type="password" x-model="certForm.eab_hmac_key"/>
+                      <div class="form-text" x-text="t('创建时仅显示一次，请妥善保存','Shown only once at creation — keep it safe')"></div>
+                    </div>
                   </div>
                 </div>
 
@@ -1861,7 +1854,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="form-text mb-3" x-text="t('组是配额的载体：端口区间、访问码数、并发隧道数、规则数。某项留 0 表示取「全局设置」里的值。','Groups carry the quotas: port range, code count, concurrent tunnels, rule count. A value of 0 falls back to Global Settings.')"></div>
+        <div class="form-text mb-3" x-text="t('组是配额的载体：端口区间、访问码数、并发隧道数、规则数。留空表示取「全局设置」里的值；填 0 表示明确分配 0 配额（无配额/游客）。','Groups carry the quotas: port range, code count, concurrent tunnels, rule count. Leave blank to inherit Global Settings; set to 0 for zero-quota (disabled/guest).')"></div>
 
         <form class="row g-2 align-items-end mb-3" @submit.prevent="saveGroup()">
           <div class="col-md-2">
@@ -1871,22 +1864,22 @@
           <div class="col-md-2">
             <label class="form-label small mb-1" x-text="t('端口区间','Port Range')"></label>
             <div class="input-group input-group-sm">
-              <input class="form-control" type="number" min="0" max="65535" x-model.number="groupForm.port_range_start" placeholder="0"/>
+              <input class="form-control" type="number" min="0" max="65535" x-model="groupForm.port_range_start" :placeholder="t('全局','Global')"/>
               <span class="input-group-text">-</span>
-              <input class="form-control" type="number" min="0" max="65535" x-model.number="groupForm.port_range_end" placeholder="0"/>
+              <input class="form-control" type="number" min="0" max="65535" x-model="groupForm.port_range_end" :placeholder="t('全局','Global')"/>
             </div>
           </div>
           <div class="col-md-1">
             <label class="form-label small mb-1" x-text="t('码上限','Codes')"></label>
-            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_access_codes" placeholder="0"/>
+            <input class="form-control form-control-sm" type="number" min="0" x-model="groupForm.max_access_codes" :placeholder="t('全局','Global')"/>
           </div>
           <div class="col-md-1">
             <label class="form-label small mb-1" x-text="t('隧道上限','Tunnels')"></label>
-            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_tunnels" placeholder="0"/>
+            <input class="form-control form-control-sm" type="number" min="0" x-model="groupForm.max_tunnels" :placeholder="t('全局','Global')"/>
           </div>
           <div class="col-md-1">
             <label class="form-label small mb-1" x-text="t('规则上限','Rules')"></label>
-            <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupForm.max_rules" placeholder="0"/>
+            <input class="form-control form-control-sm" type="number" min="0" x-model="groupForm.max_rules" :placeholder="t('全局','Global')"/>
           </div>
           <div class="col-md-2">
             <div class="form-check form-switch">
@@ -1919,10 +1912,10 @@
                     <span x-text="g.name"></span>
                     <span class="badge rounded-pill text-bg-secondary ms-1" x-show="g.is_default" x-text="t('默认','default')"></span>
                   </td>
-                  <td class="font-monospace small" x-text="g.port_range_start ? (g.port_range_start + '-' + g.port_range_end) : quotaFallback()"></td>
-                  <td class="small" x-text="g.max_access_codes || quotaFallback()"></td>
-                  <td class="small" x-text="g.max_tunnels || quotaFallback()"></td>
-                  <td class="small" x-text="g.max_rules || quotaFallback()"></td>
+                  <td class="font-monospace small" x-html="formatGroupPortRangeHtml(g)"></td>
+                  <td class="small" x-html="formatGroupQuotaHtml(g.max_access_codes)"></td>
+                  <td class="small" x-html="formatGroupQuotaHtml(g.max_tunnels)"></td>
+                  <td class="small" x-html="formatGroupQuotaHtml(g.max_rules)"></td>
                   <td class="small" x-text="g.member_count"></td>
                   <td class="text-end text-nowrap">
                     <button class="btn btn-sm btn-outline-secondary btn-icon" @click="editGroup(g)" :title="t('编辑','Edit')"><i class="bi bi-pencil"></i></button>
@@ -1948,28 +1941,28 @@
             <div class="col-md-3">
               <label class="form-label small mb-1" x-text="t('端口区间','Port Range')"></label>
               <div class="input-group input-group-sm">
-                <input class="form-control" type="number" min="0" max="65535" x-model.number="groupEdit.port_range_start"/>
+                <input class="form-control" type="number" min="0" max="65535" x-model="groupEdit.port_range_start" :placeholder="t('全局','Global')"/>
                 <span class="input-group-text">-</span>
-                <input class="form-control" type="number" min="0" max="65535" x-model.number="groupEdit.port_range_end"/>
+                <input class="form-control" type="number" min="0" max="65535" x-model="groupEdit.port_range_end" :placeholder="t('全局','Global')"/>
               </div>
             </div>
             <div class="col-md-1">
               <label class="form-label small mb-1" x-text="t('码上限','Codes')"></label>
-              <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupEdit.max_access_codes"/>
+              <input class="form-control form-control-sm" type="number" min="0" x-model="groupEdit.max_access_codes" :placeholder="t('全局','Global')"/>
             </div>
             <div class="col-md-1">
               <label class="form-label small mb-1" x-text="t('隧道上限','Tunnels')"></label>
-              <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupEdit.max_tunnels"/>
+              <input class="form-control form-control-sm" type="number" min="0" x-model="groupEdit.max_tunnels" :placeholder="t('全局','Global')"/>
             </div>
             <div class="col-md-1">
               <label class="form-label small mb-1" x-text="t('规则上限','Rules')"></label>
-              <input class="form-control form-control-sm" type="number" min="0" x-model.number="groupEdit.max_rules"/>
+              <input class="form-control form-control-sm" type="number" min="0" x-model="groupEdit.max_rules" :placeholder="t('全局','Global')"/>
             </div>
             <div class="col-md-2">
               <button type="submit" class="btn btn-primary btn-sm w-100" :disabled="groupSaving" x-text="t('保存','Save')"></button>
             </div>
             <div class="col-12">
-              <div class="form-text" x-text="t('配额 0 表示取「全局设置」的值；改小组区间不影响已存在的规则。','0 falls back to Global Settings; shrinking the range does not affect existing rules.')"></div>
+              <div class="form-text" x-text="t('留空表示取「全局设置」的值；填 0 表示分配 0 配额（无配额/游客）；改小组区间不影响已存在的规则。','Leave blank for Global Settings; 0 for zero-quota (disabled); shrinking range does not affect existing rules.')"></div>
             </div>
           </form>
         </div>
@@ -1999,6 +1992,12 @@
               <input class="form-control" type="number" min="0" max="65535" x-model.number="settingsForm.port_range_end"/>
             </div>
           </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('系统预留端口（禁止被使用，不参与端口分配）','Reserved system ports (prohibited from use & distribution)')"></label>
+            <input class="form-control form-control-sm font-monospace" x-model="settingsForm.reserved_ports"
+                   :placeholder="t('如：80, 443, 3306, 19132-19139','e.g. 80, 443, 3306, 19132-19139')"/>
+            <div class="form-text" x-text="t('支持逗号分隔的单端口与端口段（如 80, 443, 8080-8090）。预留端口不参与随机端口分发，且禁止被任何转发规则使用。','Supports comma-separated ports and ranges (e.g. 80, 443, 8080-8090). Prohibited from forwarding rules and random port distribution.')"></div>
+          </div>
           <div class="col-md-4">
             <label class="form-label small mb-1" x-text="t('每人访问码上限','Access codes / user')"></label>
             <input class="form-control form-control-sm" type="number" min="0" x-model.number="settingsForm.max_access_codes_per_user"/>
@@ -2018,6 +2017,26 @@
             <label class="form-label small mb-1" x-text="t('每用户日志保留上限','Conn logs kept / user')"></label>
             <input class="form-control form-control-sm" type="number" min="100" step="100" x-model.number="settingsForm.connlog_max_per_user"/>
             <div class="form-text" x-text="t('连接日志超出即删除最旧（100 ~ 1000 万，默认 10000）。','Oldest connection logs are trimmed beyond this (100 ~ 10,000,000, default 10000).')"></div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1" x-text="t('系统时区（全站日志、时间线与证书天数统一以此为准）','System timezone (unified baseline for logs, timelines & certificates)')"></label>
+            <select class="form-select form-select-sm" x-model="settingsForm.timezone">
+              <option value="Asia/Shanghai">Asia/Shanghai (UTC+08:00 中国标准时间 - 北京/上海)</option>
+              <option value="Asia/Hong_Kong">Asia/Hong_Kong (UTC+08:00 中国香港)</option>
+              <option value="Asia/Taipei">Asia/Taipei (UTC+08:00 中国台北)</option>
+              <option value="Asia/Singapore">Asia/Singapore (UTC+08:00 新加坡)</option>
+              <option value="Asia/Tokyo">Asia/Tokyo (UTC+09:00 日本标准时间 - 东京)</option>
+              <option value="Asia/Seoul">Asia/Seoul (UTC+09:00 韩国标准时间 - 首尔)</option>
+              <option value="UTC">UTC (UTC+00:00 协调世界时)</option>
+              <option value="Europe/London">Europe/London (UTC+00:00/+01:00 英国 - 伦敦)</option>
+              <option value="Europe/Berlin">Europe/Berlin (UTC+01:00/+02:00 欧洲中部 - 柏林/法兰克福)</option>
+              <option value="Europe/Moscow">Europe/Moscow (UTC+03:00 莫斯科)</option>
+              <option value="America/New_York">America/New_York (UTC-05:00/-04:00 美国东部 - 纽约)</option>
+              <option value="America/Chicago">America/Chicago (UTC-06:00/-05:00 美国中部 - 芝加哥)</option>
+              <option value="America/Los_Angeles">America/Los_Angeles (UTC-08:00/-07:00 美国太平洋 - 洛杉矶)</option>
+              <option value="Australia/Sydney">Australia/Sydney (UTC+10:00/+11:00 澳大利亚东部 - 悉尼)</option>
+            </select>
+            <div class="form-text" x-text="t('默认 Asia/Shanghai。修改后全站时间展示、服务端日志与证书到期计算实时按该时区生效，无需重启。','Default Asia/Shanghai. Panel dates, server logs & certificate expiry update immediately without restarts.')"></div>
           </div>
           <div class="col-12">
             <label class="form-label small mb-1" x-text="t('中转机地址（写入接入码，供客户端连接隧道）','Relay address (embedded in access codes)')"></label>
@@ -2094,7 +2113,7 @@
           </div>
           <div class="col-12">
             <label class="form-label small mb-1" x-text="t('ACME 目录地址','ACME Directory URL')"></label>
-            <input class="form-control form-control-sm font-monospace" x-model="acmeConfigForm.directory_url" placeholder="https://acme.freessl.cn/directory"/>
+            <input class="form-control form-control-sm font-monospace" x-model="acmeConfigForm.directory_url" placeholder="https://acme.litessl.com/acme/v2/directory"/>
             <div class="form-text" x-text="t('已预填 LiteSSL 官方地址，一般无需修改。','Pre-filled with the official LiteSSL directory URL.')"></div>
           </div>
           <div class="col-md-6">
@@ -2461,6 +2480,96 @@ const _style = document.createElement('style')
 _style.textContent = '.spin{animation:spin .6s linear infinite}'
 document.head.appendChild(_style)
 
+// ============================================================
+// AppTime：前端统一时间与时区接入盒（默认中国标准时间 Asia/Shanghai）
+// 现有与后续所有日期展示、完整时间格式化、自然日历天差值计算均须通过本盒调用，
+// 严禁直接裸调 toISOString().slice(0, 10) 或无 timeZone 参数的 toLocaleString()。
+// ============================================================
+const AppTime = {
+  tz: 'Asia/Shanghai',
+  setTimezone(tz) {
+    if (tz && typeof tz === 'string' && tz.trim()) {
+      this.tz = tz.trim()
+    }
+  },
+  getTimezone(overrideTz) {
+    return (overrideTz && typeof overrideTz === 'string' && overrideTz.trim()) ? overrideTz.trim() : (this.tz || 'Asia/Shanghai')
+  },
+  formatDate(iso, fallback = '—', tz) {
+    if (!iso) return fallback
+    const d = iso instanceof Date ? iso : new Date(iso)
+    if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return fallback
+    const activeTz = this.getTimezone(tz)
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: activeTz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).formatToParts(d)
+      const map = {}
+      parts.forEach(p => { map[p.type] = p.value })
+      if (map.year && map.month && map.day) {
+        return `${map.year}-${map.month}-${map.day}`
+      }
+      return new Intl.DateTimeFormat('sv-SE', {
+        timeZone: activeTz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(d)
+    } catch {
+      return d.toISOString().slice(0, 10)
+    }
+  },
+  formatDateTime(v, fallback = '—', tz) {
+    if (!v) return fallback
+    const d = v instanceof Date ? v : new Date(v)
+    if (isNaN(d.getTime())) return String(v)
+    const activeTz = this.getTimezone(tz)
+    try {
+      const parts = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: activeTz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).formatToParts(d)
+      const map = {}
+      parts.forEach(p => { map[p.type] = p.value })
+      const hh = map.hour === '24' ? '00' : map.hour
+      return `${map.year}-${map.month}-${map.day} ${hh}:${map.minute}:${map.second}`
+    } catch {
+      return d.toLocaleString()
+    }
+  },
+  calendarDaysDiff(targetIso, baseDate = new Date(), tz) {
+    if (!targetIso) return null
+    const target = targetIso instanceof Date ? targetIso : new Date(targetIso)
+    if (isNaN(target.getTime()) || target.getFullYear() <= 1970) return null
+    const base = baseDate instanceof Date ? baseDate : new Date(baseDate)
+    if (isNaN(base.getTime())) return null
+
+    const targetDayStr = this.formatDate(target, '', tz)
+    const baseDayStr = this.formatDate(base, '', tz)
+    if (!targetDayStr || !baseDayStr) return null
+
+    const targetUtcNoon = new Date(targetDayStr + 'T12:00:00Z').getTime()
+    const baseUtcNoon = new Date(baseDayStr + 'T12:00:00Z').getTime()
+    return Math.round((targetUtcNoon - baseUtcNoon) / (1000 * 60 * 60 * 24))
+  },
+  nowFileStamp(v, tz) {
+    const d = v ? new Date(v) : new Date()
+    const dtStr = this.formatDateTime(d, '', tz)
+    if (!dtStr || dtStr === '—') return String(Date.now())
+    return dtStr.replace(/[ :]/g, '-')
+  }
+}
+window.AppTime = AppTime
+
 function portForwardApp() {
   return {
     rules: [],
@@ -2516,7 +2625,7 @@ function portForwardApp() {
 	    _sessionsModal: null,
 	    _sessionsTimer: null,
 	    // 身份与用户管理
-	    me: { id:'', username:'', role:'', email:'', group_id:'', group_name:'', quota:{}, must_change_password:false },
+	    me: { id:'', username:'', role:'', email:'', group_id:'', group_name:'', quota:{}, must_change_password:false, timezone:'Asia/Shanghai' },
 	    emailReady: false,    // SMTP 已配置（public-config），驱动账号页的绑定入口
 	    bindOpen: false,
 	    bindSending: false, bindSaving: false, bindCountdown: 0,
@@ -2533,10 +2642,10 @@ function portForwardApp() {
 	    userForm: { username:'', password:'', role:'user', group_id:'' },
 	    userEdit: { id:'', username:'', password:'', group_id:'', email:'', email_verified:false },
 	    userSaving: false,
-	    groupForm: { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false },
+	    groupForm: { name:'', port_range_start:'', port_range_end:'', max_access_codes:'', max_tunnels:'', max_rules:'', is_default:false },
 	    groupSaving: false,
-	    groupEdit: { id:'', name:'', port_range_start:0, port_range_end:0, max_access_codes:0, max_tunnels:0, max_rules:0 },
-	    settingsForm: { port_range_start:0, port_range_end:0, max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, connlog_max_per_user:10000, enable_registration:false, relay_addr:'' },
+	    groupEdit: { id:'', name:'', port_range_start:'', port_range_end:'', max_access_codes:'', max_tunnels:'', max_rules:'' },
+	    settingsForm: { port_range_start:0, port_range_end:0, reserved_ports:'', max_access_codes_per_user:0, max_tunnels_per_user:0, max_rules_per_user:0, connlog_max_per_user:10000, enable_registration:false, relay_addr:'', timezone:'Asia/Shanghai' },
 	    settingsSaving: false,
 	    globalSettings: null, // 组页面回退值展示用
 	    smtpForm: { host:'', port:587, username:'', password:'', from:'', from_name:'', encryption:'starttls' },
@@ -2544,7 +2653,7 @@ function portForwardApp() {
 	    smtpTestTo: '',
 	    smtpSaving: false, smtpTestSending: false,
 	    _smtpModal: null,
-	    acmeConfigForm: { enabled:false, allow_user_apply:true, directory_url:'https://acme.freessl.cn/directory', eab_kid:'', eab_hmac_key:'' },
+	    acmeConfigForm: { enabled:false, allow_user_apply:true, directory_url:'https://acme.litessl.com/acme/v2/directory', eab_kid:'', eab_hmac_key:'' },
 	    acmeConfigHasHMAC: false, acmeConfigSaving: false,
 	    _acmeConfigModal: null,
 	    publicACME: { configured:false, allow_user_apply:false, ca:'' },
@@ -2655,7 +2764,7 @@ function portForwardApp() {
 	      // 身份必须先拿到：菜单显隐、规则表单的目标地址锁定、数据作用域
 	      // 都依赖它。拿不到就说明未登录，直接跳登录页。
 	      if (!await this.loadMe()) return
-	      const tasks = [this.refresh(), this.loadMyCodes()]
+	      const tasks = [this.refresh(), this.loadMyCodes(), this.loadPublicACMEStatus()]
 	      if (this.isAdmin) tasks.push(this.loadWSLCapability(), this.loadUsers(), this.loadGroups())
 	      await Promise.all(tasks)
 	      if (this.me.must_change_password) this.showAccountModal()
@@ -2679,6 +2788,7 @@ function portForwardApp() {
         const d = await res.json()
         if (!d.success) { location.href = '/login.html'; return false }
         this.me = d.data || this.me
+        if (this.me && this.me.timezone) AppTime.setTimezone(this.me.timezone)
         this.revealApp()
         return true
       } catch (e) {
@@ -2917,7 +3027,7 @@ function portForwardApp() {
     // --- SSL 证书管理与 ACME 自动续签 ---
 
     isUsingGlobalACME() {
-      return !!(this.useGlobalACME && this.publicACME && this.publicACME.configured && this.publicACME.allow_user_apply)
+      return this.certForm.ca === 'litessl' && !!(this.publicACME && this.publicACME.configured && this.publicACME.allow_user_apply)
     },
 
     async loadPublicACMEStatus() {
@@ -2926,17 +3036,14 @@ function portForwardApp() {
         const d = await res.json()
         if (d.success && d.data) {
           this.publicACME = d.data
-          if (this.publicACME.configured && this.publicACME.allow_user_apply) {
-            this.useGlobalACME = true
-          }
         }
       } catch (e) {}
     },
 
-    showCertsModal() {
+    async showCertsModal() {
       this.certError = ''
       this.resetCertForm()
-      this.loadPublicACMEStatus()
+      await this.loadPublicACMEStatus()
       if (this.isAdmin && this.users.length === 0) this.loadUsers()
       this.loadDNSCredentials()
       this.loadCertificates()
@@ -2956,7 +3063,7 @@ function portForwardApp() {
         domains: '',
         ca: 'litessl',
         email: this.me.email || '',
-        directory_url: 'https://acme.freessl.cn/directory',
+        directory_url: 'https://acme.litessl.com/acme/v2/directory',
         eab_kid: '', eab_hmac_key: '',
         challenge: 'manualdns',
         dns_provider: 'cloudflare',
@@ -3256,10 +3363,15 @@ function portForwardApp() {
       return this.certificates.filter(c => !c.user_id || c.user_id === ownerId)
     },
 
+    activeTimezone() {
+      const tz = (this.globalSettings && this.globalSettings.timezone) || (this.me && this.me.timezone) || AppTime.getTimezone()
+      AppTime.setTimezone(tz)
+      return tz
+    },
+
     certDaysLeft(c) {
       if (!c || !c.not_after) return null
-      const ms = new Date(c.not_after).getTime() - Date.now()
-      return Math.ceil(ms / (1000 * 60 * 60 * 24))
+      return AppTime.calendarDaysDiff(c.not_after, new Date(), this.activeTimezone())
     },
 
     formatCertOptionLabel(c) {
@@ -3286,17 +3398,13 @@ function portForwardApp() {
     },
 
     fmtCertDate(iso) {
-      if (!iso) return ''
-      const d = new Date(iso)
-      if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return ''
-      return _t('到期: ', 'Expires: ') + d.toISOString().slice(0, 10)
+      const str = AppTime.formatDate(iso, '', this.activeTimezone())
+      if (!str) return ''
+      return _t('到期: ', 'Expires: ') + str
     },
 
     fmtDateOnly(iso) {
-      if (!iso) return '—'
-      const d = new Date(iso)
-      if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return '—'
-      return d.toISOString().slice(0, 10)
+      return AppTime.formatDate(iso, '—', this.activeTimezone())
     },
 
     readCertFile(ev, field) {
@@ -3502,7 +3610,7 @@ function portForwardApp() {
         domains: (c.domains || []).join(', '),
         ca: isLiteSSL ? 'litessl' : 'letsencrypt',
         email: c.email || '',
-        directory_url: c.directory_url || (isLiteSSL ? 'https://acme.freessl.cn/directory' : ''),
+        directory_url: c.directory_url || (isLiteSSL ? 'https://acme.litessl.com/acme/v2/directory' : ''),
         eab_kid: '', eab_hmac_key: '',
         challenge: challenge,
         dns_provider: dnsProvider,
@@ -3765,9 +3873,40 @@ function portForwardApp() {
       } catch { /* 静默 */ }
     },
 
-    // 组页面上「取全局值」的展示文案：0 = 未单独配置，实际值来自全局设置。
+    // 组页面上「取全局值」的展示文案：-1 = 未单独配置，实际值来自全局设置。
     quotaFallback() {
       return '→ ' + _t('全局默认','global default')
+    },
+
+    // 端口区间输入解析：留空 = 0（跟随全局）；填 0 = -1（明确分配 0 端口配额/无配额）；> 0 = 具体端口。
+    parseGroupPortInput(val) {
+      if (val === '' || val === null || val === undefined) return 0
+      const n = Number(val)
+      if (isNaN(n)) return 0
+      if (n === 0) return -1
+      return n
+    },
+
+    formatGroupPortRangeHtml(g) {
+      if (g.port_range_start > 0 && g.port_range_end > 0) {
+        return g.port_range_start + '-' + g.port_range_end
+      }
+      if (g.port_range_start === -1 || g.port_range_end === -1 || g.max_rules === 0) {
+        return '<span class="badge text-bg-warning">0 (' + _t('无配额','no quota') + ')</span>'
+      }
+      return this.quotaFallback()
+    },
+
+    parseGroupQuotaInput(val) {
+      if (val === '' || val === null || val === undefined) return -1
+      const n = Number(val)
+      return isNaN(n) ? -1 : n
+    },
+
+    formatGroupQuotaHtml(val) {
+      if (val === undefined || val === null || val === -1) return this.quotaFallback()
+      if (val === 0) return '<span class="badge text-bg-warning">0 (' + _t('无配额','no quota') + ')</span>'
+      return String(val)
     },
 
     async saveGroup() {
@@ -3783,18 +3922,18 @@ function portForwardApp() {
           body: JSON.stringify({
             name: this.groupForm.name.trim(),
             comment: '',
-            port_range_start: Number(this.groupForm.port_range_start) || 0,
-            port_range_end: Number(this.groupForm.port_range_end) || 0,
-            max_access_codes: Number(this.groupForm.max_access_codes) || 0,
-            max_tunnels: Number(this.groupForm.max_tunnels) || 0,
-            max_rules: Number(this.groupForm.max_rules) || 0,
+            port_range_start: this.parseGroupPortInput(this.groupForm.port_range_start),
+            port_range_end: this.parseGroupPortInput(this.groupForm.port_range_end),
+            max_access_codes: this.parseGroupQuotaInput(this.groupForm.max_access_codes),
+            max_tunnels: this.parseGroupQuotaInput(this.groupForm.max_tunnels),
+            max_rules: this.parseGroupQuotaInput(this.groupForm.max_rules),
             is_default: !!this.groupForm.is_default
           })
         })
         const d = await res.json()
         if (d.success) {
           showToast('success', d.message || _t('用户组已创建','Group created'))
-          this.groupForm = { name:'', port_range_start:null, port_range_end:null, max_access_codes:0, max_tunnels:0, max_rules:0, is_default:false }
+          this.groupForm = { name:'', port_range_start:'', port_range_end:'', max_access_codes:'', max_tunnels:'', max_rules:'', is_default:false }
           this.loadGroups()
         } else {
           showToast('danger', d.message || _t('创建失败','Create failed'))
@@ -3805,10 +3944,14 @@ function portForwardApp() {
     },
 
     editGroup(g) {
+      const isNoPort = g.port_range_start === -1 || g.port_range_end === -1 || (g.max_rules === 0 && g.port_range_start <= 0)
       this.groupEdit = {
         id: g.id, name: g.name,
-        port_range_start: g.port_range_start, port_range_end: g.port_range_end,
-        max_access_codes: g.max_access_codes, max_tunnels: g.max_tunnels, max_rules: g.max_rules
+        port_range_start: isNoPort ? 0 : (g.port_range_start > 0 ? g.port_range_start : ''),
+        port_range_end: isNoPort ? 0 : (g.port_range_end > 0 ? g.port_range_end : ''),
+        max_access_codes: g.max_access_codes === -1 ? '' : g.max_access_codes,
+        max_tunnels: g.max_tunnels === -1 ? '' : g.max_tunnels,
+        max_rules: g.max_rules === -1 ? '' : g.max_rules
       }
     },
 
@@ -3820,17 +3963,17 @@ function portForwardApp() {
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({
             name: this.groupEdit.name.trim(),
-            port_range_start: Number(this.groupEdit.port_range_start) || 0,
-            port_range_end: Number(this.groupEdit.port_range_end) || 0,
-            max_access_codes: Number(this.groupEdit.max_access_codes) || 0,
-            max_tunnels: Number(this.groupEdit.max_tunnels) || 0,
-            max_rules: Number(this.groupEdit.max_rules) || 0
+            port_range_start: this.parseGroupPortInput(this.groupEdit.port_range_start),
+            port_range_end: this.parseGroupPortInput(this.groupEdit.port_range_end),
+            max_access_codes: this.parseGroupQuotaInput(this.groupEdit.max_access_codes),
+            max_tunnels: this.parseGroupQuotaInput(this.groupEdit.max_tunnels),
+            max_rules: this.parseGroupQuotaInput(this.groupEdit.max_rules)
           })
         })
         const d = await res.json()
         if (d.success) {
           showToast('success', d.message || _t('用户组已更新','Group updated'))
-          this.groupEdit = { id:'', name:'', port_range_start:0, port_range_end:0, max_access_codes:0, max_tunnels:0, max_rules:0 }
+          this.groupEdit = { id:'', name:'', port_range_start:'', port_range_end:'', max_access_codes:'', max_tunnels:'', max_rules:'' }
           this.loadGroups()
         } else {
           showToast('danger', d.message || _t('保存失败','Save failed'))
@@ -3879,8 +4022,11 @@ function portForwardApp() {
         const res = await fetch('/api/settings')
         const d = await res.json()
         if (d.success) {
-          this.settingsForm = d.data
-          this.globalSettings = d.data
+          const data = d.data || {}
+          if (!data.timezone) data.timezone = 'Asia/Shanghai'
+          this.settingsForm = data
+          this.globalSettings = data
+          AppTime.setTimezone(data.timezone)
           this._settingsModal.show()
         }
       } catch (e) {
@@ -3897,18 +4043,24 @@ function portForwardApp() {
           body: JSON.stringify({
             port_range_start: Number(this.settingsForm.port_range_start) || 0,
             port_range_end: Number(this.settingsForm.port_range_end) || 0,
+            reserved_ports: (this.settingsForm.reserved_ports || '').trim(),
             max_access_codes_per_user: Number(this.settingsForm.max_access_codes_per_user) || 0,
             max_tunnels_per_user: Number(this.settingsForm.max_tunnels_per_user) || 0,
             max_rules_per_user: Number(this.settingsForm.max_rules_per_user) || 0,
             connlog_max_per_user: Number(this.settingsForm.connlog_max_per_user) || 0,
             enable_registration: !!this.settingsForm.enable_registration,
-            relay_addr: (this.settingsForm.relay_addr || '').trim()
+            relay_addr: (this.settingsForm.relay_addr || '').trim(),
+            timezone: (this.settingsForm.timezone || 'Asia/Shanghai').trim()
           })
         })
         const d = await res.json()
         if (d.success) {
           showToast('success', d.message || _t('全局设置已更新','Settings updated'))
           this.globalSettings = d.data
+          if (d.data && d.data.timezone) {
+            AppTime.setTimezone(d.data.timezone)
+            if (this.me) this.me.timezone = d.data.timezone
+          }
           this._settingsModal.hide()
         } else {
           showToast('danger', d.message || _t('保存失败','Save failed'))
@@ -3926,17 +4078,30 @@ function portForwardApp() {
       return ''
     },
 
-    // 配额用量 0/5：上限 0 = 不限，只显示用量。
+    quotaSourceFor(quota, maxKey) {
+      const q = quota || {}
+      if (maxKey === 'max_access_codes') return q.access_code_source || ''
+      if (maxKey === 'max_tunnels') return q.tunnel_source || ''
+      if (maxKey === 'max_rules') return q.rule_source || ''
+      return ''
+    },
+
+    // 配额用量 0/5：组明确分配 0 配额时显示 0/0；不限时只显示用量。
     quotaRatio(quota, maxKey, usedKey) {
       const q = quota || {}
       const used = (q.used && q.used[usedKey]) || 0
+      const src = this.quotaSourceFor(q, maxKey)
+      if (src === 'group' && q[maxKey] === 0) return used + '/0'
       const max = q[maxKey] || 0
       return max > 0 ? used + '/' + max : String(used)
     },
 
-    // 用量达上限（上限为 0 = 不限，永不超过）。
+    // 用量达上限（组明确分配 0 配额时视为已达上限；不限则永不超过）。
     quotaExceeded(quota, maxKey, usedKey) {
       const q = quota || {}
+      const src = this.quotaSourceFor(q, maxKey)
+      if (src === 'admin' || src === 'none') return false
+      if (src === 'group' && q[maxKey] === 0) return true
       const max = q[maxKey] || 0
       if (max <= 0) return false
       return ((q.used && q.used[usedKey]) || 0) >= max
@@ -4034,7 +4199,7 @@ function portForwardApp() {
         this.acmeConfigForm = {
           enabled: !!v.enabled,
           allow_user_apply: v.allow_user_apply !== false,
-          directory_url: v.directory_url || 'https://acme.freessl.cn/directory',
+          directory_url: (v.directory_url && v.directory_url !== 'https://acme.freessl.cn/directory') ? v.directory_url : 'https://acme.litessl.com/acme/v2/directory',
           eab_kid: v.eab_kid || '',
           eab_hmac_key: ''
         }
@@ -4749,7 +4914,7 @@ function portForwardApp() {
 
 	    downloadDiagnosticsJson() {
 	      if (!this.diagnostics) return
-	      const stamp = String(this.diagnostics?.timestamp || new Date().toISOString()).replace(/[.:]/g, '-')
+	      const stamp = AppTime.nowFileStamp(this.diagnostics?.timestamp, this.activeTimezone())
 	      const blob = new Blob([this.diagnosticsJsonText()], { type: 'application/json;charset=utf-8' })
 	      const url = URL.createObjectURL(blob)
 	      const link = document.createElement('a')
@@ -4861,9 +5026,7 @@ function portForwardApp() {
 	    },
 
 	    fmtDateTime(v) {
-	      if (!v) return '—'
-	      const d = new Date(v)
-	      return Number.isNaN(d.getTime()) ? v : d.toLocaleString()
+	      return AppTime.formatDateTime(v, '—', this.activeTimezone())
 	    },
 
 	    summaryTimeMeta(item) {

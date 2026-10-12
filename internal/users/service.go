@@ -79,7 +79,7 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 		return nil, err
 	}
 	detector := &publicIPDetector{}
-	return &Service{
+	svc := &Service{
 		store:      store,
 		sessions:   sessions,
 		tunPool:    pool,
@@ -88,7 +88,12 @@ func New(store storage.Store, sessions *auth.Store, tunAddr, publicAddr string) 
 		detectAddr: detector.Detect,
 		registerLimiter: NewRateLimiter(RegistrationRateLimit, time.Hour),
 		verifier:        email.NewVerificationService(nil), // Mailer 由装配层注入
-	}, nil
+	}
+	if cfg, err := store.Settings(); err == nil {
+		norm := models.NormalizeSettings(cfg)
+		_ = models.ApplyTimezone(norm.Timezone)
+	}
+	return svc, nil
 }
 
 // SetMailer 注入发信实现（SMTPMailer 由装配层创建，配置从 store 实时读取）。

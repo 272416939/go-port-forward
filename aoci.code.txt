@@ -4,7 +4,7 @@
 .gitattributes[FG2T]: F:声明全平台按LF检出文本文件，防止Windows检出重写换行导致指纹漂移 | R:- | A:git | S:检出时必须强制LF，禁止自动重写为CRLF
 .gitignore[FG3L]: F:声明开发工具、构建二进制、本地测试及私有凭据的忽略规则 | R:- | A:git | S:不要将aoci核心资产加进忽略，宿主MCP配置由工具自身区块管理
 AGENTS.md[SG7S]: F:声明Git远端GitHub/Gitee双端推送纪律与AOCI仓库级认知层运行合同及维护准则 | R:code:aoci.txt,code:aoci.meta.txt | A:AI Agent | S:代码推送必须同时同步origin与gitee双端，认知条目只能由模型根据真实源码证据创作
-CHANGELOG.md[SG4L]: F:记录多版本功能新增、修复及破坏性变更历史 | R:code:README.md | A:维护者与使用者 | S:v1.4.0新增证书管理、DNS凭据免密联动与NetherNet同端口复用，v1.3.0握手版本硬切为v5/v6
+CHANGELOG.md[SG4L]: F:记录多版本功能新增、修复及破坏性变更历史 | R:code:README.md | A:维护者与使用者 | S:v1.4.1新增系统全局时区设置与统一时间接入盒、游客0配额组全链路拦截与预留端口管理
 LICENSE[SG2M]: F:声明Apache 2.0开源许可证条款 | R:- | A:开源合规 | S:-
 NETHERNET_UI.md[SN5S]: F:说明Minecraft基岩版NetherNet透明代理模式配置、TLS证书粘贴与排障指南 | R:code:README.md,code:internal/config/config.go | A:面板用户与服主 | S:iOS玩家必须启用HTTPS信令，UDP数据端口默认复用监听端口且不可落在19132-19139的BDS预留池
 README.md[SG7L]: F:项目全貌说明，阐述通用与透明代理模式、多用户访问码体系及快速启动指南 | R:code:app/README.md,code:NETHERNET_UI.md | A:使用者与开发者 | S:透明代理模式要求中转机Linux root运行，后端Windows机器配合pf-client
@@ -86,16 +86,17 @@ tuple_registry.go[DN8M]: F:全机唯一管理玩家源元组透明UDP套接字�
 udp.go[AN8L]: F:实现UDP端口监听、会话生命周期维护、透明模式注册表挂接与双向转发 | R:code:internal/forward/tuple_registry.go,code:internal/forward/acl.go | A:Manager.startForwarders | S:makeUDPAddrKey归一化IPv4的v4-mapped表示，透明模式下回程依赖策略路由本机投递
 
 ===E:/code/go-port-forward/internal/logger/===
-logger.go[CO7T]: F:初始化基于Zap和Lumberjack的全局结构化日志记录器，支持日志轮转 | R:code:internal/config/config.go | A:main,logger.S,logger.L | S:控制台与文件采用Tee双写，日志路径相对于可执行文件目录锚定
+logger.go[CO7T]: F:初始化基于Zap和Lumberjack的全局结构化日志记录器，支持日志轮转与系统配置时区编码 | R:code:internal/config/config.go,code:internal/models/timezone.go | A:main,logger.S,logger.L | S:控制台与文件采用Tee双写，日志时间戳经InSystemTimezone动态转换保持与系统配置时区对齐
 
 ===E:/code/go-port-forward/internal/models/===
 accesscode.go[DI7S]: F:定义隧道访问码数据模型、设备指纹解析、摘要脱敏及创建更新请求结构 | R:code:internal/models/models.go | A:storage,users,web | S:密钥与设备指纹标记json忽略，对外API与日志中指纹仅展示前后4位摘要
-group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间与上限不突破全局天花板 | R:code:internal/models/settings.go | A:storage,users | S:组配额上限不能为负，且非零时不得超越Settings配置的全局上限天花板
+group.go[DC7S]: F:定义用户组模型及配额字段，校验组端口区间与上限不突破全局天花板 | R:code:internal/models/settings.go | A:storage,users | S:组配额允许为-1表示跟随全局或0表示无配额（游客），为正时不得超越Settings配置的全局上限天花板
 models.go[DB8L]: F:定义转发规则核心模型、协议/状态枚举、NetherNet端口计算及通用校验逻辑 | R:code:internal/models/settings.go | A:forward,web,storage | S:NetherNet数据端口默认复用监听端口且允许信令与数据端口号相同，TLS启用时须选择cert_id或粘贴配对证书私钥
-settings.go[DC8M]: F:定义全局设置单例模型、Schema版本、端口区间与默认组等全局配额天花板 | R:- | A:storage,users | S:默认端口范围20000-29999防止普通用户侵占低位特权端口，注册开关默认关闭
-user.go[DI8M]: F:定义Web用户账号模型、角色常量、密码修改与注册请求数据传输结构 | R:code:internal/models/group.go | A:storage,auth,users | S:PasswordHash必须标记json忽略严禁在REST响应中回显，配额由组动态解析
-certificate.go[DM8L]: F:定义SSL证书数据模型、全局LiteSSL ACME平台配置模型、申请请求结构（支持dns_credential_id免密引用）、PEM解析校验及CA与验证方式的复合provider映射 | R:code:internal/models/models.go | A:storage,certmanager,web | S:私钥、ACME账户密钥与EAB凭据均标记json忽略防止REST泄漏，全局配置持久化AccountKey以便EAB复用，X509解析自动提取SANs与有效期，全局LiteSSL视图脱敏
+settings.go[DC8L]: F:定义全局设置单例模型、Schema版本、系统预留端口、全局时区、端口天花板及有效配额解析 | R:code:internal/models/group.go,code:internal/models/timezone.go | A:storage,users,web | S:系统预留端口支持单端口与区间混排且禁止任何规则使用；Timezone默认Asia/Shanghai且通过time.LoadLocation强校验
+user.go[DI8M]: F:定义Web用户账号模型、角色常量、端口区间校验、密码修改、注册请求及携带系统时区的CurrentUser视图 | R:code:internal/models/group.go,code:internal/models/timezone.go | A:storage,auth,users | S:CurrentUser视图自动装配SystemTimezoneName向前端同步系统时区；PasswordHash必须标记json忽略防REST回显
+certificate.go[DM8L]: F:定义SSL证书数据模型、全局LiteSSL ACME平台配置模型、申请请求结构、PEM解析校验及CA复合provider映射 | R:code:internal/models/models.go | A:storage,certmanager,web | S:DefaultLiteSSLDirectoryURL更新为官方v2端点，NormalizeLiteSSLDirectoryURL将空串与旧端点自动升级；敏感密钥json忽略
 dns_credential.go[DM7S]: F:定义DNS服务商API凭据模型、脱敏视图及创建更新校验规则，支持Cloudflare、阿里云与腾讯云DNSPod | R:code:internal/models/certificate.go | A:storage,certmanager,web | S:凭据敏感密钥标记json忽略防泄漏，API响应统一返回脱敏视图（末4位可见其余掩码），更新请求支持密码留空保留原值
+timezone.go[CG7S]: F:系统配置时区管理模块，提供原子并发安全时区切换、统一当前时间获取、日期格式化与自然日历天差值计算 | R:- | A:models.Now,logger,users,web | S:内嵌tzdata免宿主机依赖，使用atomic.Pointer无锁原子切换避免data race，CalendarDaysDiff基于UTC正午锚定自然日规避夏令时跳变
 
 ===E:/code/go-port-forward/internal/nethernet/===
 gateway.go[EN8L]: F:实现NetherNet HTTP/HTTPS信令网关、MOTD返回及WebRTC SDP candidate重写 | R:code:internal/nethernet/multiplexer.go,code:internal/models/models.go | A:forward.Manager | S:SDP重写必须折叠candidate为单个公网地址且保持原始CRLF行尾，双模式同端口监听
@@ -105,7 +106,7 @@ multiplexer.go[DN8L]: F:实现NetherNet单UDP端口数据面多路复用，通�
 accesscode.go[PI7M]: F:基于bbolt codes桶持久化访问码记录，提供配额受限的隧道地址分配与绑定 | R:code:internal/models/accesscode.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立的codeRecord避免API标签丢弃密钥，地址在写事务内原子分配防撞号
 acl.go[PS7M]: F:管理bbolt acl桶与按用户嵌套子桶的connlogs连接日志存储、分页与环形裁剪 | R:code:internal/models/acl.go,code:internal/storage/storage.go | A:forward.Manager | S:连接日志键使用大端纳秒时间戳+UUID实现跨桶时间有序与k路归并查询
 group.go[PC7M]: F:管理bbolt settings与groups桶的全局设置及用户组增删改查 | R:code:internal/models/group.go,code:internal/models/settings.go | A:users.Service | S:组名唯一性与默认组标记唯一性在同一写事务内完成，阻止删除包含成员的组
-migrate.go[PD8M]: F:执行bbolt存储模型版本检查与v1到v2访问码/用户组数据迁移 | R:code:internal/storage/storage.go,code:internal/models/settings.go | A:storage.Open | S:根据Settings.SchemaVersion判断迁移是否执行，迁移过程必须保持幂等
+migrate.go[PD8M]: F:执行bbolt存储模型版本检查与v1到v3访问码、用户组及0配额语义升级迁移 | R:code:internal/storage/storage.go,code:internal/models/settings.go | A:storage.Open | S:v2升v3将组内原表示未配置的0配额升级为-1保持跟随全局语义，迁移过程必须保持幂等
 smtp.go[PC6S]: F:管理settings桶下的SMTP配置持久化，提供脱敏读取与安全更新 | R:code:internal/models/system.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立smtpRecord保留密码，更新密码为空时在事务内保留原有密码
 storage.go[PD8M]: F:定义bbolt存储层Store总接口规范，管理数据库打开、全局ACME存取、EAB账户密钥查找、DNS凭据存储与所有根桶初始化 | R:code:internal/models/models.go,code:internal/models/dns_credential.go | A:main,forward,users,certmanager | S:数据库文件权限为0600且打开超时设为2秒，包含全局ACME配置与DNS凭证CRUD接口，新增dns_credentials桶在打开时必须自动创建
 user.go[PI8L]: F:管理users桶的Web账号持久化、密码哈希存储、邮箱唯一性校验与角色约束 | R:code:internal/models/user.go,code:internal/storage/storage.go | A:users.Service | S:持久化使用独立的userRecord避免API结构体忽略密码哈希，禁止删除最后一名管理员
@@ -124,31 +125,31 @@ setup_linux.go[IN8S]: F:执行Linux环境下TUN网卡配置、sysctl放宽、man
 setup_other.go[IN5T]: F:非Linux平台隧道服务端桩实现，启动直接返回平台不支持错误 | R:- | A:Server.Start | S:隧道服务端依赖Linux TUN与策略路由，非Linux环境下禁止启动
 sockopt_linux.go[RN7S]: F:管理Linux底层UDP套接字SO_RCVBUF生效值核查、UDP GRO/GSO开启与内核丢包统计 | R:code:internal/tunnelapp/gso.go | A:udpio.go | S:getsockopt返回内核记账值需折半计算载荷，读取/proc/net/udp获取端口丢包
 sockopt_other.go[RN4T]: F:非Linux平台UDP套接字高级特性桩实现，报告不支持批量和卸载 | R:- | A:udpio.go | S:非Linux平台优雅降级为单包读写，不启用GRO与GSO
-tunnelapp.go[AN9L]: F:内置隧道服务端核心引擎，驱动多用户握手、ChaCha20加密收发、回程路由推送与隔离校验 | R:code:internal/tunnelapp/registry.go,code:internal/tunnelapp/returnpath.go,code:pkg/tunnel/tunnel.go | A:main | S:TUN入向必须校验源地址等于会话tunIP以严防越权仿冒，禁止隧道内客户端互访
+tunnelapp.go[AN9L]: F:内置隧道服务端核心引擎，驱动多用户握手、ChaCha20加密收发、回程路由推送与隔离校验 | R:code:internal/tunnelapp/registry.go,code:internal/tunnelapp/returnpath.go,code:pkg/tunnel/tunnel.go | A:main | S:TUN入向必须校验源地址等于会话tunIP，MaxTunnels为0时握手阶段直接回送RejectTunnelLimit拒绝接入
 udpio.go[RN8M]: F:抽象UDP批量与单包收发读源，基于recvmmsg/sendmmsg优化系统调用吞吐 | R:code:internal/tunnelapp/sockopt_linux.go,code:pkg/tunnel/tunnel.go | A:Server.loop | S:批边界严格以一次系统调用返回包数为准不额外凑批，支持GRO聚合消息在用户态拆包
 
 ===E:/code/go-port-forward/internal/users/===
-accesscode.go[AI7M]: F:提供访问码业务CRUD、接入码pf1编码生成、设备绑定解除与在线状态合并 | R:code:internal/storage/accesscode.go,code:pkg/accesscode/accesscode.go | A:web.handlers | S:解除绑定或停用访问码时必须触发TunnelEvictor踢掉在线会话，创建受组配额约束
+accesscode.go[AI7M]: F:提供访问码业务CRUD、基于系统时区的默认命名、接入码pf1编码生成、设备绑定解除与在线状态合并 | R:code:internal/storage/accesscode.go,code:pkg/accesscode/accesscode.go,code:internal/models/timezone.go | A:web.handlers | S:未命名访问码使用models.Now()按系统配置时区自动格式化命名；组访问码配额为0时禁止创建访问码并友好拦截
 bootstrap.go[AI7T]: F:系统初次启动时检查用户表，自动创建admin管理员并落盘一次性凭据文件 | R:code:internal/users/service.go | A:main | S:初始密码以0600权限写入admin-credentials.txt且禁止记入日志，初次登录强制改密
-group.go[AC7M]: F:提供用户组与全局设置的业务逻辑管理，校验配额变更与SMTP配置更新 | R:code:internal/storage/group.go,code:internal/models/group.go | A:web.handlers | S:收紧全局配额时先校验已有组是否超出，超出时拒绝修改并列出具体冲突组
+group.go[AC7M]: F:提供用户组与全局设置业务管理，校验配额变更、系统预留端口、全局时区热更新与SMTP配置更新 | R:code:internal/storage/group.go,code:internal/models/group.go,code:internal/models/settings.go,code:internal/models/timezone.go | A:web.handlers | S:保存全局设置后立即调用ApplyTimezone热生效无需重启；创建组未指定配额时初始化为-1跟随全局
 publicip.go[AN6S]: F:探测中转机公网IPv4地址，优先检查本机网卡，回退请求公共回显服务 | R:code:internal/logger/logger.go | A:users.Service | S:探测成功后进程级缓存结果，排除私网与CGNAT地址，失败时采用1分钟退避
 register.go[AS7L]: F:处理用户自助注册与基于邮件验证码的密码重置，执行IP限频与防爆破 | R:code:internal/users/service.go,code:internal/email/email.go | A:web.handlers | S:注册开关默认关闭，SMTP开启时强制校验邮箱验证码，用户名冲突提示必须脱敏防枚举
-service.go[AI8L]: F:用户服务总入口，组合账号、组、访问码、会话与隧道驱逐器生命周期 | R:code:internal/storage/storage.go,code:internal/auth/auth.go | A:main,web.handler | S:管理默认组兜底逻辑，用户删除时连带撤销所有有效会话并踢除对应在线隧道
+service.go[AI8L]: F:用户服务总入口，初始化时区热加载，组合账号、组、访问码、会话与隧道驱逐器生命周期 | R:code:internal/storage/storage.go,code:internal/auth/auth.go,code:internal/models/timezone.go | A:main,web.handler | S:启动时从全局设置读取并初始化系统时区；管理默认组兜底逻辑，用户删除时连带撤销有效会话并踢除对应在线隧道
 
 ===E:/code/go-port-forward/internal/web/===
-diagnostics.go[EO5T]: F:采集并输出Go运行时内存、协程数、GC指标与转发协程池诊断信息 | R:code:pkg/pool/pool.go,code:internal/models/models.go | A:web.router | S:仅管理员鉴权后可访问，读取runtime/metrics度量指标
+diagnostics.go[EO5T]: F:采集并输出Go运行时内存、协程数、GC指标、系统配置时区时间戳与转发协程池诊断信息 | R:code:pkg/pool/pool.go,code:internal/models/models.go,code:internal/models/timezone.go | A:web.router | S:诊断快照时间戳采用models.Now()携带配置时区；仅管理员鉴权后可访问，读取runtime/metrics度量指标
 handlers.go[EU7L]: F:定义Web核心API处理器结构、JSON请求体安全解码限制与统一响应格式 | R:code:internal/forward/manager.go,code:internal/auth/auth.go | A:web.Server | S:请求体严格限制1MB且禁止未知字段，内部系统错误对客户端屏蔽实现细节
 handlers_acl.go[EU7S]: F:处理IP访问控制名单增删查、按租户连接日志分页查询与批量清理 | R:code:internal/forward/manager.go,code:internal/models/acl.go | A:web.router | S:普通用户仅能查看与删除自己名下的连接日志，单次删除日志条数限制为2000
 handlers_auth.go[EU8S]: F:处理用户登录、注销、当前身份与配额用量查询、改密及邮箱绑定 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.router | S:登录失败按IP和用户名滑动窗口双重限频，修改密码后同步清除当前会话Cookie
 handlers_codes.go[EU7S]: F:处理访问码自助管理，包括创建、更新、删除、复制接入码与解绑设备 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:删除访问码前必须检查其隧道地址是否仍被转发规则引用，越权访问返回404防探测
 handlers_groups.go[EU7S]: F:处理管理员对用户组CRUD、全局配额设置、SMTP及全局ACME就绪状态返回 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:仅管理员可访问，获取设置时联动SMTP与全局ACME服务并下发smtp_configured与acme_configured状态徽章字段
-handlers_ports.go[EU6S]: F:提供用户配额区间内的随机端口分发与结合规则库及试绑的端口占用检测 | R:code:internal/users/service.go,code:internal/models/group.go | A:web.router | S:普通用户只能检测自身配额允许的端口，端口检测与随机联动规则库IsPortUsed防冲突，冲突错误脱敏规则名
+handlers_ports.go[EU6S]: F:提供用户配额区间内的随机端口分发与结合规则库、预留端口及试绑的端口占用检测 | R:code:internal/users/service.go,code:internal/models/group.go,code:internal/models/settings.go | A:web.router | S:randomPort自动规避系统预留端口，checkPort命中预留端口返回不可用，普通用户只能检测自身配额允许的端口
 handlers_register.go[EU7S]: F:处理无需登录的公开注册、发送邮箱验证码、重置密码与公开配置查询 | R:code:internal/users/service.go,code:internal/email/email.go | A:web.router | S:公开端点严格校验Origin防CSRF，发送验证码按IP限频，重名与找回失败响应对齐防枚举
 handlers_tunnel.go[EU6T]: F:向管理员暴露服务端在线隧道链路质量、MTU与丢包监控数据 | R:code:internal/tunnelapp/linkreport.go | A:web.router | S:仅管理员可查，隧道未开启时显式返回enabled=false而非404
 handlers_users.go[EU7T]: F:处理管理员对用户账号的增删改查及配额分配 | R:code:internal/users/service.go,code:internal/forward/manager.go | A:web.router | S:管理员不能停用或降级自己，删除用户前必须确认名下已无关联的转发规则
 handlers_wsl.go[EU6S]: F:提供WSL2能力检测、发行版端口发现与批量导入转发规则接口 | R:code:pkg/os/wsl/wsl.go,code:internal/forward/manager.go | A:web.router | S:仅管理员可用，批量导入前自动检测WSL2 IP并检查导入列表内端口协议去重
-middleware_auth.go[EU8S]: F:实现Web会话认证、管理员权限校验、CSRF同源检查与本机应急后门认证 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.Server | S:应急后门凭据仅允许从回环地址请求时生效，非GET请求强校验Origin/Referer
-rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go | A:web.handlers | S:普通用户透明规则必须锁定到名下启用中访问码IP，通用模式严禁转发到内网或隧道网段
+middleware_auth.go[EU8S]: F:实现Web会话认证、管理员权限校验、CSRF同源检查、用户业务错误映射与本机应急后门认证 | R:code:internal/auth/auth.go,code:internal/users/service.go | A:web.Server | S:writeUserError精确映射ErrQuotaExceeded为400坏请求，应急后门凭据仅允许从回环地址请求时生效
+rule_guard.go[DS8M]: F:执行转发规则创建与修改的多租户权限控制、系统预留端口拦截、端口配额校验与目标地址安全分流 | R:code:internal/forward/target.go,code:internal/users/service.go,code:internal/models/settings.go | A:web.handlers | S:监听端口与NetherNet数据端口命中系统预留端口全局拦截；租户组规则配额为0时禁止创建规则
 server.go[EU8L]: F:启动Web HTTP管理面板服务，注册静态资源嵌入、内置MIME字典、全局ACME与DNS凭据及所有业务路由映射 | R:code:internal/web/handlers.go,code:internal/web/middleware_auth.go | A:main | S:静态文件根据内置staticMIME表映射Content-Type，管理员专有路由与租户端点严格权限分层隔离，DNS凭据CRUD路由要求登录认证
 handlers_certs.go[EU7M]: F:提供SSL证书与DNS服务商API凭据的CRUD、手动上传、ACME申请续签、DNS手动解析两段式及全局ACME配置管理HTTP端点 | R:code:internal/certmanager/service.go,code:internal/forward/manager.go | A:web.router | S:DNS凭据端点严格脱敏且普通租户仅可操作本人凭据，申请证书时支持通过dns_credential_id免密注入，全局ACME配置修改仅管理员可用
 
@@ -158,7 +159,7 @@ theme.css[EU5S]: F:管理Web管理面板亮色与暗色主题变量切换及高�
 user-theme.css[EU5S]: F:针对普通用户端界面的专属轻量化主题与布局微调样式 | R:code:internal/web/static/index.html | A:Web浏览器 | S:-
 
 ===E:/code/go-port-forward/internal/web/static/===
-index.html[EU8L]: F:Web管理面板单页应用HTML模板骨架，包含仪表盘、规则、访问码、证书管理、DNS凭据管理模态框及全局LiteSSL配置模态框 | R:code:internal/web/static/js/app.js,code:internal/web/static/css/app.css | A:Web浏览器 | S:NetherNet数据端口占位与说明对齐默认使用监听端口；侧边栏含DNS凭据管理并支持申请证书免密联动
+index.html[EU8L]: F:Web管理面板单页应用HTML模板骨架，集成AppTime统一时间时区接入盒、系统时区配置、证书管理与预留端口 | R:code:internal/web/static/js/app.js,code:internal/web/static/css/app.css | A:Web浏览器 | S:集成AppTime收口全站日期/时间格式化与证书自然日历天差值计算；全局设置弹窗支持实时切换系统时区
 login.html[EU7M]: F:Web管理面板登录、注册与找回密码单页HTML模板及表单校验 | R:code:internal/web/static/css/app.css | A:Web浏览器 | S:公开访问页面，表单直接调用/api/auth相关公开端点
 
 ===E:/code/go-port-forward/internal/web/static/js/===
@@ -297,5 +298,5 @@ tunnet.go[RN8M]: F:封装wireguard/tun虚拟网卡创建、批量读写队列与
 ===E:/code/go-port-forward/internal/certmanager/===
 acme.go[KR8M]: F:封装RFC8555 ACME协议客户端，完成EAB外部账户绑定、DNS-01与HTTP-01挑战求解、CSR签发与证书链下载 | R:code:internal/certmanager/dns_provider.go,code:internal/certmanager/manual_dns.go | A:Service.ApplyACME,Service.Renew | S:EAB模式下同一KID必须复用已绑定的ACME账户私钥防400 malformed，已有账户优先走GetReg查询KID，contact留空免邮箱，HMAC Key需兼容多种Base64变体解码
 dns_provider.go[KS8L]: F:实现Cloudflare、阿里云、腾讯云DNSPod的DNS-01验证TXT记录写入与清理适配器 | R:code:internal/models/certificate.go | A:ACMEManager.ObtainCertificate | S:各服务商签名算法必须与官方文档一致，二级后缀域名需按三段切分根域，provider入参可能是litessl_*复合值须先归一化
-service.go[DR9L]: F:管理SSL证书上传、ACME申请（含全局LiteSSL账号继承、DNS凭据注入与手动解析）、到期自动续签调度与TLS证书内存热缓存 | R:code:internal/storage/certificate.go,code:internal/certmanager/acme.go,code:internal/certmanager/dns_provider.go,code:internal/certmanager/manual_dns.go | A:main,forward.Manager,web | S:EAB模式下同一KID复用已绑定账户私钥，ACME申请支持根据dns_credential_id免密注入已存凭据，剩余有效期≤30天触发续签，GetTLSCertificate走内存缓存热重载
+service.go[DR9L]: F:管理SSL证书上传、ACME申请（含全局LiteSSL账号继承、DNS凭据注入与手动解析）、到期自动续签调度与TLS证书内存热缓存 | R:code:internal/storage/certificate.go,code:internal/certmanager/acme.go,code:internal/certmanager/dns_provider.go,code:internal/certmanager/manual_dns.go | A:main,forward.Manager,web | S:LiteSSL目录地址自动归一化为最新官方v2端点，EAB复用已绑定账户私钥，续签调度走内存缓存热重载
 manual_dns.go[KR8L]: F:实现DNS-01手动解析两段式流程，创建Order后返回待添加TXT记录并由用户验证后签发证书 | R:code:internal/certmanager/acme.go | A:Service.PrepareManualDNS,Service.CompleteManualDNS | S:TXT记录必须先在公共DNS生效CA才验证，Order中间状态存内存并设30分钟TTL，certMeta必须传递并保存ACMEAccountKey以支持续签与EAB密钥复用

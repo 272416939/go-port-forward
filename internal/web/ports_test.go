@@ -312,3 +312,135 @@ func TestCreateRulePortConflictWithNetherNetInterceptsOnSave(t *testing.T) {
 	}
 }
 
+// TestReservedPortsEnforced 验证系统预留端口：
+// 1. checkPort 对预留端口返回 available: false；
+// 2. randomPort 随机分配时自动避开预留端口；
+// 3. createRule 创建规则监听在预留端口时直接被保存前拦截；
+// 4. NetherNet 数据端口落在预留端口时同样直接被保存前拦截。
+func TestReservedPortsEnforced(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	// 1. 管理员配置系统预留端口
+	reserved := "80, 443, 20050-20055, 39042"
+	if _, err := f.svc.UpdateSettings(&models.UpdateSettingsRequest{
+		ReservedPorts: &reserved,
+	}); err != nil {
+		t.Fatalf("update reserved ports: %v", err)
+	}
+
+	// 2. /api/ports/check 测试预留端口 20052 应返回 available=false
+	rec := httptest.NewRecorder()
+	f.h.checkPort(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/ports/check?port=20052", nil), f.admin))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checkPort status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	var checkResp struct {
+		Data PortCheckResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &checkResp); err != nil {
+		t.Fatal(err)
+	}
+	if checkResp.Data.Available {
+		t.Fatalf("预留端口 20052 checkPort 应返回 available=false")
+	}
+
+	// 3. randomPort 多次分发，验证绝对不会落在 20050-20055
+	for i := 0; i < 30; i++ {
+		rec = httptest.NewRecorder()
+		f.h.randomPort(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/ports/random", nil), f.alice))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("randomPort status=%d, body=%s", rec.Code, rec.Body.String())
+		}
+		var randResp struct {
+			Data PortCheckResult `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &randResp)
+		if randResp.Data.Port >= 20050 && randResp.Data.Port <= 20055 {
+			t.Fatalf("randomPort 分配了预留端口：%d", randResp.Data.Port)
+		}
+	}
+
+	// 4. 创建规则监听在预留端口 20052：保存前直接拦截
+	ruleBody := `{"name":"reserved-test","listen_addr":"0.0.0.0","listen_port":20052,"protocol":"tcp","transparent":false,"target_addr":"198.51.100.7","target_port":80,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", ruleBody, f.admin))
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusConflict {
+		t.Fatalf("预留端口规则应被拦截，得到 status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "预留端口") && !strings.Contains(rec.Body.String(), "reserved") {
+		t.Fatalf("拦截提示应说明为预留端口，得到：%s", rec.Body.String())
+	}
+
+	// 5. NetherNet 规则数据端口落在预留端口 39042：保存前直接拦截
+	nnBody := `{"name":"nn-reserved","listen_addr":"0.0.0.0","listen_port":21088,"protocol":"udp","transparent":true,"nethernet":true,"nethernet_tls":{"signal_port":21088,"data_port":39042},"target_addr":"10.66.0.3","target_port":19132,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", nnBody, f.admin))
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusConflict {
+		t.Fatalf("NetherNet 预留数据端口规则应被拦截，得到 status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "预留端口") && !strings.Contains(rec.Body.String(), "reserved") {
+		t.Fatalf("NetherNet 拦截提示应说明为预留端口，得到：%s", rec.Body.String())
+	}
+}
+
+// TestZeroQuotaGuestGroupBlocked 验证 0 配额游客分组：
+// 1. 管理员创建 0 配额组（codes=0, tunnels=0, rules=0）；
+// 2. 属于该组的用户不能创建访问码（返回 400 且提示无配额）；
+// 3. 属于该组的用户不能创建转发规则（返回 400 且提示无配额）；
+// 4. 属于该组的用户无法分配端口区间（randomPort 返回 400）。
+func TestZeroQuotaGuestGroupBlocked(t *testing.T) {
+	f := newTenantFixture(t)
+	defer f.cleanup()
+
+	// 1. 创建 0 配额游客组
+	zero := 0
+	guestGroup, err := f.svc.CreateGroup(&models.CreateGroupRequest{
+		Name:           "guest-group",
+		MaxAccessCodes: &zero,
+		MaxTunnels:     &zero,
+		MaxRules:       &zero,
+	})
+	if err != nil {
+		t.Fatalf("create guest group: %v", err)
+	}
+
+	// 2. 创建一个游客用户
+	guestUser, err := f.svc.Create(&models.CreateUserRequest{
+		Username: "guest_bob",
+		Password: "password123",
+		GroupID:  guestGroup.ID,
+	})
+	if err != nil {
+		t.Fatalf("create guest user: %v", err)
+	}
+
+	// 3. 尝试创建访问码：应被拦截
+	rec := httptest.NewRecorder()
+	f.h.createAccessCode(rec, postJSON("/api/access-codes", `{"name":"test-code"}`, guestUser))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("0 配额用户建访问码应返回 400，得到 status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "未分配访问码配额") && !strings.Contains(rec.Body.String(), "not permitted") {
+		t.Fatalf("错误文案应明确指出未分配配额：%s", rec.Body.String())
+	}
+
+	// 4. 尝试创建转发规则：应被拦截
+	ruleBody := `{"name":"test-rule","listen_addr":"0.0.0.0","listen_port":20010,"protocol":"tcp","transparent":false,"target_addr":"198.51.100.7","target_port":80,"enabled":true}`
+	rec = httptest.NewRecorder()
+	f.h.createRule(rec, postJSON("/api/rules", ruleBody, guestUser))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("0 配额用户建规则应返回 400，得到 status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "未分配转发规则配额") && !strings.Contains(rec.Body.String(), "not permitted") && !strings.Contains(rec.Body.String(), "尚未为你所在的用户组分配端口区间") {
+		t.Fatalf("错误文案应明确指出未分配配额或无端口区间：%s", rec.Body.String())
+	}
+
+	// 5. 尝试请求随机端口：由于 0 配额组未分配端口区间，应返回 400
+	rec = httptest.NewRecorder()
+	f.h.randomPort(rec, asUser(httptest.NewRequest(http.MethodGet, "/api/ports/random", nil), guestUser))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("0 配额用户请求端口应返回 400，得到 status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+

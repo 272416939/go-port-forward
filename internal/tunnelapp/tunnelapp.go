@@ -867,9 +867,9 @@ func (s *Server) handleHello(udpConn *net.UDPConn, pkt []byte, from netip.AddrPo
 		}
 	}
 
-	// 并发隧道上限：本访问码已在线时是重连，不占新配额。
-	if ident.MaxTunnels > 0 && !s.peers.online(ident.CodeID) {
-		if s.peers.countByUser(ident.UserID) >= ident.MaxTunnels {
+	// 并发隧道上限：本访问码已在线时是重连，不占新配额；MaxTunnels == 0 时直接拒绝接入。
+	if ident.MaxTunnels >= 0 && !s.peers.online(ident.CodeID) {
+		if ident.MaxTunnels == 0 || s.peers.countByUser(ident.UserID) >= ident.MaxTunnels {
 			reject(tunnel.RejectTunnelLimit)
 			return
 		}

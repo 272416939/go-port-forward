@@ -70,7 +70,7 @@ func TestACMEProviderLiteSSLFamily(t *testing.T) {
 	}
 
 	// 目录地址留空时校验必须兜底为官方固定地址
-	if DefaultLiteSSLDirectoryURL != "https://acme.freessl.cn/directory" {
+	if DefaultLiteSSLDirectoryURL != "https://acme.litessl.com/acme/v2/directory" {
 		t.Fatalf("DefaultLiteSSLDirectoryURL = %q", DefaultLiteSSLDirectoryURL)
 	}
 }

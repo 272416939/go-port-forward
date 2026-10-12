@@ -154,7 +154,7 @@ func writeUserError(w http.ResponseWriter, err error) {
 		fail(w, http.StatusNotFound, err.Error())
 	case isErr(err, storage.ErrUserExists):
 		fail(w, http.StatusConflict, err.Error())
-	case isErr(err, storage.ErrLastAdmin), isErr(err, storage.ErrTunPoolFull), isErr(err, users.ErrInvalidUser):
+	case isErr(err, storage.ErrLastAdmin), isErr(err, storage.ErrTunPoolFull), isErr(err, users.ErrInvalidUser), isErr(err, users.ErrQuotaExceeded):
 		fail(w, http.StatusBadRequest, err.Error())
 	default:
 		internalError(w, err)

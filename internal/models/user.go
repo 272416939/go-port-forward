@@ -169,6 +169,7 @@ type CurrentUser struct {
 	GroupName          string `json:"group_name,omitempty"`
 	Quota              Quota  `json:"quota"`
 	MustChangePassword bool   `json:"must_change_password"`
+	Timezone           string `json:"timezone,omitempty"`
 }
 
 // View 生成当前身份视图。quota 由调用方解析后传入（models 层不访问存储）。
@@ -186,6 +187,7 @@ func (u *User) View(quota Quota) CurrentUser {
 		GroupName:          quota.GroupName,
 		Quota:              quota,
 		MustChangePassword: u.MustChangePassword,
+		Timezone:           SystemTimezoneName(),
 	}
 }
 
@@ -220,9 +222,9 @@ func ValidateRole(role string) (string, error) {
 	return r, nil
 }
 
-// ValidatePortRange 校验端口区间（0/0 表示未配置，允许）。
+// ValidatePortRange 校验端口区间（0/0 或 -1/-1 表示未配置或跟随全局，允许）。
 func ValidatePortRange(start, end int) error {
-	if start == 0 && end == 0 {
+	if (start == 0 && end == 0) || (start == -1 && end == -1) {
 		return nil
 	}
 	if start <= 0 || start > 65535 || end <= 0 || end > 65535 {

@@ -72,7 +72,7 @@ func (s *Service) CreateAccessCode(owner *models.User, req *models.CreateAccessC
 	if name == "" {
 		// 允许不填名字：用户建第一个访问码时通常懒得起名，给一个能看出用途的
 		// 默认值比强制他填一个更顺手。
-		name = fmt.Sprintf("访问码-%s", time.Now().Format("0102-1504"))
+		name = fmt.Sprintf("访问码-%s", models.Now().Format("0102-1504"))
 	}
 	if err := models.ValidateAccessCodeName(name); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidUser, err)
@@ -90,7 +90,13 @@ func (s *Service) CreateAccessCode(owner *models.User, req *models.CreateAccessC
 		UserID:    owner.ID,
 		Name:      name,
 		Secret:    secret,
-		CreatedAt: time.Now(),
+		CreatedAt: models.Now(),
+	}
+	if quota.AccessCodeSource != models.QuotaFromAdmin && quota.AccessCodeSource != models.QuotaUnlimited {
+		if quota.MaxAccessCodes == 0 {
+			return nil, fmt.Errorf("%w: 你所在的用户组未分配访问码配额（无配额），无法创建访问码 | access code creation is not permitted for your group",
+				ErrQuotaExceeded)
+		}
 	}
 	pool, gw := s.TunnelPrefix()
 	if err := s.store.CreateAccessCode(c, pool, gw, quota.MaxAccessCodes); err != nil {
@@ -285,6 +291,10 @@ func (s *Service) Identity(codeID string) (CodeIdentity, bool) {
 	if qerr != nil {
 		return CodeIdentity{}, false
 	}
+	maxTunnels := quota.MaxTunnels
+	if quota.TunnelSource == models.QuotaFromAdmin || quota.TunnelSource == models.QuotaUnlimited {
+		maxTunnels = -1
+	}
 	return CodeIdentity{
 		CodeID:       c.ID,
 		CodeName:     c.Name,
@@ -295,7 +305,7 @@ func (s *Service) Identity(codeID string) (CodeIdentity, bool) {
 		CodeDisabled: c.Disabled,
 		UserDisabled: u.Disabled,
 		Fingerprint:  c.DeviceFingerprint,
-		MaxTunnels:   quota.MaxTunnels,
+		MaxTunnels:   maxTunnels,
 	}, true
 }
 

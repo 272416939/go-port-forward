@@ -27,6 +27,9 @@ func (h *handler) guardCreate(me *models.User, req *models.CreateRuleRequest) er
 	if me == nil {
 		return fmt.Errorf("未登录 | not authenticated")
 	}
+	if err := h.checkReservedPorts(req.ListenPort, req.Transparent, req.NetherNet, req.NetherNetTLS); err != nil {
+		return err
+	}
 	if me.IsAdmin() {
 		if req.UserID != "" {
 			if _, err := h.users.Get(req.UserID); err != nil {
@@ -61,6 +64,9 @@ func (h *handler) guardUpdate(me *models.User, ownerID string, req *models.Updat
 	if me == nil {
 		return fmt.Errorf("未登录 | not authenticated")
 	}
+	if err := h.checkReservedPorts(next.ListenPort, next.Transparent, next.NetherNet, next.NetherNetTLS); err != nil {
+		return err
+	}
 	if me.IsAdmin() {
 		if req.UserID != nil && *req.UserID != "" {
 			if _, err := h.users.Get(*req.UserID); err != nil {
@@ -87,6 +93,26 @@ func (h *handler) guardUpdate(me *models.User, ownerID string, req *models.Updat
 		return err
 	}
 	return h.checkTargetRule(me, next.Transparent, next.TargetAddr)
+}
+
+func (h *handler) checkReservedPorts(listenPort int, transparent bool, nethernet bool, tls *models.NetherNetTLS) error {
+	if h.users == nil {
+		return nil
+	}
+	cfg, err := h.users.Settings()
+	if err != nil || cfg.ReservedPorts == "" {
+		return nil
+	}
+	if models.IsPortReserved(listenPort, cfg.ReservedPorts) {
+		return fmt.Errorf("监听端口 %d 为系统预留端口，不可用于转发规则 | listen port %d is a reserved system port", listenPort, listenPort)
+	}
+	if transparent && nethernet {
+		_, dataPort := models.NetherNetPorts(listenPort, tls)
+		if dataPort > 0 && models.IsPortReserved(dataPort, cfg.ReservedPorts) {
+			return fmt.Errorf("NetherNet 数据端口 %d 为系统预留端口，不可用于转发规则 | data port %d is a reserved system port", dataPort, dataPort)
+		}
+	}
+	return nil
 }
 
 func (h *handler) checkCertScope(me *models.User, tlsCfg *models.NetherNetTLS) error {
@@ -187,13 +213,21 @@ var errPublicTarget = fmt.Errorf("目标地址不能是内网、回环或本机�
 var errTunnelTarget = fmt.Errorf(
 	"该地址属于隧道网段：经隧道转发的流量请使用透明代理模式（转发目标选访问码的隧道地址，仅 UDP），通用模式只转发到公网地址 | this address is inside the tunnel subnet; use transparent mode for tunnel traffic (UDP only), general mode forwards to public addresses only")
 
-// checkRuleQuota 校验规则数上限（0 表示不限）。
+// checkRuleQuota 校验规则数上限（QuotaUnlimited 表示不限；0 表示无配额）。
 func (h *handler) checkRuleQuota(me *models.User, quota models.Quota) error {
-	if quota.MaxRules <= 0 {
+	if me != nil && me.IsAdmin() {
 		return nil
 	}
-	if n := h.mgr.CountRulesByUser(me.ID); n >= quota.MaxRules {
-		return fmt.Errorf("规则数已达上限 %d 条 | rule quota reached (%d)", quota.MaxRules, quota.MaxRules)
+	if quota.RuleSource == models.QuotaUnlimited {
+		return nil
+	}
+	if quota.MaxRules == 0 {
+		return fmt.Errorf("你所在的用户组未分配转发规则配额（无配额），无法创建规则 | rule creation not permitted for your group (quota: 0)")
+	}
+	if quota.MaxRules > 0 {
+		if n := h.mgr.CountRulesByUser(me.ID); n >= quota.MaxRules {
+			return fmt.Errorf("规则数已达上限 %d 条 | rule quota reached (%d)", quota.MaxRules, quota.MaxRules)
+		}
 	}
 	return nil
 }

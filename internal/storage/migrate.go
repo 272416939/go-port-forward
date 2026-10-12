@@ -79,6 +79,13 @@ func migrate(db *bolt.DB) (migrateResult, error) {
 			cfg.SchemaVersion = 2
 		}
 
+		if cfg.SchemaVersion < 3 {
+			if err := migrateV2ToV3Tx(tx); err != nil {
+				return err
+			}
+			cfg.SchemaVersion = 3
+		}
+
 		return writeSettingsTx(tx, cfg)
 	})
 	return res, err
@@ -131,10 +138,13 @@ func ensureDefaultGroupTx(tx *bolt.Tx, cfg models.Settings) (string, error) {
 	now := time.Now()
 	g := models.UserGroup{
 		CreatedAt: now, UpdatedAt: now,
-		ID:        uuid.NewString(),
-		Name:      "default",
-		Comment:   "默认组：配额取全局设置 | default group, quotas follow global settings",
-		IsDefault: true,
+		ID:             uuid.NewString(),
+		Name:           "default",
+		Comment:        "默认组：配额取全局设置 | default group, quotas follow global settings",
+		MaxAccessCodes: -1,
+		MaxTunnels:     -1,
+		MaxRules:       -1,
+		IsDefault:      true,
 	}
 	data, err := json.Marshal(&g)
 	if err != nil {
@@ -303,4 +313,53 @@ func migratedGroupName(start, end, rules int) string {
 		return fmt.Sprintf("migrated-%d-%d", start, end)
 	}
 	return fmt.Sprintf("migrated-rules-%d", rules)
+}
+
+// migrateV2ToV3Tx 将 v2 存量用户组中表示「未配置/跟随全局」的 0 值升级为 -1，
+// 从而把 0 释放为「明确分配 0 配额（无配额/游客）」。
+func migrateV2ToV3Tx(tx *bolt.Tx) error {
+	b := tx.Bucket(groupsBucket)
+	if b == nil {
+		return nil
+	}
+	type item struct {
+		key  []byte
+		data []byte
+	}
+	var updates []item
+	if err := b.ForEach(func(k, v []byte) error {
+		var g models.UserGroup
+		if err := json.Unmarshal(v, &g); err != nil {
+			return err
+		}
+		changed := false
+		if g.MaxAccessCodes == 0 {
+			g.MaxAccessCodes = -1
+			changed = true
+		}
+		if g.MaxTunnels == 0 {
+			g.MaxTunnels = -1
+			changed = true
+		}
+		if g.MaxRules == 0 {
+			g.MaxRules = -1
+			changed = true
+		}
+		if changed {
+			data, err := json.Marshal(&g)
+			if err != nil {
+				return err
+			}
+			updates = append(updates, item{key: append([]byte(nil), k...), data: data})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, up := range updates {
+		if err := b.Put(up.key, up.data); err != nil {
+			return err
+		}
+	}
+	return nil
 }

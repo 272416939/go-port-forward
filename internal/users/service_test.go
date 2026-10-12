@@ -83,7 +83,7 @@ func (f *fixture) mustUser(t *testing.T, name, role, groupID string) *models.Use
 func (f *fixture) mustGroup(t *testing.T, name string, maxCodes int) *models.UserGroup {
 	t.Helper()
 	g, err := f.svc.CreateGroup(&models.CreateGroupRequest{
-		Name: name, MaxAccessCodes: maxCodes,
+		Name: name, MaxAccessCodes: &maxCodes,
 	})
 	if err != nil {
 		t.Fatalf("create group %s: %v", name, err)
@@ -171,7 +171,7 @@ func TestGroupCannotExceedGlobal(t *testing.T) {
 	f := newService(t)
 	tooMany := 99
 	_, err := f.svc.CreateGroup(&models.CreateGroupRequest{
-		Name: "greedy", MaxAccessCodes: tooMany,
+		Name: "greedy", MaxAccessCodes: &tooMany,
 	})
 	if !errors.Is(err, ErrInvalidUser) {
 		t.Fatalf("组上限超过全局应被拒，得到 %v", err)
@@ -182,7 +182,7 @@ func TestGroupCannotExceedGlobal(t *testing.T) {
 	if err := f.store.SaveSettings(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.CreateGroup(&models.CreateGroupRequest{Name: "free", MaxAccessCodes: 99}); err != nil {
+	if _, err := f.svc.CreateGroup(&models.CreateGroupRequest{Name: "free", MaxAccessCodes: &tooMany}); err != nil {
 		t.Fatalf("全局不限时组可自由设值：%v", err)
 	}
 }
@@ -468,7 +468,7 @@ func TestAccessCodeAddrPriority(t *testing.T) {
 
 func TestIdentity(t *testing.T) {
 	f := newService(t)
-	g := f.mustGroup(t, "g", 0)
+	g := f.mustGroup(t, "g", -1)
 	// 组级隧道上限 0 → 全局值。
 	u := f.mustUser(t, "alice", models.RoleUser, g.ID)
 	c := f.mustCode(t, u, "home")

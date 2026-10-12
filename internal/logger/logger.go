@@ -1,8 +1,11 @@
 package logger
 
 import (
-	"go-port-forward/internal/config"
 	"os"
+	"time"
+
+	"go-port-forward/internal/config"
+	"go-port-forward/internal/models"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -27,7 +30,9 @@ func Init(cfg config.LogConfig) error {
 
 	jsonEnc := zap.NewProductionEncoderConfig()
 	jsonEnc.TimeKey = "ts"
-	jsonEnc.EncodeTime = zapcore.ISO8601TimeEncoder
+	jsonEnc.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		zapcore.ISO8601TimeEncoder(models.InSystemTimezone(t), enc)
+	}
 
 	fileCore := zapcore.NewCore(zapcore.NewJSONEncoder(jsonEnc), zapcore.AddSync(rotator), level)
 	consoleCore := zapcore.NewCore(zapcore.NewJSONEncoder(jsonEnc), zapcore.AddSync(os.Stdout), level)

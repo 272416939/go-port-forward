@@ -179,7 +179,7 @@ func TestInjectGlobalACMEDefaults(t *testing.T) {
 	// 1. 管理员保存全局 LiteSSL 账号
 	enabled := true
 	allowUser := true
-	dir := "https://acme.freessl.cn/directory"
+	dir := "https://acme.litessl.com/acme/v2/directory"
 	kid := "global-eab-kid"
 	hmac := "global-eab-hmac"
 	_, err = svc.UpdateGlobalACMEConfig(&models.UpdateGlobalACMEConfigRequest{
@@ -238,7 +238,7 @@ func TestEABAccountKeyReuseAndPersistenceAcrossDeletions(t *testing.T) {
 
 	enabled := true
 	allowUser := true
-	dir := "https://acme.freessl.cn/directory"
+	dir := "https://acme.litessl.com/acme/v2/directory"
 	kid := "test-kid-123"
 	hmac := "test-hmac-456"
 

@@ -60,7 +60,8 @@ func (h *handler) checkPort(w http.ResponseWriter, r *http.Request) {
 		writeGuardError(w, fmt.Errorf("端口 %d 超出你的配额区间 | port %d is outside your quota range", port, port))
 		return
 	}
-	available := !h.mgr.IsPortUsed(port) && portBindable(port)
+	cfg, _ := h.users.Settings()
+	available := !models.IsPortReserved(port, cfg.ReservedPorts) && !h.mgr.IsPortUsed(port) && portBindable(port)
 	ok(w, PortCheckResult{Port: port, Available: available})
 }
 
@@ -90,9 +91,13 @@ func (h *handler) randomPort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg, _ := h.users.Settings()
 	origin := start + rand.Intn(end-start+1)
 	for i := 0; i < 50; i++ {
 		p := start + (origin-start+i)%(end-start+1)
+		if models.IsPortReserved(p, cfg.ReservedPorts) {
+			continue
+		}
 		if !h.mgr.IsPortUsed(p) && portBindable(p) {
 			ok(w, PortCheckResult{Port: p, Available: true})
 			return

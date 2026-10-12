@@ -5,13 +5,14 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SchemaVersion 是当前的数据模型版本。
 //
 // 迁移靠它判定是否已执行过（见 internal/storage/migrate.go）。加一次不可逆的
 // 数据结构变更就加一，不要复用旧号。
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // 每用户连接日志保留上限的默认值与允许区间。不做「0 = 不限」：日志是攻击者
 // 可以低成本刷量的数据面（denied 事件限频后仍可持续产生），不限等于给磁盘
@@ -32,6 +33,10 @@ type Settings struct {
 	// 落在其内；0/0 表示不限制（管理员未配置）。
 	PortRangeStart int `json:"port_range_start"`
 	PortRangeEnd   int `json:"port_range_end"`
+
+	// ReservedPorts 是系统预留端口列表（逗号分隔的单端口或端口段，如 "80, 443, 3306, 19132-19139"）。
+	// 预留端口不参与随机端口分配，且禁止被任何转发规则使用。
+	ReservedPorts string `json:"reserved_ports"`
 
 	// 下面三项是组未单独配置（值为 0）时的兜底上限。0 表示不限。
 	MaxAccessCodesPerUser int `json:"max_access_codes_per_user"`
@@ -55,6 +60,9 @@ type Settings struct {
 	// 会把接入码指向 CDN 而不是真实节点，客户端从此连不上隧道。
 	RelayAddr string `json:"relay_addr"`
 
+	// Timezone 是系统全局时区（IANA 时区标识，如 "Asia/Shanghai"、"UTC"），默认 "Asia/Shanghai"。
+	Timezone string `json:"timezone"`
+
 	// SchemaVersion 记录数据已迁移到哪个版本，迁移逻辑据此保持幂等。
 	SchemaVersion int `json:"schema_version"`
 }
@@ -71,6 +79,7 @@ func DefaultSettings() Settings {
 		MaxTunnelsPerUser:     3,
 		MaxRulesPerUser:       10,
 		ConnLogMaxPerUser:     ConnLogMaxDefault,
+		Timezone:              DefaultTimezone,
 		SchemaVersion:         SchemaVersion,
 	}
 }
@@ -79,6 +88,7 @@ func DefaultSettings() Settings {
 type UpdateSettingsRequest struct {
 	PortRangeStart        *int    `json:"port_range_start"`
 	PortRangeEnd          *int    `json:"port_range_end"`
+	ReservedPorts         *string `json:"reserved_ports"`
 	MaxAccessCodesPerUser *int    `json:"max_access_codes_per_user"`
 	MaxTunnelsPerUser     *int    `json:"max_tunnels_per_user"`
 	MaxRulesPerUser       *int    `json:"max_rules_per_user"`
@@ -86,12 +96,76 @@ type UpdateSettingsRequest struct {
 	DefaultGroupID        *string `json:"default_group_id"`
 	EnableRegistration    *bool   `json:"enable_registration"`
 	RelayAddr             *string `json:"relay_addr"`
+	Timezone              *string `json:"timezone"`
+}
+
+// PortRange 表示一个闭区间端口范围 [Start, End]。
+type PortRange struct {
+	Start int
+	End   int
+}
+
+// ParseReservedPorts 解析逗号/分号/空格分隔的系统预留端口字符串。
+// 支持单端口（如 "80"）和端口段（如 "19132-19139"）。
+func ParseReservedPorts(raw string) ([]PortRange, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	var ranges []PortRange
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.Contains(p, "-") {
+			bounds := strings.SplitN(p, "-", 2)
+			start, err1 := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err1 != nil || err2 != nil || start < 1 || start > 65535 || end < 1 || end > 65535 || start > end {
+				return nil, fmt.Errorf("无效的预留端口区间 %q（端口需在 1~65535 且起始不大于结束）| invalid reserved port range %q", p, p)
+			}
+			ranges = append(ranges, PortRange{Start: start, End: end})
+		} else {
+			port, err := strconv.Atoi(p)
+			if err != nil || port < 1 || port > 65535 {
+				return nil, fmt.Errorf("无效的预留端口号 %q（端口需在 1~65535）| invalid reserved port %q", p, p)
+			}
+			ranges = append(ranges, PortRange{Start: port, End: port})
+		}
+	}
+	return ranges, nil
+}
+
+// IsPortReserved 判断给定端口是否命中系统预留端口集合。
+func IsPortReserved(port int, reservedRaw string) bool {
+	if port <= 0 || port > 65535 || strings.TrimSpace(reservedRaw) == "" {
+		return false
+	}
+	ranges, err := ParseReservedPorts(reservedRaw)
+	if err != nil {
+		return false
+	}
+	for _, r := range ranges {
+		if port >= r.Start && port <= r.End {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateSettings 校验全局设置自身的合法性。
 func ValidateSettings(s *Settings) error {
 	if err := ValidatePortRange(s.PortRangeStart, s.PortRangeEnd); err != nil {
 		return err
+	}
+	if s.ReservedPorts != "" {
+		if _, err := ParseReservedPorts(s.ReservedPorts); err != nil {
+			return err
+		}
 	}
 	for name, v := range map[string]int{
 		"访问码上限 | max_access_codes_per_user": s.MaxAccessCodesPerUser,
@@ -109,14 +183,22 @@ func ValidateSettings(s *Settings) error {
 	if err := ValidateRelayAddr(s.RelayAddr); err != nil {
 		return err
 	}
+	if strings.TrimSpace(s.Timezone) != "" {
+		if _, err := time.LoadLocation(strings.TrimSpace(s.Timezone)); err != nil {
+			return fmt.Errorf("无效的时区标识 %q（需为合法的 IANA 时区，如 Asia/Shanghai、UTC）| invalid timezone %q", s.Timezone, s.Timezone)
+		}
+	}
 	return nil
 }
 
 // NormalizeSettings 补齐旧版本设置记录里缺失的字段（JSON 覆盖式落盘，旧记录
-// 反序列化后新字段为零值）：日志保留上限回落到默认值，保证限额语义始终成立。
+// 反序列化后新字段为零值）：日志保留上限与时区回落到默认值，保证语义始终成立。
 func NormalizeSettings(s Settings) Settings {
 	if s.ConnLogMaxPerUser < ConnLogMaxMin || s.ConnLogMaxPerUser > ConnLogMaxLimit {
 		s.ConnLogMaxPerUser = ConnLogMaxDefault
+	}
+	if strings.TrimSpace(s.Timezone) == "" {
+		s.Timezone = DefaultTimezone
 	}
 	return s
 }
@@ -212,9 +294,10 @@ func AdminQuota() Quota {
 
 // ResolveQuota 按「组优先、全局兜底」算出有效配额。
 //
-// 组值为 0 表示该项未单独配置，回落到全局值；全局值也为 0 则不限。
-// 端口区间不做这种回落——区间是成对的，混用组的起点与全局的终点会得到一个
-// 谁都没配过的范围。
+// 组值为 -1 表示该项未单独配置，回落到全局值；组值 >= 0（含 0 = 无配额）优先采用组值；
+// 全局值也为 0 则不限。
+// 端口区间不做单端回落——区间是成对的，混用组的起点与全局的终点会得到一个
+// 谁都没配过的范围。若组明确设了 0 规则配额且未设端口区间，则锁定为未分配（0/0）。
 func ResolveQuota(g *UserGroup, s Settings) Quota {
 	q := Quota{
 		PortRangeStart: s.PortRangeStart,
@@ -226,14 +309,21 @@ func ResolveQuota(g *UserGroup, s Settings) Quota {
 		if g.PortRangeStart > 0 && g.PortRangeEnd > 0 {
 			q.PortRangeStart, q.PortRangeEnd = g.PortRangeStart, g.PortRangeEnd
 			q.PortSource = QuotaFromGroup
+		} else if g.PortRangeStart == -1 || g.PortRangeEnd == -1 || g.MaxRules == 0 {
+			q.PortRangeStart, q.PortRangeEnd = 0, 0
+			q.PortSource = QuotaFromGroup
 		}
 	}
 	if q.PortRangeStart <= 0 || q.PortRangeEnd <= 0 {
-		q.PortSource = QuotaUnlimited
+		if g != nil && (g.PortRangeStart == -1 || g.PortRangeEnd == -1 || g.MaxRules == 0) {
+			q.PortSource = QuotaFromGroup
+		} else {
+			q.PortSource = QuotaUnlimited
+		}
 	}
 
 	pick := func(groupVal, globalVal int) (int, QuotaSource) {
-		if groupVal > 0 {
+		if groupVal >= 0 {
 			return groupVal, QuotaFromGroup
 		}
 		if globalVal > 0 {
@@ -241,7 +331,7 @@ func ResolveQuota(g *UserGroup, s Settings) Quota {
 		}
 		return 0, QuotaUnlimited
 	}
-	var gc, gt, gr int
+	gc, gt, gr := -1, -1, -1
 	if g != nil {
 		gc, gt, gr = g.MaxAccessCodes, g.MaxTunnels, g.MaxRules
 	}

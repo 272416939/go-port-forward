@@ -70,6 +70,12 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	if req.RelayAddr != nil {
 		next.RelayAddr = strings.TrimSpace(*req.RelayAddr)
 	}
+	if req.ReservedPorts != nil {
+		next.ReservedPorts = strings.TrimSpace(*req.ReservedPorts)
+	}
+	if req.Timezone != nil {
+		next.Timezone = strings.TrimSpace(*req.Timezone)
+	}
 	if err := models.ValidateSettings(&next); err != nil {
 		return cur, fmt.Errorf("%w: %v", ErrInvalidUser, err)
 	}
@@ -93,12 +99,14 @@ func (s *Service) UpdateSettings(req *models.UpdateSettingsRequest) (models.Sett
 	if err := s.store.SaveSettings(next); err != nil {
 		return cur, err
 	}
+	_ = models.ApplyTimezone(next.Timezone)
 	logger.S.Infow("全局设置已更新 | global settings updated",
 		"port_range", fmt.Sprintf("%d-%d", next.PortRangeStart, next.PortRangeEnd),
 		"max_codes", next.MaxAccessCodesPerUser, "max_tunnels", next.MaxTunnelsPerUser,
 		"max_rules", next.MaxRulesPerUser, "connlog_max_per_user", next.ConnLogMaxPerUser,
 		"registration", next.EnableRegistration,
-		"relay_addr", next.RelayAddr)
+		"relay_addr", next.RelayAddr,
+		"timezone", next.Timezone)
 	return next, nil
 }
 
@@ -169,15 +177,27 @@ func (s *Service) CreateGroup(req *models.CreateGroupRequest) (*models.UserGroup
 	if err != nil {
 		return nil, err
 	}
+	maxCodes := -1
+	if req.MaxAccessCodes != nil {
+		maxCodes = *req.MaxAccessCodes
+	}
+	maxTunnels := -1
+	if req.MaxTunnels != nil {
+		maxTunnels = *req.MaxTunnels
+	}
+	maxRules := -1
+	if req.MaxRules != nil {
+		maxRules = *req.MaxRules
+	}
 	g := &models.UserGroup{
 		ID:             uuid.NewString(),
 		Name:           models.NormalizeGroupName(req.Name),
 		Comment:        strings.TrimSpace(req.Comment),
 		PortRangeStart: req.PortRangeStart,
 		PortRangeEnd:   req.PortRangeEnd,
-		MaxAccessCodes: req.MaxAccessCodes,
-		MaxTunnels:     req.MaxTunnels,
-		MaxRules:       req.MaxRules,
+		MaxAccessCodes: maxCodes,
+		MaxTunnels:     maxTunnels,
+		MaxRules:       maxRules,
 		IsDefault:      req.IsDefault,
 	}
 	if err := models.ValidateGroupName(g.Name); err != nil {
@@ -319,11 +339,14 @@ func (s *Service) ensureDefaultGroup() (string, error) {
 		}
 	}
 	g := &models.UserGroup{
-		ID:        uuid.NewString(),
-		Name:      "default",
-		Comment:   "默认组：配额取全局设置 | default group, quotas follow global settings",
-		IsDefault: true,
-		CreatedAt: time.Now(),
+		ID:             uuid.NewString(),
+		Name:           "default",
+		Comment:        "默认组：配额取全局设置 | default group, quotas follow global settings",
+		MaxAccessCodes: -1,
+		MaxTunnels:     -1,
+		MaxRules:       -1,
+		IsDefault:      true,
+		CreatedAt:      time.Now(),
 	}
 	if err := s.store.SaveGroup(g); err != nil {
 		return "", err

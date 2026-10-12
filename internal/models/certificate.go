@@ -53,7 +53,7 @@ const (
 // （如手动添加 TXT 记录或填写自己的 DNS Token）并填写域名即可签发。
 type GlobalACMEConfig struct {
 	Enabled        bool   `json:"enabled"`
-	DirectoryURL   string `json:"directory_url"`   // 目录地址（默认 https://acme.freessl.cn/directory）
+	DirectoryURL   string `json:"directory_url"`   // 目录地址（默认 https://acme.litessl.com/acme/v2/directory）
 	EABKID         string `json:"eab_kid"`         // LiteSSL EAB KID
 	EABHMACKey     string `json:"-"`               // LiteSSL EAB HMAC Key（永不经 API 回显）
 	AccountKey     string `json:"-"`               // 绑定的 ACME 账户私钥 PEM（按 EAB 账号全局持久化复用，永不经 API 回显）
@@ -87,10 +87,7 @@ func (c *GlobalACMEConfig) View() GlobalACMEView {
 			AllowUserApply: true,
 		}
 	}
-	dir := c.DirectoryURL
-	if dir == "" {
-		dir = DefaultLiteSSLDirectoryURL
-	}
+	dir := NormalizeLiteSSLDirectoryURL(c.DirectoryURL)
 	return GlobalACMEView{
 		Enabled:        c.Enabled,
 		DirectoryURL:   dir,
@@ -135,9 +132,7 @@ func ValidateGlobalACMEConfig(c *GlobalACMEConfig) error {
 	if c == nil || !c.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(c.DirectoryURL) == "" {
-		c.DirectoryURL = DefaultLiteSSLDirectoryURL
-	}
+	c.DirectoryURL = NormalizeLiteSSLDirectoryURL(c.DirectoryURL)
 	if !strings.HasPrefix(strings.ToLower(c.DirectoryURL), "http") {
 		return fmt.Errorf("LiteSSL 目录地址必须以 http(s) 开头 | directory URL must start with http(s)")
 	}
@@ -148,12 +143,20 @@ func ValidateGlobalACMEConfig(c *GlobalACMEConfig) error {
 }
 
 
-// DefaultLiteSSLDirectoryURL 是 LiteSSL 的 ACME 目录地址默认值。
-//
-// 该地址由 FreeSSL 官方固定（见 blog.freessl.cn「FreeSSL.cn 的 ACME 服务器
-// 地址」），因此可安全地作为默认值预填——用户只有在自建/代理 ACME 端点时才
-// 需要改动。宝塔正是把这个地址写死在代码里，用户才看不到这一项。
-const DefaultLiteSSLDirectoryURL = "https://acme.freessl.cn/directory"
+// DefaultLiteSSLDirectoryURL 是 LiteSSL 的 ACME v2 官方目录地址默认值。
+const DefaultLiteSSLDirectoryURL = "https://acme.litessl.com/acme/v2/directory"
+
+// LegacyLiteSSLDirectoryURL 是旧版目录地址，统一自动升级为最新官方地址。
+const LegacyLiteSSLDirectoryURL = "https://acme.freessl.cn/directory"
+
+// NormalizeLiteSSLDirectoryURL 规范化 LiteSSL 目录地址，空串或旧版地址统一归一化为最新官方地址。
+func NormalizeLiteSSLDirectoryURL(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" || u == LegacyLiteSSLDirectoryURL {
+		return DefaultLiteSSLDirectoryURL
+	}
+	return u
+}
 
 // litesslPrefix 是 LiteSSL 族 provider 取值的前缀。
 const litesslPrefix = "litessl"
@@ -418,12 +421,8 @@ func ValidateApplyACMERequest(req *ApplyACMERequest) error {
 			return fmt.Errorf("请填写有效的通知邮箱（用于 Let's Encrypt 账户注册）| a valid email address is required")
 		}
 	} else {
-		// 目录地址留空时用官方固定地址兜底——宝塔正是把它写死在代码里，用户才
-		// 看不到这一项。只有自建/代理 ACME 端点时才需要改动。
-		req.DirectoryURL = strings.TrimSpace(req.DirectoryURL)
-		if req.DirectoryURL == "" {
-			req.DirectoryURL = DefaultLiteSSLDirectoryURL
-		}
+		// 目录地址留空或为旧地址时用最新官方固定地址兜底。
+		req.DirectoryURL = NormalizeLiteSSLDirectoryURL(req.DirectoryURL)
 		if !strings.HasPrefix(strings.ToLower(req.DirectoryURL), "http") {
 			return fmt.Errorf("LiteSSL 的 ACME 目录地址必须以 http(s) 开头 | LiteSSL ACME directory URL must start with http(s)")
 		}
